@@ -565,7 +565,13 @@ time as the scarce resource. Five rules:
    `level` would be written by Harbor, composed from the parts: same head, same base, clean trees,
    no package scope, and the union of `passed` covering the plan Keelokit gives for that diff
    (`verify_tools.py plan --base`, plus the secret scan and the doctor). That makes Harbor vouch
-   for a whole verify no single run made. **Needs your ok**, or the split stays out.
+   for a whole verify no single run made. **Decided 2026-11-01: postponed.** The convoy verify is one
+   whole run on one machine until the step times recorded in the seals of real convoys show where
+   the minutes go. If one step takes most of the run, splitting can't wait less than that step, and
+   making that step faster pays more. If the time is spread across steps and integrator machines
+   sit idle while a convoy verifies, the split comes back for a decision, with two conditions: the
+   composition rule tested against Keelokit's real code, and a composed seal marked as composed in
+   the logbook.
 5. **Overlap convoys instead of lining them up.** A convoy doesn't wait for its slowest vessel: the
    skipper defers a late expected vessel to the next convoy (`convoy defer`, *phase 2*). One more
    convoy costs one scoped verify; waiting costs every other vessel its latency (§1.8). A convoy
