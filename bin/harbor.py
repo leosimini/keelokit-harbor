@@ -61,7 +61,8 @@ NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 PUSH_ATTEMPTS = 5
 DEFAULTS = {
     "integrator": "any",
-    "vessel_verify": "pnpm verify --since {base}",
+    # Keelokit's scoped verify against main; --keep-going lists every red in one run (one fix round).
+    "vessel_verify": "pnpm verify --since {base} --keep-going",
     # JOUNA's values (survey 5.3): a control at least every 90 minutes, relief after 3 hours.
     "control_every_minutes": 90,
     "watch_expiry_minutes": 180,
@@ -617,7 +618,7 @@ def cmd_seal(args) -> int:
     if not base:
         raise HarborError("NO_MAIN", f"{REMOTE} has no {MAIN}")
     cmd = cfg["vessel_verify"].format(base=base, head=head, branch=branch)
-    started, t0 = now(), time.monotonic()
+    started, t0, wall = now(), time.monotonic(), int(time.time()) - 1
     print(f"harbor: sealing {branch}@{short(head)} with `{cmd}`", flush=True)
     try:
         rc = subprocess.run(shlex.split(cmd), cwd=ROOT).returncode
@@ -630,6 +631,12 @@ def cmd_seal(args) -> int:
     seal = {"schema": SCHEMA, "kind": "vessel", "head": head, "branch": branch, "base": base, "command": cmd, "exit": rc,
             "result": "pass" if rc == 0 else "fail", "started": started, "finished": now(),
             "duration_seconds": duration, "by": me["id"]}
+    if entry := keelokit_history(head, wall):
+        seal["keelokit_level"] = str(entry.get("level") or "") or None
+        seal["failed_steps"] = [str(f) for f in entry.get("failed") or []]
+        seal["causes"] = [str(c) for c in entry.get("causes") or []]
+        seal["steps"] = [{"name": str(n), "seconds": int(t)} for n, t in entry.get("steps") or []
+                         if isinstance(t, (int, float))]
 
     def mutate(files, h):
         save(files, f"harbor/seals/{head}.toml", seal)
@@ -637,6 +644,25 @@ def cmd_seal(args) -> int:
     transact(f"seal {branch}@{short(head)} exit {rc}", me["id"], mutate)
     print(f"harbor: seal for {short(head)} recorded: {seal['result']} (exit {rc}, {duration} s)")
     return 0 if rc == 0 else 1
+
+
+def keelokit_history(head: str, since: float) -> dict | None:
+    """The line Keelokit's verify.sh appended to keelokit-verify.history for this run, if it wrote one:
+    time per step, failed steps, known causes. Read, never required: any other command leaves none."""
+    common = Path(git("rev-parse", "--git-common-dir"))
+    path = (common if common.is_absolute() else ROOT / common) / "keelokit-verify.history"
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and head.startswith(str(entry.get("head") or "-")) and entry.get("t", 0) >= since:
+            return entry
+    return None
 
 
 def hotspots_of(paths: list[str], spots: dict) -> list[str]:

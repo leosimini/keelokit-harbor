@@ -339,6 +339,40 @@ class TestSeal(Base):
         self.assertEqual(seal["command"], f"test {seal['base']} != x")
 
 
+class TestSealSteps(Base):
+    """A seal copies Keelokit's per-step timings for that run, so the logbook can show where verify time goes."""
+    verify = "sh .keelokit/fake-verify.sh {head}"
+
+    def test_the_steps_of_the_run_are_recorded(self):
+        script = self.a / ".keelokit/fake-verify.sh"
+        script.write_text(
+            'h=$(git rev-parse --git-common-dir)/keelokit-verify.history\n'
+            'echo \'{"t": 1, "head": "old", "steps": [["unit", 9]]}\' >> "$h"\n'
+            'printf \'{"t": %s, "head": "%s", "level": "changed", "result": "pass", "rc": 0, '
+            '"steps": [["lint", 12], ["unit", 340], ["e2e-stack", 1210]], "failed": [], "causes": []}\\n\' '
+            '"$(date +%s)" "$(echo "$1" | cut -c1-12)" >> "$h"\n')
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "fake verify")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        self.ready(role="vessel")
+        head = vessel(self.a, "claude/qa-1", "apps/web/a.ts")
+        ok(harbor(self.a, "seal"))
+        seal = self.repo.log_toml(f"harbor/seals/{head}.toml")
+        self.assertEqual(seal["steps"], [{"name": "lint", "seconds": 12}, {"name": "unit", "seconds": 340},
+                                         {"name": "e2e-stack", "seconds": 1210}])
+        self.assertEqual((seal["keelokit_level"], seal["failed_steps"]), ("changed", []))
+
+    def test_without_a_history_line_the_seal_has_no_steps(self):
+        (self.a / ".keelokit/fake-verify.sh").write_text("exit 0\n")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "fake verify")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        self.ready(role="vessel")
+        head = vessel(self.a, "claude/qa-1", "apps/web/a.ts")
+        ok(harbor(self.a, "seal"))
+        self.assertNotIn("steps", self.repo.log_toml(f"harbor/seals/{head}.toml"))
+
+
 class TestRedSeal(Base):
     verify = "false"
 

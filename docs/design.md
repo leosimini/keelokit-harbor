@@ -45,7 +45,8 @@ Harbor depends on Keelokit and copies none of its code. It uses these as interfa
 | `.keelokit/` present | SessionStart: without it Harbor says so and does nothing |
 | `[landing] policy = "convoy"` in `.keelokit/state.toml` | the switch. **Assumption:** the key name; Keelokit is adding it in parallel. Also assumed: with this policy `build-story` stops at a pushed branch instead of pushing to `main` (its step 7 pushes today). Both to validate against Keelokit's change |
 | `pnpm verify --since REF` | the vessel's own verify (its part only, routed by `verify-routing.toml`) |
-| `pnpm verify [--all] --keep-going`, `--preflight` | the convoy's one verify, after a preflight that fails in minutes on missing tools or a busy machine (VER-1) |
+| `pnpm verify --keep-going`, `--all`, `--preflight` | the convoy's one verify, scoped by its diff (`--all` by exception), after a preflight that fails in minutes on missing tools or a busy machine (VER-1) |
+| `keelokit-verify.history` | time and result per step of each run, copied into the seal: where verify time goes |
 | the seal (`keelokit-verify.seal`, `--use-seal`) | the push to `main` from the machine that ran the convoy verify skips the repeat. Keelokit's seal is per clone and `--since` is never sealed (`verify.sh:17`, `:70`), so the vessel's result is recorded by Harbor, in the logbook |
 | `doctor.py --scope ID`, `--brief` | the vessel session's own check before it delivers; Harbor does not rerun it *(phase 2: record its exit in the seal)* |
 | `status.py`, `ci.py health` | the harbormaster's round: machine state, CI of `main` |
@@ -63,7 +64,9 @@ policy = "convoy"                  # Keelokit's key; Harbor runs only with this 
 
 [harbor]
 integrator = "any"                 # "any": a convoy's skipper integrates on its own machine; or a pilot account name
-vessel_verify = "pnpm verify --since {base}"   # {base} = origin/main when the seal runs; also {head}, {branch}
+vessel_verify = "pnpm verify --since {base} --keep-going"   # {base} = origin/main when the seal runs; also {head}, {branch}
+convoy_verify = "pnpm verify --keep-going"          # (2) level "changed": scoped by the convoy's diff against main
+convoy_verify_all = "pnpm verify --all --keep-going" # (2) level "all": only what the routing can't bound
 control_every_minutes = 90         # JOUNA's value (§5.3)
 watch_expiry_minutes = 180         # JOUNA's value (§5.3): relief after 3 hours without a control
 
@@ -274,7 +277,14 @@ started = "2026-11-01T10:52:00Z"
 finished = "2026-11-01T11:06:00Z"
 duration_seconds = 840
 by = "leo/mbp/session_01Abc"
-level = "all"                    # (2) kind = convoy: the level the ok asked for
+keelokit_level = "changed"       # from keelokit-verify.history, when verify.sh wrote a line for this run
+failed_steps = []
+causes = []                      # Keelokit's known causes of a red, by id
+level = "changed"                # (2) kind = convoy: the level the ok asked for
+
+[[steps]]                        # one per step of the run, in order
+name = "unit"
+seconds = 340
 ```
 
 `harbor.py seal` runs the command itself on a clean tree and refuses to record if `HEAD` or the
@@ -325,6 +335,7 @@ board written from that description, not the real file.
 | ready → verifying | `convoy sail --ok` *(2)* | the harbormaster, holding an unexpired watch | the ok conditions below |
 | verifying → verifying | `convoy verify` *(2)* | the integrator | a run, green or red; fixes in between |
 | verifying → sailed | `convoy sail` *(2)* | the integrator | green convoy seal on the exact head at the ok's level; `main` still the ok's base |
+| assembling, waiting → same | `convoy defer N STORY` *(2)* | the skipper | an expected vessel is late: it leaves `expected` and goes to the next convoy, so the rest don't wait for it. **Needs your ok:** not in the agreed command list |
 | any open → aborted | `convoy abort` *(2)* | the skipper or the harbormaster | with a reason. **Needs your ok:** `abort` is not in the agreed command list |
 
 "Sail = ok + push" is one verb in two halves: the harbormaster's `sail --ok` and the integrator's
@@ -398,12 +409,9 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
 - **Before:** the harbormaster with an unexpired watch; state ready; the convoy's `base` is
   `origin/main`; `ci.py health` says `main` is green where CI is reachable; nothing expected is
   missing (§4.7).
-- **The level** (R19, from §4.6 mapped to Keelokit): `changed` (`pnpm verify` against the base)
-  for docs, copy, screens and isolated modules; `all` for money, bookings, credits, quotas,
-  notices, permissions, migrations, dependencies, `scripts/`, test config, any critical area, or
-  vessels that meet in the same code (shared hotspot or critical area). In doubt, `all`. JOUNA's
-  middle level ("verify plus the full suite of the widest package") has no Keelokit flag; Harbor
-  maps it to `all`. **Needs your ok.**
+- **The level** (R19): `changed` by default, `all` only for what Keelokit's routing can't bound,
+  `seam` *(3)* when its conditions hold; the reason names the files that decided it. The rules and
+  why money or migrations don't force `all` are in "Verifying without a bottleneck".
 - **Logbook:** `[ok]`, state verifying, event `ok`.
 - **Errors:** `NOT_HARBORMASTER`, `WATCH_EXPIRED`, `NOT_READY`, `MAIN_MOVED`, `MAIN_RED`.
 
@@ -412,9 +420,12 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
 - **Before:** the integrator; state verifying; `origin/main` is still the ok's base (else
   `MAIN_MOVED`: back to assemble); every commit on `convoy/<n>` after the ok's head is a fix with a
   green fix seal (`harbor.py seal --fix` = `pnpm verify --since <previous head>`, R7, §6.3).
-- **Does:** `pnpm verify --preflight`, then `pnpm verify [--all] --keep-going` on the convoy head,
-  in the background with a log (Keelokit's agent brief), event `verify-start` with the host first,
-  because the verify lock and its state are local to one machine (§5.6).
+- **Does:** nothing, when the convoy is one vessel sealed against today's `main` and its head is
+  that vessel's head: the seal already is the convoy verify. Otherwise `pnpm verify --preflight`,
+  then the level's command on the convoy head, in the background with a log (Keelokit's agent
+  brief), event `verify-start` with the host first, because the verify lock and its state are
+  local to one machine (§5.6). After a red and its fixes, the rerun is as narrow as Keelokit allows
+  (see "Verifying without a bottleneck").
 - **Logbook:** a `kind = "convoy"` seal; `verify-pass` or `verify-fail` with the failed steps.
 - **Errors:** `NOT_INTEGRATOR`, `MAIN_MOVED`, `UNSEALED_FIX`, `PREFLIGHT_FAILED`.
 
@@ -472,6 +483,80 @@ an integrator. What the harbormaster does not see (a session's local verify lock
 (§3.4); that this was intended is a **HIPÓTESIS**, so Harbor's default is Sonnet, with
 `[harbor.models] harbormaster` to change it.
 
+## Verifying without a bottleneck
+
+In a large monorepo the verify is the queue everyone waits in. JOUNA's numbers: `--all` took
+62–72 min by its own docs and went red at 82 and 84 min in a 4-core container (§4.9); a piece
+verify measured 47 min where the docs said minutes (§6.12); one landing took ten verify runs
+(§4.11); train 3 needed four runs, train 5 four `--all`, train 7 one `--all` and five resumes
+(§4.9). JOUNA dropped "every piece green with a full verify" four minutes after writing it, because
+"a repo of this size can't take a full verify per piece" (§4.2), and grew narrower variants
+(`--piece`, `--keep-going`, `--resume`). The fast train 4 was written and reviewed in an hour and
+landed four days later, waiting for its batch (§1.8). So Harbor treats verify minutes and machine
+time as the scarce resource. Five rules:
+
+1. **Scope by the diff; `--all` is the exception.** The convoy verify is Keelokit's scoped
+   `pnpm verify --keep-going` on the convoy head. Because `main` is the convoy's base, that covers
+   the packages the whole convoy changed and their dependents, with only the steps its files route
+   to (`verify-routing.toml`), mutation included when critical code changed. Money, permissions,
+   quotas, notices and migrations don't call for `--all`. They are proven by the full suites of the
+   packages they live in, by the integration and real-stack E2E steps, and by mutation, and the
+   scoped run already includes all of those. Re-proving untouched packages adds minutes, not proof.
+   `--all` is for what the routing can't bound: the verify tooling, test configuration, CI, `.keelokit/`,
+   `scripts/`, root manifests and the lockfile. Keelokit already turns any file it doesn't know into
+   every step, so going up is automatic, and Harbor doesn't add a "when in doubt" of its own.
+   JOUNA's middle level (verify plus the full suite of the widest package, §4.6) is what Keelokit's
+   scoped run does already, so it maps to `changed`.
+2. **Don't repeat what a seal proved.** A one-vessel convoy whose vessel was sealed against
+   today's `main` is already verified: the convoy head is the vessel head (a fast-forward, no merge
+   commit), and it sails without a second run. In a larger convoy each seal proved one vessel
+   against its base. What the combination adds is the seams: packages two vessels touch, or a
+   package one vessel changes and another depends on. That is where §6.1's failures were (one
+   payload shaped two ways, a fixture changed under another piece's test). A *seam* verify
+   *(phase 3)* runs only those packages, their dependents and the cross-app steps (build,
+   real-stack E2E), and only when every vessel's seal base is the convoy base. That it catches
+   what the scoped run would is an **INDICIO** from §6.1, not a proof, so `changed` stays the
+   default and `seam` is chosen per ok, until the logbook's own reds say whether it misses anything.
+3. **A red costs one fix round, not a restart.** `--keep-going` lists every red of a run. Each fix
+   is a commit on `convoy/<n>` with its own fix seal (`--since` the previous head, R7). That stops
+   §6.3's chain, where every resume was broken by the previous fix. Then only the failed steps run
+   again, plus whatever the fix's files route to. A step that passed at the previous head and that
+   the fix doesn't route to stays valid. Keelokit can neither resume nor run named steps (see
+   below), so until it can, the rerun is the scoped run again, which is still narrower than `--all`.
+4. **Spread the runs; never queue on one machine.** Keelokit runs one verify per machine (a lock in
+   the git directory, §2.8), and other machines can't see it (§5.6). Vessel seals run on each
+   vessel's machine: parallel across machines, serial on one. The logbook records each seal's host
+   and duration, so the skipper sends new vessels to idle hosts, and the integrator's machine runs
+   no vessel seal while the convoy verifies. Once Keelokit can run named steps, one convoy verify
+   splits by step across integrator machines *(phase 3)*: each machine records a step seal for the
+   same head, and the convoy is green when every planned step is green for that head.
+5. **Overlap convoys instead of lining them up.** A convoy doesn't wait for its slowest vessel: the
+   skipper defers a late expected vessel to the next convoy (`convoy defer`, *phase 2*). One more
+   convoy costs one scoped verify; waiting costs every other vessel its latency (§1.8). A convoy
+   that depends on one still verifying assembles on top of that one's head instead of idling
+   (*stacked*, *phase 3*). When the first sails, `main` is already the second's base, and the
+   second's verify reruns only if the first's head changed, which happens when the first goes red.
+
+**Measure before tuning.** Every seal records its duration and, from Keelokit's
+`keelokit-verify.history`, each step's time, the failed steps and the known causes *(phase 1)*.
+Those are the numbers the survey couldn't reconstruct (§4.9: run times; §1.7: working time): verify
+minutes per convoy, reds per convoy, wait from delivery to sail, the slowest steps. The balance
+between a light vessel verify (fewer minutes per vessel, more reds in the convoy) and a heavy one is
+`vessel_verify`, set per project and moved by those numbers, not by a rule. JOUNA's piece check
+(§4.1: lint and typecheck of touched workspaces, the tests added, changed and related, never whole
+suites) is lighter than Keelokit's `--since`, which runs the affected packages' whole suites.
+Narrowing it further needs a related-tests mode in Keelokit, and §6.12 is a warning that "related"
+isn't always cheaper (mobile `--findRelatedTests` took over 20 min).
+
+**What Harbor needs from Keelokit** (to ask for there, not to build in Harbor):
+
+| Need | For |
+|---|---|
+| Run named steps only (`--steps unit,e2e-stack`), and rerun only a run's failed steps | rule 3's narrow rerun, rule 4's split across machines |
+| An explicit package scope passed to pnpm's filter | the seam verify |
+| The packages each step covered, in the history line | knowing whether a step's pass still holds after a fix |
+| A pre-push hook that accepts a Harbor seal of the exact commit and base | sailing without another verify on the pushing machine. Keelokit's seal is per clone, so today a push from any machine except the one that verified runs the whole verify again |
+
 ## When main moves with a convoy assembled
 
 `main` moves for three reasons: another convoy sailed, a fix for a red `main` was pushed (the only
@@ -482,7 +567,9 @@ died). Harbor never rebases a convoy:
   `base`.
 - **ready or verifying:** the ok is void (its level was chosen for other contents); `assemble`
   merges `main`, the state returns to ready, and the harbormaster gives a new ok. `sail` refuses
-  while `main` isn't the ok's base, and a rejected push says the same.
+  while `main` isn't the ok's base, and a rejected push says the same. The new verify is scoped like
+  the first, not `--all`: what `main` brought is in the diff only where it meets the convoy's
+  packages. Stacking (rule 5 above) avoids most of these re-merges.
 - **depending convoys:** a convoy whose `depends_on` hasn't sailed stays waiting; when it sails,
   the next `assemble` merges the new `main` (R15). Convoys from the same base that depend on each
   other can't both be ready: JOUNA's trains 4 and 6 (§1.6) would have queued.
@@ -554,6 +641,9 @@ model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tok
 - **API changes and the app version that consumes them (R26).** Missing: whether a convoy declares
   its consumers and who deploys them, and whether that belongs in Harbor or in Keelokit's contract
   dimension.
+- **How light the vessel verify is.** `vessel_verify` defaults to Keelokit's `--since` with
+  `--keep-going`. Lighter means more reds at the convoy; heavier means more minutes per vessel.
+  Missing: the logbook's numbers from real convoys.
 - **A future API over the logbook.** Missing: who would serve it. The schema above is the contract.
 
 ## Failure modes of the survey, and where Harbor answers
@@ -562,7 +652,7 @@ model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tok
 |---|---|---|
 | 6.1 | two green branches, red together | one convoy verify on the combination; fixes as sealed commits on `convoy/<n>` |
 | 6.2 | the piece didn't run what broke; a fix voids the green | seal by exact hash; a new commit has no seal (R3) |
-| 6.3 | chain of reds on resume | fix seals before rerunning (R7) |
+| 6.3 | chain of reds on resume | fix seals before rerunning (R7); reruns narrowed to failed steps once Keelokit can |
 | 6.4 | tests bound to date, zone or text | Keelokit's (time invariants, FLAKY-1); not Harbor's |
 | 6.5 | migration timestamp collisions | migration check at assembly (R16) |
 | 6.6 | generated artifacts and fixed totals in conflict | `[harbor.generated]`; totals without a decision |
@@ -571,7 +661,7 @@ model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tok
 | 6.9 | a loose push kills a train branch | `main.toml` causes; ok void when `main` moves |
 | 6.10 | `main` pushed with only Format run | push only with a green convoy seal at the ok's level; Keelokit's hook stays |
 | 6.11 | process rules set and withdrawn in minutes | the rules live in Harbor's code and tests, versioned by release; not editable from the logbook |
-| 6.12 | container resources and tools | Keelokit's `--preflight` before the convoy verify (R21) |
+| 6.12 | container resources and tools | Keelokit's `--preflight` before the convoy verify (R21); step times in every seal; no vessel seal on the integrator's machine while it verifies |
 | 6.13 | scheduled CI red four runs in a row | the ok requires `main` green (`ci.py health`) |
 | 6.14 | API↔app contract unverified between trains | without a decision (R26) |
 | 6.15 | process docs out of date | views can't drift; the rest is Keelokit's (R24) |
@@ -587,7 +677,7 @@ model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tok
 | R4 piece verify derived from the diff and its consumers | Keelokit's `verify --since` routing (`verify-routing.toml`); Harbor runs it, doesn't reimplement it. Whether the routing covers consumers (a change in shared types running every consumer) is Keelokit's to check | delegated |
 | R5 after a review fix, rerun what cites the change | falls out of R3: a fix is a new commit, which needs a new seal; selecting the tests that cite a string is Keelokit's routing | 1 + delegated |
 | R6 the gate on every delivered branch, green seal per hash | the gate is entry to a convoy, not the push of a branch: an unsealed branch can be pushed and can't enter. A pre-push hook on every branch would be Keelokit's | 1 |
-| R7 validate the fix commit before each verify resume | fix seals required by `convoy verify` | 2 |
+| R7 validate the fix commit before each verify resume | fix seals required by `convoy verify`; the rerun narrowed to failed steps when Keelokit can run named steps | 2 |
 | R8 risk level from the diff; unknown goes up; the agent can't lower it | Keelokit's `build-story` tier rules (escalate only); Harbor records the tier | delegated |
 | R9 the first agent of N1/N2 is the test writer | tier → first agent (verifier mode A for light and full) | 2 (skills) |
 | R10 roles enforced by tools | Harbor's agents have `tools:` lists (skipper without Write, harbormaster read-only). Keelokit's reviewer and breaker are read-only by tools; its verifier needs Write for tests, and weakened tests are caught by `doctor --scope` (VERIFY-2), not by tools. Bash in any list is not a sandbox | 1 (agents) |
@@ -599,7 +689,7 @@ model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tok
 | R16 reserve or renumber migration timestamps; fail on a shared one | the check at assembly fails and names the rename; renumbering without a decision | 2 |
 | R17 generated artifacts and fixed totals as known conflicts | `[harbor.generated]` regenerated at assembly; totals without a decision | 2 |
 | R18 detect `main` moving under an assembled convoy; record a loose push | `status` shows it (1); `main.toml`, ok void, re-assembly (2) | 1, 2 |
-| R19 choose the convoy verify by a risk table; the reason with the ok | `[ok] level` and `reason`, the table under `sail --ok` | 2 |
+| R19 choose the convoy verify by a risk table; the reason with the ok | `[ok] level` and `reason`: `changed` by default, `all` only for what the routing can't bound, `seam` later ("Verifying without a bottleneck") | 2, 3 (seam) |
 | R20 heartbeat with expiry, first commit wins | the watch: `last_control`, `expires`, replay on rejection | 2 (the write rule is in 1) |
 | R21 a preflight that fails on missing tools or an unfit machine | Keelokit's `verify --preflight` (VER-1) before the convoy verify | delegated |
 | R22 structured handover on a budget cut; `wip/*` outside trains | `worker end` with `[handover]`, head checked pushed; `wip/*` dropped (vessels never touch `main`) | 1 |
