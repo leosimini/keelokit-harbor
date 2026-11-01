@@ -55,8 +55,41 @@ convoy.
 moved after delivery, expected stories not delivered. Report it as it prints; don't summarize away
 a void delivery.
 
-## assemble, verify, sail — not yet
+## assemble (integrator)
 
-Phase 2: `harbor.py` doesn't have them. Say so and stop. Don't integrate, verify or push by hand
-in their place: a hand-made sail writes nothing in the logbook and is the loose push the design
-is there to stop.
+`python3 "$H" --session <id> convoy assemble <n>` switches this checkout to `convoy/<n>`, merges
+`main` and every delivered vessel into it (merge, never rebase), rebuilds conflicts that are only in
+`[harbor.generated]` files, checks migration timestamps, and pushes `convoy/<n>`. It ends `ready`, or
+`waiting` with what is missing. Refusals:
+- `CONFLICT`: you merge that vessel's head by hand on `convoy/<n>`, resolve only what the merge
+  needs, commit, and run assemble again (it takes your local branch). A conflict only in formatting
+  follows Keelokit's FMT-1: keep the content, `pnpm format`.
+- `MIGRATION_COLLISION` / `MIGRATION_ORDER`, `VESSEL_MOVED`: back to the vessel, which fixes, seals
+  and is added again.
+- A late expected story: `convoy defer <n> <STORY>` takes it out; the next convoy expects it. Don't
+  hold the rest for it.
+
+## The ok (harbormaster)
+
+`python3 "$H" --session <id> convoy sail <n> --ok --level changed|all --reason "<files that decided>"`.
+`changed` unless the convoy touches what Keelokit's routing can't bound (verify tooling, test config,
+CI, `.keelokit/`, `scripts/`, root manifests, the lockfile): then `all`. Money, permissions and
+migrations don't force `all`. It refuses if main is red, moved, or the convoy isn't `ready`.
+
+## verify (integrator)
+
+`python3 "$H" --session <id> convoy verify <n>`, in the background with a log, then one `until` on
+its exit. A one-vessel convoy whose seal already covers the ok's level runs nothing. Red: the fix is
+a commit on `convoy/<n>` — a failing test first by Keelokit's verifier, then the builder — pushed,
+then verify again: it reruns only what failed plus what the fix touches, and Keelokit seals it when
+that completes the plan. Don't run vessel seals on this machine while it verifies.
+
+## sail (integrator)
+
+`python3 "$H" --session <id> convoy sail <n>`, from the machine that verified. It pushes the sealed
+head to `main` as a fast-forward; `MAIN_MOVED` means assemble again and a new ok. Report the hash on
+`origin/main`, never "sailed" alone.
+
+## abort
+
+`convoy abort <n> --reason "<why>"` (skipper or harbormaster): its vessels and hotspots are free.

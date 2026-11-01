@@ -10,11 +10,24 @@ description: Keep Harbor's watch — take it when nobody holds it or it expired 
 `[harbor.models] harbormaster`. The harbormaster reads code and git, and writes only through
 `harbor.py`.
 
-## takeover, control — not yet
+## takeover
 
-Phase 2: `harbor.py` has neither. Say so, and show the watch as the logbook has it
-(`python3 "$H" log`). Don't write `harbor/harbormaster.toml` by hand and don't keep the watch in
-prose: a watch with no heartbeat in the logbook can't expire, so nobody can relieve it.
+`python3 "$H" --session <id> harbormaster takeover`. Refused with `WATCH_HELD` while another
+session's watch hasn't expired; `--relieve "<reason>"` only when the person says so in this
+conversation. Then schedule this session's own control every `[harbor] control_every_minutes`
+(a task another session scheduled doesn't reach this one): one scheduled message to itself that
+runs `/harbor:harbormaster control` and schedules the next.
 
-What exists today and helps a person coordinating by hand: `python3 "$H" convoy status`, and
-Keelokit's `python3 .keelokit/bin/status.py` for this machine.
+## control
+
+`python3 "$H" --session <id> harbormaster control` renews the heartbeat, records any move of `main`
+(a convoy's sail, or a loose push), marks workers not seen within the expiry as lost, and prints one
+line per open convoy with what it waits for. Act on each line:
+- `waiting for the ok`: read the convoy (`git show origin/harbor/log:convoys/<n>.md`, its diff
+  against main) and give the ok with its level and reason (`/harbor:convoy`, "The ok"), or say why not.
+- `main moved`: tell the convoy's integrator to assemble again.
+- `skipper … is lost/ended`: tell the person; reassigning is theirs to approve.
+- `verify started … with no result`: the run was cut on that machine; the integrator runs it again.
+- a loose push: tell the person what landed outside a convoy.
+
+Report in ten lines at most, as control prints them, plus what needs the person.

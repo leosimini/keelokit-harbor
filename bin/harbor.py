@@ -19,6 +19,14 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py convoy new [--title T] [--expect STORY ...] [--depends N ...]
     harbor.py convoy add N BRANCH [--head SHA] [--story ID] [--tier trivial|light|full]
     harbor.py convoy status [N]
+    harbor.py convoy assemble N              merge main and the vessels into convoy/<n>, check migrations, push it
+    harbor.py convoy sail N --ok --level changed|all --reason TEXT    the harbormaster's ok
+    harbor.py convoy verify N                the convoy's one verify on its exact head (or its seal, reused)
+    harbor.py convoy sail N                  push the verified head to main (fast-forward, no force)
+    harbor.py convoy abort N --reason TEXT
+    harbor.py convoy defer N STORY           a late expected story leaves this convoy for the next one
+    harbor.py harbormaster takeover [--relieve REASON]
+    harbor.py harbormaster control           the round: heartbeat, main, convoys, workers
     harbor.py log                            print LOGBOOK.md as the remote has it
     harbor.py import-board FILE              once: a hand-kept BOARD.md into the logbook
 
@@ -67,7 +75,13 @@ DEFAULTS = {
     # JOUNA's values (survey 5.3): a control at least every 90 minutes, relief after 3 hours.
     "control_every_minutes": 90,
     "watch_expiry_minutes": 180,
+    "convoy_preflight": "pnpm verify --preflight",
+    "convoy_verify": "pnpm verify --keep-going",
+    "convoy_verify_all": "pnpm verify --all --keep-going",
+    "convoy_rerun": "pnpm verify --rerun-failed --keep-going",
+    "ci_check": None,  # None: Keelokit's `ci.py health` when the project has it; "" turns it off
 }
+DEFAULT_MIGRATIONS = ["apps/*/prisma/migrations", "*/migrations", "db/migrations"]
 ENV_CODES = {"NO_KEELOKIT", "POLICY_NOT_CONVOY", "NO_IDENTITY", "NO_SESSION", "NOT_A_REPO", "USAGE", "FETCH_FAILED",
              "PUSH_FAILED"}
 
@@ -248,6 +262,7 @@ def config(state: dict) -> dict:
     cfg["hotspots"] = harbor.get("hotspots") or {}
     cfg["generated"] = harbor.get("generated") or {}
     cfg["models"] = harbor.get("models") or {}
+    cfg["migrations"] = list((harbor.get("migrations") or {}).get("paths") or DEFAULT_MIGRATIONS)
     return cfg
 
 
@@ -385,8 +400,15 @@ def render_logbook(files: dict, cs: dict) -> str:
                        f"{cell(' '.join(x for x in (last.get('at'), last.get('what')) if x))} |")
     else:
         out.append("No convoys yet.")
+    mt = load(files, "harbor/main.toml")
+    if mt:
+        out += ["", "## Main", "", f"Last seen at {short(mt.get('head'))}."]
+        loose = [m for m in mt.get("moves") or [] if m.get("cause") == "loose"]
+        if loose:
+            out += ["", "Moves no convoy explains (loose pushes):", ""]
+            out += [f"- {m.get('seen')}: {short(m.get('from'))} → {short(m.get('to'))}, seen by {m.get('by')}" for m in loose[-5:]]
     ws = workers(files)
-    live = {k: w for k, w in ws.items() if w.get("state") != "ended"}
+    live = {k: w for k, w in ws.items() if w.get("state") not in ("ended", "lost")}
     out += ["", "## Workers", ""]
     if live:
         out += ["| Worker | Role | Convoy | Branch | Model | Last seen | State |", "|---|---|---|---|---|---|---|"]
@@ -426,6 +448,15 @@ def render_convoy(c: dict, files: dict) -> str:
             ("Expected", ", ".join(c.get("expected") or []) or None)]
     if c.get("imported"):
         meta.append(("Imported", "from BOARD.md; no vessel entered through Harbor yet"))
+    if c.get("head"):
+        meta.append(("Head", short(c["head"])))
+    if ok := c.get("ok"):
+        meta.append(("Ok", f"{ok.get('level')} by {ok.get('by')} at {ok.get('at')}: {ok.get('reason')}"))
+    if sail := c.get("sail"):
+        meta.append(("Sailed", f"{sail.get('at')} by {sail.get('by')}: main {short(sail.get('main_before'))} → "
+                               f"{short(sail.get('main_after'))}"))
+    if c.get("deferred"):
+        meta.append(("Deferred", ", ".join(c["deferred"])))
     out += [f"- {k}: {cell(v)}" for k, v in meta]
     seals = {p.removeprefix("harbor/seals/").removesuffix(".toml"): p for p in files if p.startswith("harbor/seals/")}
     out += ["", "## Vessels", ""]
@@ -723,6 +754,8 @@ def cmd_convoy(args) -> int:
     if args.action == "status":
         return convoy_status(args)
     me = identity(args.session)
+    if args.action in PHASE2:
+        return PHASE2[args.action](args, cfg, me)
 
     def registered(files) -> dict:
         w = workers(files).get(me["id"])
@@ -859,6 +892,566 @@ def cmd_log(args) -> int:
     return 0
 
 
+
+# --- phase 2: assemble, ok, verify, sail, abort, defer; the watch ---------------------------------
+
+def active_worker(files: dict, me: dict) -> dict:
+    w = workers(files).get(me["id"])
+    if not w or w.get("state") != "active":
+        raise HarborError("NOT_REGISTERED", f"{me['id']} is not an active worker: harbor.py worker register first")
+    if until := paused(accounts(files).get(me["account"])):
+        raise HarborError("ACCOUNT_PAUSED", f"account '{me['account']}' is paused until {until}")
+    return w
+
+
+def touch(files: dict, w: dict) -> None:
+    w["last_seen"] = now()
+    save(files, worker_path(w["id"]), w)
+
+
+def convoy_of(files: dict, n: int) -> dict:
+    c = convoys(files).get(n)
+    if not c:
+        raise HarborError("UNKNOWN_CONVOY", f"there is no convoy {n}")
+    return c
+
+
+def save_convoy(files: dict, c: dict) -> None:
+    save(files, f"harbor/convoys/{c['number']}.toml", c)
+
+
+def require_integrator(c: dict, me: dict) -> None:
+    who = c.get("integrator") or ""
+    if who == me["id"] or (who.startswith("account:") and who.removeprefix("account:") == me["account"]):
+        return
+    raise HarborError("NOT_INTEGRATOR", f"convoy {c['number']} integrates on {who or 'nobody'}, not {me['id']}")
+
+
+def require_open(c: dict, *states: str) -> None:
+    if c.get("state") not in (states or OPEN):
+        raise HarborError("CONVOY_CLOSED" if c.get("state") not in OPEN else "WRONG_STATE",
+                          f"convoy {c['number']} is {c.get('state')}; this needs {' or '.join(states or OPEN)}")
+
+
+def expiry(cfg: dict) -> dt.timedelta:
+    return dt.timedelta(minutes=int(cfg["watch_expiry_minutes"]))
+
+
+def watch(files: dict) -> dict:
+    return load(files, "harbor/harbormaster.toml") or {"schema": SCHEMA}
+
+
+def holds_watch(files: dict, me: dict) -> bool:
+    hm = watch(files)
+    return hm.get("worker") == me["id"] and bool(hm.get("expires")) and parse_ts(hm["expires"]) > parse_ts(now())
+
+
+def ancestor(a: str, b: str) -> bool:
+    return run("git", "merge-base", "--is-ancestor", a, b, check=False).returncode == 0
+
+
+def clean() -> bool:
+    return not git("status", "--porcelain", "--untracked-files=normal")
+
+
+def covers(have: str | None, want: str) -> bool:
+    return have == "all" or (have == "changed" and want == "changed")
+
+
+def ci_health(cfg: dict) -> tuple[str, str]:
+    """('green' | 'red' | 'unknown', its line). Keelokit's ci.py health: exit 1 is an alarm."""
+    cmd = cfg.get("ci_check")
+    if cmd is None:
+        cmd = "python3 .keelokit/bin/ci.py health" if (ROOT / ".keelokit/bin/ci.py").exists() else ""
+    if not cmd:
+        return "unknown", "CI not checked (no ci.py, or [harbor] ci_check is empty)"
+    try:
+        res = subprocess.run(shlex.split(cmd), cwd=ROOT, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return "unknown", f"CI not checked: {e}"
+    line = (res.stdout.strip().splitlines() or [res.stderr.strip() or f"exit {res.returncode}"])[0]
+    return ("green" if res.returncode == 0 else "red" if res.returncode == 1 else "unknown"), line
+
+
+def run_cmd(template: str, **fields) -> tuple[int, str]:
+    cmd = template.format(**fields)
+    try:
+        return subprocess.run(shlex.split(cmd), cwd=ROOT).returncode, cmd
+    except FileNotFoundError as e:
+        raise HarborError("VERIFY_NOT_FOUND", f"`{cmd}`: {e}")
+
+
+def generated_cmds(paths: list[str], generated: dict) -> list[str] | None:
+    """The commands that rebuild every one of `paths`, or None when one of them isn't generated."""
+    cmds = []
+    for path in paths:
+        hit = [cmd for pat, cmd in generated.items() if (path.startswith(pat) if pat.endswith("/") else fnmatch.fnmatchcase(path, pat))]
+        if not hit:
+            return None
+        cmds += hit
+    return list(dict.fromkeys(cmds))
+
+
+def merge(ref: str, message: str, generated: dict, branch: str) -> None:
+    """Merge `ref` into HEAD (a fast-forward when it can be). A conflict only in declared generated files
+    is rebuilt with their command; any other conflict is aborted and reported, never resolved here."""
+    res = run("git", "merge", "--no-edit", "-m", message, ref, check=False)
+    if res.returncode == 0:
+        return
+    conflicted = [p for p in git("diff", "--name-only", "--diff-filter=U").splitlines() if p]
+    cmds = generated_cmds(conflicted, generated) if conflicted else None
+    if not cmds:
+        run("git", "merge", "--abort", check=False)
+        if not conflicted:
+            raise HarborError("GIT", f"git merge {short(ref)} failed: {(res.stderr or res.stdout).strip()[:300]}")
+        raise HarborError("CONFLICT", f"merging {message.split(': merge ', 1)[-1]} conflicts in {', '.join(conflicted)}. "
+                          f"The skipper merges it on {branch} by hand, in its own commit, then runs assemble again")
+    for cmd in cmds:
+        if subprocess.run(shlex.split(cmd), cwd=ROOT).returncode != 0:
+            run("git", "merge", "--abort", check=False)
+            raise HarborError("GENERATED_FAILED", f"`{cmd}` failed while rebuilding {', '.join(conflicted)}")
+    git("add", "-A")
+    if git("diff", "--name-only", "--diff-filter=U"):
+        run("git", "merge", "--abort", check=False)
+        raise HarborError("CONFLICT", f"rebuilding left conflicts in {', '.join(conflicted)}")
+    git("commit", "--no-edit", "--quiet")
+
+
+def migration_dirs(ref: str, patterns: list[str]) -> dict[str, set[str]]:
+    """Migration folder -> the names of its subfolders at `ref`."""
+    out: dict[str, set[str]] = {}
+    for pat in patterns:
+        prefix = pat.split("*")[0].rstrip("/")
+        listing = run("git", "ls-tree", "-r", "-t", ref, *(["--", prefix] if prefix else []), check=False).stdout
+        for line in listing.splitlines():
+            meta, _, path = line.partition("\t")
+            if meta.split()[1:2] != ["tree"]:
+                continue
+            parent, _, name = path.rpartition("/")
+            if parent and fnmatch.fnmatchcase(parent, pat):
+                out.setdefault(parent, set()).add(name)
+    return out
+
+
+def check_migrations(main_tip: str, vessels: list[dict], patterns: list[str]) -> None:
+    """Two vessels adding migrations with the same timestamp, or one sorting before main's last, fail (R16)."""
+    on_main = migration_dirs(main_tip, patterns)
+    stamps: dict[tuple[str, str], str] = {}
+    for v in vessels:
+        for root, names in migration_dirs(v["head"], patterns).items():
+            known = on_main.get(root, set())
+            last = max(known, default="")
+            for name in sorted(names - known):
+                if last and name < last:
+                    raise HarborError("MIGRATION_ORDER", f"{v['branch']} adds {root}/{name}, which sorts before '{last}' "
+                                      "on main: the vessel renames it to a later timestamp and is sealed again")
+                m = re.match(r"\d+", name)
+                if not m:
+                    continue
+                if (root, m.group()) in stamps and stamps[(root, m.group())] != v["branch"]:
+                    raise HarborError("MIGRATION_COLLISION", f"{v['branch']} and {stamps[(root, m.group())]} both add a "
+                                      f"migration stamped {m.group()} in {root}: one of them renames its own and is sealed again")
+                stamps[(root, m.group())] = v["branch"]
+
+
+def convoy_assemble(args, cfg: dict, me: dict) -> int:
+    if not clean():
+        raise HarborError("DIRTY_TREE", "assemble switches this checkout to the convoy branch: commit or stash first")
+    _, files = snapshot()
+    c = convoy_of(files, args.number)
+    require_open(c)
+    require_integrator(c, me)
+    active_worker(files, me)
+    main_tip = fetch(MAIN)
+    if not main_tip:
+        raise HarborError("NO_MAIN", f"{REMOTE} has no {MAIN}")
+    vessels = c.get("vessels") or []
+    for v in vessels:
+        if fetch(v["branch"]) != v["head"]:
+            raise HarborError("VESSEL_MOVED", f"{v['branch']} is no longer at its delivered {short(v['head'])}: the vessel "
+                              "seals its new tip and the skipper adds it again")
+    branch = c["branch"]
+    remote = fetch(branch)
+    local = rev(f"refs/heads/{branch}")
+    if local and remote and not ancestor(remote, local):
+        if ancestor(local, remote):
+            local = None
+        else:
+            raise HarborError("DIVERGED", f"local {branch} and {REMOTE}/{branch} have diverged: keep one, never force")
+    start = local or remote or main_tip
+    git("checkout", "--quiet", "-B", branch, start)
+    before = git("rev-parse", "HEAD")
+    notes = []
+    if not ancestor(main_tip, "HEAD"):
+        merge(main_tip, f"convoy {c['number']}: merge {MAIN} {short(main_tip)}", cfg["generated"], branch)
+        notes.append(("main-moved", f"{short(c.get('base'))} → {short(main_tip)}"))
+    merged = {}
+    for v in vessels:
+        if not ancestor(v["head"], "HEAD"):
+            merge(v["head"], f"convoy {c['number']}: merge {v['branch']}@{short(v['head'])}", cfg["generated"], branch)
+        merged[v["branch"]] = v.get("merged") or git("rev-parse", "HEAD")
+    check_migrations(main_tip, vessels, cfg["migrations"])
+    head = git("rev-parse", "HEAD")
+    if head != remote:
+        res = run("git", "push", "--quiet", REMOTE, f"HEAD:refs/heads/{branch}", check=False)
+        if res.returncode != 0:
+            raise HarborError("CONVOY_PUSH_REJECTED", f"{REMOTE} refused {branch} (someone else pushed it?): "
+                              f"{res.stderr.strip()[:200]}")
+    delivered = [(v["branch"], v["head"]) for v in vessels]
+
+    def mutate(files, h):
+        c2 = convoy_of(files, args.number)
+        require_open(c2)
+        if [(v["branch"], v["head"]) for v in c2.get("vessels") or []] != delivered:
+            raise HarborError("ASSEMBLE_STALE", "the vessels changed while assembling: run assemble again")
+        w = active_worker(files, me)
+        cs = convoys(files)
+        changed = c2.get("head") != head or c2.get("base") != main_tip
+        c2["integrator"], c2["head"], c2["base"] = me["id"], head, main_tip
+        for v in c2["vessels"]:
+            v["merged"] = merged[v["branch"]]
+        missing = [s for s in c2.get("expected") or [] if s not in {v.get("story") for v in c2["vessels"]}]
+        deps = [d for d in c2.get("depends_on") or [] if (cs.get(d) or {}).get("state") != "sailed"]
+        events = c2.setdefault("events", [])
+        if changed and c2.pop("ok", None):
+            events.append(event(me["id"], "ok-cleared", "the head or main changed: the ok is void"))
+        for what, detail in notes:
+            events.append(event(me["id"], what, detail))
+        if missing or deps:
+            c2["state"] = "waiting"
+        elif c2.get("state") == "verifying" and not changed:
+            pass
+        else:
+            c2["state"] = "ready"
+        waits = ([f"stories {', '.join(missing)}"] if missing else []) + ([f"convoy {', '.join(map(str, deps))}"] if deps else [])
+        events.append(event(me["id"], "assembled", f"head {short(head)}, {len(vessels)} vessel(s)"
+                            + (f"; waiting for {' and '.join(waits)}" if waits else "")))
+        save_convoy(files, c2)
+        touch(files, w)
+        return c2["state"], waits
+
+    state, waits = transact(f"convoy {args.number} assemble at {short(head)}", me["id"], mutate)
+    print(f"harbor: convoy {args.number} assembled at {short(head)} on main {short(main_tip)}: {state}"
+          + (f" (waiting for {' and '.join(waits)})" if waits else "") + ("" if head == before else f"; {branch} pushed"))
+    return 0
+
+
+def convoy_ok(args, cfg: dict, me: dict) -> int:
+    if args.level not in ("changed", "all"):
+        raise HarborError("USAGE", "--ok needs --level changed|all")
+    if not (args.reason or "").strip():
+        raise HarborError("USAGE", "--ok needs --reason: the files that decided the level")
+    _, files = snapshot()
+    c = convoy_of(files, args.number)
+    main_tip = fetch(MAIN)
+    tip = fetch(c["branch"])
+    ci, line = ci_health(cfg)
+    if ci == "red":
+        raise HarborError("MAIN_RED", f"{line}: main gets fixed before any convoy sails")
+
+    def mutate(files, h):
+        c2 = convoy_of(files, args.number)
+        if not holds_watch(files, me):
+            hm = watch(files)
+            raise HarborError("NOT_HARBORMASTER", f"the watch is {hm.get('worker') or 'empty'}"
+                              + (f" (expires {hm.get('expires')})" if hm.get("worker") else "")
+                              + "; the ok comes from the harbormaster holding an unexpired watch")
+        require_open(c2, "ready")
+        if c2.get("base") != main_tip:
+            raise HarborError("MAIN_MOVED", f"main is at {short(main_tip)}, the convoy at {short(c2.get('base'))}: assemble again")
+        if not c2.get("head") or tip != c2["head"]:
+            raise HarborError("CONVOY_MOVED", f"{c2['branch']} is at {short(tip)}, the logbook says {short(c2.get('head'))}: "
+                              "assemble again")
+        c2["ok"] = {"by": me["id"], "at": now(), "level": args.level, "reason": args.reason.strip(), "base": main_tip,
+                    "head": tip, "ci": line}
+        c2["state"] = "verifying"
+        c2.setdefault("events", []).append(event(me["id"], "ok", f"{args.level}: {args.reason.strip()}"))
+        save_convoy(files, c2)
+        touch(files, active_worker(files, me))
+
+    transact(f"convoy {args.number} ok ({args.level})", me["id"], mutate)
+    print(f"harbor: ok for convoy {args.number} at {short(tip)}, level {args.level}; {line}")
+    return 0
+
+
+def convoy_verify(args, cfg: dict, me: dict) -> int:
+    if not clean():
+        raise HarborError("DIRTY_TREE", "verify checks out the convoy's head: commit or stash first")
+    _, files = snapshot()
+    c = convoy_of(files, args.number)
+    require_open(c, "verifying")
+    require_integrator(c, me)
+    active_worker(files, me)
+    ok = c.get("ok") or {}
+    main_tip = fetch(MAIN)
+    if main_tip != ok.get("base"):
+        raise HarborError("MAIN_MOVED", f"main moved to {short(main_tip)} after the ok: assemble again (the ok is void)")
+    tip = fetch(c["branch"])
+    if not tip or not ancestor(c["head"], tip):
+        raise HarborError("CONVOY_REWRITTEN", f"{c['branch']} no longer contains {short(c['head'])}: history is never rewritten")
+    git("checkout", "--quiet", "-B", c["branch"], tip)
+    level = ok["level"]
+    seal = load(files, f"harbor/seals/{tip}.toml")
+    if seal and seal.get("exit") == 0 and covers(seal.get("level"), level) and seal.get("base") == main_tip:
+        def reuse(files, h):
+            c2 = convoy_of(files, args.number)
+            c2["head"] = tip
+            c2.setdefault("events", []).append(event(me["id"], "verify-pass", f"{short(tip)}: its seal ({seal['level']}) "
+                                                     "already covers it, nothing ran"))
+            save_convoy(files, c2)
+        transact(f"convoy {args.number} verify reused for {short(tip)}", me["id"], reuse)
+        print(f"harbor: {short(tip)} already has a {seal['level']} seal against {short(main_tip)}: nothing to run")
+        return 0
+    evs = c.get("events") or []
+    since_ok = evs[max((i for i, e in enumerate(evs) if e.get("what") == "ok"), default=0):]
+    red_before = any(e.get("what") == "verify-fail" for e in since_ok)
+    template = cfg["convoy_rerun"] if red_before else cfg["convoy_verify_all" if level == "all" else "convoy_verify"]
+
+    def start(files, h):
+        c2 = convoy_of(files, args.number)
+        c2["head"] = tip
+        c2.setdefault("events", []).append(event(me["id"], "verify-start", f"{short(tip)} on {me['host']}: "
+                                                 f"`{template.format(base=main_tip, head=tip, branch=c['branch'])}`"))
+        save_convoy(files, c2)
+
+    transact(f"convoy {args.number} verify start", me["id"], start)
+    started, t0, wall = now(), time.monotonic(), int(time.time()) - 1
+    rc, cmd = 0, ""
+    if cfg.get("convoy_preflight"):
+        rc, cmd = run_cmd(cfg["convoy_preflight"], base=main_tip, head=tip, branch=c["branch"])
+    if rc == 0:
+        rc, cmd = run_cmd(template, base=main_tip, head=tip, branch=c["branch"])
+    if git("rev-parse", "HEAD") != tip or not clean():
+        raise HarborError("SEAL_INVALID", "HEAD or the tree changed during the run: commit it on the convoy branch and verify again")
+    new = {"schema": SCHEMA, "kind": "convoy", "convoy": args.number, "head": tip, "branch": c["branch"], "base": main_tip,
+           "command": cmd, "exit": rc, "result": "pass" if rc == 0 else "fail", "started": started, "finished": now(),
+           "duration_seconds": int(time.monotonic() - t0), "by": me["id"]}
+    if entry := keelokit_history(tip, since=wall):
+        new.update(steps_from(entry))
+        if rc == 0 and full_run(entry, tip, main_tip):
+            new["level"] = entry["level"]
+    sealed = rc == 0 and covers(new.get("level"), level)
+
+    def finish(files, h):
+        save(files, f"harbor/seals/{tip}.toml", new)
+        c2 = convoy_of(files, args.number)
+        if sealed:
+            what, detail = "verify-pass", f"{short(tip)}: {new['level']}, {new['duration_seconds']} s"
+        elif rc == 0:
+            what, detail = "verify-unsealed", (f"{short(tip)} green, but Keelokit's record doesn't make it a whole {level} "
+                                               "verify: sail will refuse")
+        else:
+            what, detail = "verify-fail", f"{short(tip)}: exit {rc}" + (f", failed {', '.join(new.get('failed_steps') or [])}"
+                                                                        if new.get("failed_steps") else "")
+        c2.setdefault("events", []).append(event(me["id"], what, detail))
+        save_convoy(files, c2)
+
+    transact(f"convoy {args.number} verify exit {rc}", me["id"], finish)
+    print(f"harbor: convoy {args.number} verify at {short(tip)}: " + ("sealed, ready to sail" if sealed else
+          "green but not a whole verify at the ok's level" if rc == 0 else f"red (exit {rc}); fix on {c['branch']}, push, verify again"))
+    return 0 if sealed else 1
+
+
+def record_main_move(files: dict, before: str | None, after: str, by: str, cause: str) -> None:
+    mt = load(files, "harbor/main.toml") or {"schema": SCHEMA}
+    if before and before != after:
+        mt.setdefault("moves", []).append({"from": before, "to": after, "seen": now(), "by": by, "cause": cause})
+    mt["head"] = after
+    save(files, "harbor/main.toml", mt)
+
+
+def convoy_sail(args, cfg: dict, me: dict) -> int:
+    if args.ok:
+        return convoy_ok(args, cfg, me)
+    if not clean():
+        raise HarborError("DIRTY_TREE", "commit or stash first: the push goes from the convoy's checkout")
+    _, files = snapshot()
+    c = convoy_of(files, args.number)
+    require_open(c, "verifying")
+    require_integrator(c, me)
+    active_worker(files, me)
+    ok = c.get("ok")
+    if not ok:
+        raise HarborError("NO_OK", f"convoy {args.number} has no ok")
+    main_tip = fetch(MAIN)
+    if main_tip != ok["base"]:
+        raise HarborError("MAIN_MOVED", f"main moved to {short(main_tip)} after the ok: assemble again (the ok is void)")
+    tip = fetch(c["branch"])
+    if tip != c.get("head"):
+        raise HarborError("CONVOY_MOVED", f"{c['branch']} is at {short(tip)}, its verify was for {short(c.get('head'))}: verify again")
+    seal = load(files, f"harbor/seals/{tip}.toml") or {}
+    if not (seal.get("exit") == 0 and covers(seal.get("level"), ok["level"]) and seal.get("base") == main_tip):
+        raise HarborError("NOT_SEALED", f"{short(tip)} has no green {ok['level']} seal against {short(main_tip)}: convoy verify first")
+    git("checkout", "--quiet", "-B", c["branch"], tip)
+    res = run("git", "push", REMOTE, f"{tip}:refs/heads/{MAIN}", check=False)
+    if res.returncode != 0:
+        text = res.stdout + res.stderr
+        if any(x in text for x in ("non-fast-forward", "fetch first", "[rejected]")):
+            raise HarborError("MAIN_MOVED", "main moved while pushing: assemble again (the ok is void)")
+        raise HarborError("PUSH_FAILED", f"git push to {MAIN}: {text.strip()[-400:]}")
+
+    def mutate(files, h):
+        c2 = convoy_of(files, args.number)
+        c2["state"] = "sailed"
+        c2["sail"] = {"by": me["id"], "at": now(), "main_before": main_tip, "main_after": tip}
+        c2.setdefault("events", []).append(event(me["id"], "sailed", f"main {short(main_tip)} → {short(tip)}"))
+        save_convoy(files, c2)
+        record_main_move(files, main_tip, tip, me["id"], f"convoy {args.number}")
+        touch(files, active_worker(files, me))
+
+    try:
+        transact(f"convoy {args.number} sailed to {short(tip)}", me["id"], mutate)
+    except HarborError as e:
+        raise HarborError(e.code, f"main has {short(tip)}, but the logbook write failed ({e.why}); "
+                          "the next harbormaster control records the sail")
+    print(f"harbor: convoy {args.number} sailed: main {short(main_tip)} → {short(tip)}")
+    return 0
+
+
+def convoy_abort(args, cfg: dict, me: dict) -> int:
+    if not (args.reason or "").strip():
+        raise HarborError("USAGE", "abort needs --reason")
+
+    def mutate(files, h):
+        c = convoy_of(files, args.number)
+        require_open(c)
+        if c.get("skipper") != me["id"] and not holds_watch(files, me):
+            raise HarborError("NOT_SKIPPER", "only the convoy's skipper or the harbormaster aborts it")
+        c["state"] = "aborted"
+        c.pop("ok", None)
+        c.setdefault("events", []).append(event(me["id"], "aborted", args.reason.strip()))
+        save_convoy(files, c)
+        touch(files, active_worker(files, me))
+
+    transact(f"convoy {args.number} aborted", me["id"], mutate)
+    print(f"harbor: convoy {args.number} aborted; its vessels and hotspots are free")
+    return 0
+
+
+def convoy_defer(args, cfg: dict, me: dict) -> int:
+    def mutate(files, h):
+        c = convoy_of(files, args.number)
+        require_open(c, "assembling", "waiting")
+        if c.get("skipper") != me["id"]:
+            raise HarborError("NOT_SKIPPER", f"convoy {args.number}'s skipper is {c.get('skipper')}")
+        if args.story not in (c.get("expected") or []):
+            raise HarborError("NOT_EXPECTED", f"{args.story} is not expected in convoy {args.number}")
+        if args.story in {v.get("story") for v in c.get("vessels") or []}:
+            raise HarborError("ALREADY_DELIVERED", f"{args.story} is delivered already")
+        c["expected"] = [s for s in c["expected"] if s != args.story]
+        c.setdefault("deferred", []).append(args.story)
+        c.setdefault("events", []).append(event(me["id"], "deferred", f"{args.story} goes to the next convoy"))
+        save_convoy(files, c)
+        touch(files, active_worker(files, me))
+
+    transact(f"convoy {args.number} defer {args.story}", me["id"], mutate)
+    print(f"harbor: {args.story} left convoy {args.number}; expect it in the next one (convoy new --expect {args.story})")
+    return 0
+
+
+PHASE2 = {"assemble": convoy_assemble, "verify": convoy_verify, "sail": convoy_sail, "abort": convoy_abort,
+          "defer": convoy_defer}
+
+
+def cmd_harbormaster(args) -> int:
+    state = keelokit()
+    cfg = config(state)
+    me = identity(args.session)
+    if args.action == "takeover":
+        def mutate(files, h):
+            w = active_worker(files, me)
+            hm = watch(files)
+            holder = hm.get("worker")
+            alive = bool(holder) and parse_ts(hm.get("expires") or now()) > parse_ts(now())
+            if holder and holder != me["id"]:
+                if alive and not args.relieve:
+                    raise HarborError("WATCH_HELD", f"{holder} holds the watch until {hm.get('expires')}; only the owner's "
+                                      "word relieves it before then (--relieve REASON)")
+                hm.setdefault("history", []).append({"worker": holder, "since": hm.get("since"), "until": now(),
+                                                     "reason": f"relieved by the owner: {args.relieve}" if alive else "expired"})
+                hm["since"] = now()
+            elif not holder:
+                hm["since"] = now()
+            hm.update(worker=me["id"], last_control=now(), expires=fmt_ts(parse_ts(now()) + expiry(cfg)))
+            save(files, "harbor/harbormaster.toml", hm)
+            w["role"] = "harbormaster"
+            touch(files, w)
+            return hm
+
+        hm = transact(f"harbormaster takeover by {me['id']}", me["id"], mutate)
+        print(f"harbor: {me['id']} holds the watch until {hm['expires']}; control every {cfg['control_every_minutes']} "
+              "minutes, from a task this session schedules for itself")
+        return 0
+
+    # control
+    _, files = snapshot()
+    main_tip = fetch(MAIN)
+    tips = {}
+    for c in convoys(files).values():
+        if c.get("state") in OPEN:
+            for v in c.get("vessels") or []:
+                tips[v["branch"]] = fetch(v["branch"])
+    ci, ci_line = ci_health(cfg)
+
+    def mutate(files, h):
+        hm = watch(files)
+        if hm.get("worker") != me["id"]:
+            raise HarborError("NOT_HARBORMASTER", f"the watch is {hm.get('worker') or 'empty'}: harbormaster takeover first")
+        w = active_worker(files, me)
+        hm.update(last_control=now(), expires=fmt_ts(parse_ts(now()) + expiry(cfg)))
+        save(files, "harbor/harbormaster.toml", hm)
+        lines = [f"watch: {me['id']} until {hm['expires']}", f"main: {short(main_tip)} · {ci_line}"]
+        mt = load(files, "harbor/main.toml") or {}
+        cs = convoys(files)
+        cause = ""
+        if mt.get("head") and main_tip and mt["head"] != main_tip:
+            cause = next((f"convoy {n}" for n, c in cs.items() if (c.get("sail") or {}).get("main_after") == main_tip), None)
+            if not cause:
+                for n, c in cs.items():
+                    if c.get("state") == "verifying" and c.get("head") == main_tip:
+                        c["state"] = "sailed"
+                        c["sail"] = {"by": me["id"], "at": now(), "main_before": mt["head"], "main_after": main_tip}
+                        c.setdefault("events", []).append(event(me["id"], "sailed", "recorded by control: main already had it"))
+                        save_convoy(files, c)
+                        cause = f"convoy {n}"
+            cause = cause or "loose"
+            if cause == "loose":
+                lines.append(f"main moved {short(mt['head'])} → {short(main_tip)} with no convoy: a loose push, recorded")
+        if main_tip:
+            record_main_move(files, mt.get("head"), main_tip, me["id"], cause)
+        limit = parse_ts(now()) - expiry(cfg)
+        for wid, wk in workers(files).items():
+            if wk.get("state") == "active" and wid != me["id"] and parse_ts(wk.get("last_seen") or now()) < limit:
+                wk.update(state="lost", lost=now())
+                save(files, worker_path(wid), wk)
+                lines.append(f"lost: {wid} (last seen {wk.get('last_seen')}): its account's place is free")
+        ws = workers(files)
+        for n, c in convoys(files).items():
+            if c.get("state") not in OPEN:
+                continue
+            flags = []
+            if c.get("base") and main_tip and c["base"] != main_tip:
+                flags.append("main moved: assemble again")
+            flags += [f"{v['branch']} moved after delivery" for v in c.get("vessels") or []
+                      if v["branch"] in tips and tips[v["branch"]] != v["head"]]
+            sk = ws.get(c.get("skipper") or "")
+            if c.get("skipper") and (not sk or sk.get("state") != "active" or paused(accounts(files).get(sk.get("account")))):
+                flags.append(f"skipper {c['skipper']} is {(sk or {}).get('state', 'unknown')}: reassign")
+            if c.get("state") == "ready":
+                flags.append("waiting for the ok")
+            evs = c.get("events") or []
+            last_start = max((i for i, e in enumerate(evs) if e.get("what") == "verify-start"), default=None)
+            if last_start is not None and not any(e.get("what", "").startswith("verify-") and e.get("what") != "verify-start"
+                                                  for e in evs[last_start + 1:]) and parse_ts(evs[last_start]["at"]) < limit:
+                flags.append(f"verify started {evs[last_start]['at']} ({evs[last_start].get('detail')}) with no result")
+            lines.append(f"convoy {n} · {c['state']}" + (f" · {'; '.join(flags)}" if flags else ""))
+        touch(files, w)
+        return lines
+
+    lines = transact(f"harbormaster control by {me['id']}", me["id"], mutate)
+    print("\n".join(lines[:10]) + (f"\n… {len(lines) - 10} more in the logbook" if len(lines) > 10 else ""))
+    return 0
+
 # --- one-time import of a hand-kept board -------------------------------------------------------
 
 BOARD_STATES = [("armando", "assembling"), ("assembling", "assembling"), ("esperando", "waiting"), ("waiting", "waiting"),
@@ -994,6 +1587,24 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--tier", choices=TIERS)
     s = csub.add_parser("status")
     s.add_argument("number", type=int, nargs="?")
+    for name in ("assemble", "verify"):
+        csub.add_parser(name).add_argument("number", type=int)
+    s = csub.add_parser("sail")
+    s.add_argument("number", type=int)
+    s.add_argument("--ok", action="store_true", help="the harbormaster's ok, with --level and --reason")
+    s.add_argument("--level", choices=("changed", "all"))
+    s.add_argument("--reason")
+    s = csub.add_parser("abort")
+    s.add_argument("number", type=int)
+    s.add_argument("--reason", required=True)
+    s = csub.add_parser("defer")
+    s.add_argument("number", type=int)
+    s.add_argument("story")
+    hm = sub.add_parser("harbormaster")
+    hsub = hm.add_subparsers(dest="action", required=True)
+    s = hsub.add_parser("takeover")
+    s.add_argument("--relieve", metavar="REASON", help="only when the owner says so: take a watch that hasn't expired")
+    hsub.add_parser("control")
     sub.add_parser("log")
     i = sub.add_parser("import-board")
     i.add_argument("file")
@@ -1001,7 +1612,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"check": cmd_check, "init": cmd_init, "account": cmd_account, "worker": cmd_worker, "seal": cmd_seal,
-            "convoy": cmd_convoy, "log": cmd_log, "import-board": cmd_import_board}
+            "convoy": cmd_convoy, "log": cmd_log, "import-board": cmd_import_board, "harbormaster": cmd_harbormaster}
 
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:

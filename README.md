@@ -28,11 +28,11 @@ renamed during integration. Harbor keeps the process and takes the hand work awa
 
 ## Status
 
-Version 0.1.0, phase 1: the logbook, accounts, workers, seals, `convoy new`, `convoy add` and
-`convoy status`, the generated pages, and a one-time import of an existing `BOARD.md`. Assembling,
-verifying and sailing a convoy, and the harbormaster's watch, are designed in
-[`docs/design.md`](docs/design.md) but not written yet. The skills say so instead of doing those
-steps by hand.
+Version 0.1.0, not released. The whole cycle is written and tested against stand-ins for
+Keelokit's verify: the logbook, accounts and workers, seals, convoys from `new` to `sail`, the
+harbormaster's watch, and a one-time import of an existing `BOARD.md`. It hasn't run on a real
+project yet. What is designed but not written is listed at the top of
+[`docs/design.md`](docs/design.md).
 
 ## Commands
 
@@ -40,9 +40,10 @@ steps by hand.
 |---|---|
 | `/harbor:adopt` | Sets the convoy policy, this clone's account and host, the logbook, the account's cap and the hotspots. Imports a `BOARD.md` once if there is one |
 | `/harbor:convoy new\|add\|status` | Opens a convoy, adds a sealed vessel, shows what moved |
-| `/harbor:convoy assemble\|verify\|sail` | *Phase 2* |
+| `/harbor:convoy assemble\|verify\|sail` | Merges `main` and the vessels into `convoy/<n>`; the ok and its level; one verify on the exact head; one push to `main` |
+| `/harbor:convoy abort\|defer` | Gives a convoy up, or takes a late story out so the rest don't wait |
 | `/harbor:log` | The logbook: watch, convoys, workers, accounts |
-| `/harbor:harbormaster takeover\|control` | *Phase 2* |
+| `/harbor:harbormaster takeover\|control` | Takes the watch; the round that renews it, records every move of `main` and says what each convoy waits for |
 
 ## Try it
 
@@ -65,7 +66,8 @@ Then run `/harbor:adopt` in a Keelokit project. Tests: `python3 -m unittest disc
   `.keelokit/state.toml` and `.keelokit/local.toml`. It works offline and never blocks a session.
 - `harbor.py seal` runs the command in `[harbor] vessel_verify` from the project's `state.toml`. That
   is project code, just like the project's tests.
-- Phase 1 pushes only to `harbor/log`, never with `--force`, and never writes to `main`.
+- Harbor pushes to `harbor/log` and `convoy/<n>`, and to `main` only in `convoy sail`: a fast-forward
+  to a head with a green seal and the harbormaster's ok. Never with `--force`.
 
 ## License
 

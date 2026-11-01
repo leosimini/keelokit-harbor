@@ -29,11 +29,10 @@ timestamps de migraciones al integrar. Harbor mantiene el proceso y saca el trab
 
 ## Estado
 
-Versión 0.1.0, fase 1: el logbook, las cuentas, los workers, los sellos, `convoy new`, `convoy add` y
-`convoy status`, las páginas generadas, y la importación única de un `BOARD.md` existente. Armar,
-verificar y zarpar un convoy, y la guardia del harbormaster, están diseñados en
-[`docs/design.md`](docs/design.md) pero todavía no están escritos. Los skills lo dicen en lugar de
-hacer esos pasos a mano.
+Versión 0.1.0, sin publicar. El ciclo completo está escrito y probado contra sustitutos del verify
+de Keelokit: el logbook, las cuentas y los workers, los sellos, los convoys de `new` a `sail`, la
+guardia del harbormaster y la importación única de un `BOARD.md` existente. Todavía no corrió en un
+proyecto real. Lo diseñado y no escrito está al principio de [`docs/design.md`](docs/design.md).
 
 ## Comandos
 
@@ -41,9 +40,10 @@ hacer esos pasos a mano.
 |---|---|
 | `/harbor:adopt` | Configura la política de convoys, la cuenta y la máquina de este clon, el logbook, el tope de la cuenta y los hotspots. Importa una vez un `BOARD.md` si lo hay |
 | `/harbor:convoy new\|add\|status` | Abre un convoy, suma un vessel sellado, muestra qué se movió |
-| `/harbor:convoy assemble\|verify\|sail` | *Fase 2* |
+| `/harbor:convoy assemble\|verify\|sail` | Une `main` y los vessels en `convoy/<n>`; el ok y su nivel; un verify sobre la cabeza exacta; un push a `main` |
+| `/harbor:convoy abort\|defer` | Abandona un convoy, o saca una historia atrasada para que el resto no espere |
 | `/harbor:log` | El logbook: guardia, convoys, workers, cuentas |
-| `/harbor:harbormaster takeover\|control` | *Fase 2* |
+| `/harbor:harbormaster takeover\|control` | Toma la guardia; la ronda que la renueva, registra cada movimiento de `main` y dice qué espera cada convoy |
 
 ## Probarlo
 
@@ -66,7 +66,8 @@ Después corré `/harbor:adopt` en un proyecto con Keelokit. Tests: `python3 -m 
   y `.keelokit/local.toml` del proyecto. Funciona sin red y nunca bloquea una sesión.
 - `harbor.py seal` corre el comando de `[harbor] vessel_verify` del `state.toml` del proyecto. Es
   código del proyecto, igual que sus tests.
-- La fase 1 solo empuja a `harbor/log`, nunca con `--force`, y nunca escribe en `main`.
+- Harbor empuja a `harbor/log` y a `convoy/<n>`, y a `main` solo en `convoy sail`: un fast-forward a
+  una cabeza con sello verde y el ok del harbormaster. Nunca con `--force`.
 
 ## Licencia
 
