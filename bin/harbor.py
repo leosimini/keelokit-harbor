@@ -700,6 +700,10 @@ def steps_from(entry: dict) -> dict:
             "scope": str(entry.get("scope") or "") or None, "planned": names("planned"), "passed": names("passed"),
             "failed_steps": names("failed_steps") or names("failed"), "causes": names("causes"),
             "packages": names("packages"),
+            # A composite run: a narrowed --rerun-failed that, with the red run(s) before it, covered the
+            # whole plan (Keelokit sealed it). Kept so a composed green can always be traced back.
+            "composite_of": str(entry.get("composite_of") or "") or None,
+            "rerun_of": str(entry.get("rerun_of") or "") or None, "inherited": names("inherited"),
             "steps": [{"name": str(n), "seconds": int(t)} for n, t in entry.get("steps") or []
                       if isinstance(t, (int, float))]}
 

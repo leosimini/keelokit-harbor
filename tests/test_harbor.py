@@ -389,6 +389,20 @@ class TestSealAndKeelokit(Base):
                                          {"name": "e2e-stack", "seconds": 1210}])
         self.assertEqual((seal["planned"], seal["packages"], seal["partial"]), (["lint", "unit", "e2e-stack"], ["apps/web"], False))
 
+    def test_a_composite_run_keeps_its_level_and_says_what_it_builds_on(self):
+        red = "f" * 40
+        out = ok(self.seal(composite_of=red, rerun_of=red, inherited=["lint", "typecheck"], steps=[["unit", 41]]))
+        self.assertIn("pre-push accepts it (changed)", out)
+        seal = self.recorded()
+        self.assertEqual((seal["level"], seal["composite_of"], seal["inherited"]), ("changed", red, ["lint", "typecheck"]))
+        self.assertEqual(seal["steps"], [{"name": "unit", "seconds": 41}])
+
+    def test_a_rerun_that_could_not_compose_gets_no_level(self):
+        ok(self.seal(partial=True, rerun_of="f" * 40))
+        seal = self.recorded()
+        self.assertNotIn("level", seal)
+        self.assertNotIn("composite_of", seal)
+
     def test_a_partial_run_gets_no_level(self):
         out = ok(self.seal(partial=True, scope="./apps/web"))
         self.assertIn("not a shared seal", out)

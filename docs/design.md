@@ -56,8 +56,8 @@ Harbor depends on Keelokit and copies none of its code. It uses these as interfa
 | `touches`, `critical.toml` | an early hotspot warning, before any code *(phase 2)* |
 | the `Story:` trailer | which story a vessel carries, read from its commits |
 
-Keelokit's side of these interfaces is on its branch `landing-policy` (commit `4b22a548c`), not
-yet on its `main`: Harbor needs a Keelokit release that contains it.
+Keelokit's side of these interfaces is on its branch `landing-policy` (at `a251e8657`), not yet on
+its `main`: Harbor needs a Keelokit release that contains it.
 
 ## Configuration
 
@@ -287,6 +287,7 @@ duration_seconds = 840
 by = "leo/mbp/session_01Abc"
 level = "changed"                # only for a whole green verify (below): what Keelokit's pre-push reads
 reused = true                    # recorded from Keelokit's own run of this commit instead of running again
+composite_of = "9f3c…"           # a composite run: the head of the first red run it builds on (and rerun_of, inherited)
 keelokit_level = "changed"       # the rest is copied from keelokit-verify.history when it has a line for this run
 partial = false
 scope = ""                       # --packages / --filter selectors, if any
@@ -551,11 +552,15 @@ time as the scarce resource. Five rules:
    §6.3's chain, where every resume was broken by the previous fix. Then `pnpm verify
    --rerun-failed` runs only the failed steps plus what the fix's files route to. Keelokit narrows it
    only when the red run had the same base, scope and level and a clean tree, and runs the whole
-   verify when the fix touches files without a route or files that call for every step. The
-   catch: a rerun that narrowed is partial, so it leaves no seal, and the push would run the whole
-   verify again. Until Keelokit seals a narrowed rerun that completes the red run's plan (it holds
-   both runs), the convoy verify after a fix is the whole scoped run again: `--rerun-failed` gives
-   a fast answer on whether the fix works, and the whole run gives the seal.
+   verify when the fix touches files without a route or files that call for every step. It always
+   repeats audit, clock, doctor and sast, and a fix inside a package reruns every per-package step.
+   When the narrowed rerun passes and, with the passes it keeps from the red run before it (same
+   base, scope and level, clean tree), covers the whole plan of the diff, Keelokit seals it as a
+   *composite*: `partial = false` and `composite_of` = the head of the first red run of the chain,
+   in its history and in its seal. Harbor gives that seal a `level` like any whole run and keeps
+   `composite_of`, `rerun_of` and `inherited` in the logbook, so a composed green can always be
+   traced. A red costs one narrowed rerun, not a rerun plus a whole run. When Keelokit can't prove
+   the cover, the rerun stays partial and unsealed, and the whole scoped run gives the seal.
 4. **Spread the runs; never queue on one machine.** Keelokit runs one verify per machine (a lock in
    the git directory, §2.8), and other machines can't see it (§5.6). Vessel seals run on each
    vessel's machine: parallel across machines, serial on one. The logbook records each seal's host
@@ -591,7 +596,7 @@ Narrowing it further needs a related-tests mode in Keelokit, which it left out o
 is a warning that "related" isn't always cheaper (mobile `--findRelatedTests` took over 20 min),
 and nobody has measured it on a large monorepo yet.
 
-**What Harbor asked of Keelokit, and where it stands** (`landing-policy`, `4b22a548c`, not on
+**What Harbor asked of Keelokit, and where it stands** (`landing-policy` at `a251e8657`, not on
 Keelokit's `main` yet):
 
 | Need | State | For |
@@ -603,7 +608,7 @@ Keelokit's `main` yet):
 | history with `head`, `base`, `clean`, `scope`, `planned`, `passed`, `failed_steps`, `packages`, `step_packages` | done | reuse, `level`, measuring |
 | `[verify] shared_seals` | done, as proposed | sealing across machines |
 | related tests | not done: measure first (§6.12) | a lighter vessel verify |
-| seal a narrowed `--rerun-failed` that, with the red run before it, covers the whole plan | **to ask** | a red costing one rerun instead of a rerun plus a whole run |
+| seal a narrowed `--rerun-failed` that, with the red run before it, covers the whole plan | done (`0dc2fed59`, tightened in `a251e8657`): `composite_of` in history and seal | a red costing one rerun instead of a rerun plus a whole run |
 
 ## When main moves with a convoy assembled
 
