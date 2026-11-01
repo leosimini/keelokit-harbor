@@ -30,12 +30,15 @@ light and full → the verifier writes the tests first.
 
 ## Delivering (vessel)
 
-1. `build-story` done on your branch, every review fix committed, branch pushed.
-2. `python3 "$H" --session <id> seal` on a clean tree, in the background with a log if it is long
-   (`nohup … > seal.log 2>&1 &`, then one `until` on its exit). It runs the vessel verify on this
-   exact commit and records the result by hash, with the time of each step. Red: fix, commit,
-   push, seal again. Keelokit runs one verify per machine: a seal on a machine that is already
-   verifying waits for it, so a skipper with several hosts spreads vessels across them.
+1. `build-story` done on your branch, every review fix committed, branch pushed. Its pre-push ran
+   Keelokit's whole verify on that exact commit.
+2. `python3 "$H" --session <id> seal` on the same clean checkout. It finds that run in Keelokit's
+   history and records it without running again ("already passed Keelokit's verify"). If it runs
+   the verify instead (`main` moved, the run was partial or red), put it in the background with a
+   log (`nohup … > seal.log 2>&1 &`, then one `until` on its exit). Red: fix, commit, push, seal
+   again. Keelokit runs one verify per machine: a seal on a machine that is already verifying waits
+   for it, so a skipper with several hosts spreads vessels across them. The last line says whether
+   Keelokit's pre-push will accept the seal from other machines.
 3. Hand the skipper three things, nothing else: branch, full hash, tier. Any later commit voids the
    delivery: seal the new tip and hand that.
 

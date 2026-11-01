@@ -47,7 +47,8 @@ hacer esos pasos a mano.
 
 ## Probarlo
 
-Necesita Keelokit en el proyecto (`.keelokit/`), Python 3.11+, git y un remoto `origin`. Todavía no
+Necesita Keelokit en el proyecto (`.keelokit/`) con la política de convoys y los sellos compartidos
+(en la rama `landing-policy` de Keelokit, todavía sin publicar), Python 3.11+, git y un remoto `origin`. Todavía no
 está publicado. Para cargarlo desde un clon:
 
 ```bash

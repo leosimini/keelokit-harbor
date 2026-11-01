@@ -16,6 +16,9 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    [landing]
    policy = "convoy"
 
+   [verify]
+   shared_seals = "origin/harbor/log:harbor/seals/{head}.toml"
+
    [harbor]
    integrator = "any"     # or a pilot account that integrates every convoy
 
@@ -24,6 +27,10 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    harbormaster = "sonnet"
    ```
    Explain in one sentence: from now on stories land through convoys, not one push per session.
+   And one more: with `shared_seals`, a commit verified on one machine isn't verified again when
+   another machine pushes it, as long as nobody can push to `harbor/log` who couldn't push to `main`.
+   If `doctor.py` rejects `[landing]` or `[verify] shared_seals`, this Keelokit predates them: say
+   which version is needed and stop.
    Land this change on `main` the way the project lands today; it is the last direct landing.
 3. **This clone.** Ask the account name (the Claude account these sessions run on) and a short
    host name. Write `.keelokit/local.toml` (`[harbor] account = …, host = …`) and add

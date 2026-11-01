@@ -339,38 +339,94 @@ class TestSeal(Base):
         self.assertEqual(seal["command"], f"test {seal['base']} != x")
 
 
-class TestSealSteps(Base):
-    """A seal copies Keelokit's per-step timings for that run, so the logbook can show where verify time goes."""
+FAKE_VERIFY = """\
+# A stand-in for Keelokit's verify.sh: appends the history line verify.sh writes, with the fields Harbor reads.
+# $1 = head; HARBOR_FAKE = JSON fields to override (partial, clean, base, result, level).
+h=$(git rev-parse --git-common-dir)/keelokit-verify.history
+python3 - "$1" "$h" <<'PY'
+import json, os, subprocess, sys, time
+head, path = sys.argv[1], sys.argv[2]
+base = subprocess.run(["git", "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
+entry = {"t": int(time.time()), "head": head, "base": base, "level": "changed", "result": "pass", "rc": 0,
+         "partial": False, "scope": "", "clean": True, "planned": ["lint", "unit", "e2e-stack"],
+         "passed": ["lint", "unit", "e2e-stack"], "failed_steps": [], "packages": ["apps/web"],
+         "steps": [["lint", 12], ["unit", 340], ["e2e-stack", 1210]], "failed": [], "causes": []}
+entry.update(json.loads(os.environ.get("HARBOR_FAKE") or "{}"))
+with open(path, "a") as f:
+    f.write(json.dumps(entry) + "\\n")
+sys.exit(entry["rc"])
+PY
+"""
+
+
+class TestSealAndKeelokit(Base):
+    """What a seal takes from Keelokit's history: the steps, and `level` only for a whole green verify, which is
+    what lets Keelokit's pre-push accept it as a shared seal. A run Keelokit already made is reused."""
     verify = "sh .keelokit/fake-verify.sh {head}"
 
-    def test_the_steps_of_the_run_are_recorded(self):
-        script = self.a / ".keelokit/fake-verify.sh"
-        script.write_text(
-            'h=$(git rev-parse --git-common-dir)/keelokit-verify.history\n'
-            'echo \'{"t": 1, "head": "old", "steps": [["unit", 9]]}\' >> "$h"\n'
-            'printf \'{"t": %s, "head": "%s", "level": "changed", "result": "pass", "rc": 0, '
-            '"steps": [["lint", 12], ["unit", 340], ["e2e-stack", 1210]], "failed": [], "causes": []}\\n\' '
-            '"$(date +%s)" "$(echo "$1" | cut -c1-12)" >> "$h"\n')
+    def setUp(self):
+        super().setUp()
+        (self.a / ".keelokit/fake-verify.sh").write_text(FAKE_VERIFY)
         sh(self.a, "git", "add", "-A")
         sh(self.a, "git", "commit", "--quiet", "-m", "fake verify")
         sh(self.a, "git", "push", "--quiet", "origin", "main")
         self.ready(role="vessel")
-        head = vessel(self.a, "claude/qa-1", "apps/web/a.ts")
-        ok(harbor(self.a, "seal"))
-        seal = self.repo.log_toml(f"harbor/seals/{head}.toml")
+        self.head = vessel(self.a, "claude/qa-1", "apps/web/a.ts")
+
+    def seal(self, **fake):
+        import json
+        return harbor(self.a, "seal", env={"HARBOR_FAKE": json.dumps(fake)})
+
+    def recorded(self) -> dict:
+        return self.repo.log_toml(f"harbor/seals/{self.head}.toml")
+
+    def test_a_whole_green_verify_gets_a_level_and_its_steps(self):
+        out = ok(self.seal())
+        self.assertIn("pre-push accepts it (changed)", out)
+        seal = self.recorded()
+        self.assertEqual(seal["level"], "changed")
         self.assertEqual(seal["steps"], [{"name": "lint", "seconds": 12}, {"name": "unit", "seconds": 340},
                                          {"name": "e2e-stack", "seconds": 1210}])
-        self.assertEqual((seal["keelokit_level"], seal["failed_steps"]), ("changed", []))
+        self.assertEqual((seal["planned"], seal["packages"], seal["partial"]), (["lint", "unit", "e2e-stack"], ["apps/web"], False))
 
-    def test_without_a_history_line_the_seal_has_no_steps(self):
-        (self.a / ".keelokit/fake-verify.sh").write_text("exit 0\n")
-        sh(self.a, "git", "add", "-A")
-        sh(self.a, "git", "commit", "--quiet", "-m", "fake verify")
-        sh(self.a, "git", "push", "--quiet", "origin", "main")
-        self.ready(role="vessel")
-        head = vessel(self.a, "claude/qa-1", "apps/web/a.ts")
-        ok(harbor(self.a, "seal"))
-        self.assertNotIn("steps", self.repo.log_toml(f"harbor/seals/{head}.toml"))
+    def test_a_partial_run_gets_no_level(self):
+        out = ok(self.seal(partial=True, scope="./apps/web"))
+        self.assertIn("not a shared seal", out)
+        seal = self.recorded()
+        self.assertNotIn("level", seal)
+        self.assertEqual(seal["exit"], 0)
+
+    def test_a_dirty_start_or_another_base_gets_no_level(self):
+        ok(self.seal(clean=False))
+        self.assertNotIn("level", self.recorded())
+        ok(self.seal(base="0" * 40))
+        self.assertNotIn("level", self.recorded())
+
+    def test_a_red_run_gets_no_level(self):
+        res = self.seal(result="fail", rc=1, failed_steps=["unit"], causes=["heap"])
+        self.assertEqual(res.returncode, 1)
+        seal = self.recorded()
+        self.assertNotIn("level", seal)
+        self.assertEqual((seal["failed_steps"], seal["causes"]), (["unit"], ["heap"]))
+
+    def test_keelokits_own_green_run_is_reused_not_repeated(self):
+        ok(self.seal())  # stands for build-story's `pnpm verify`, which writes the same history line
+        (self.a / ".keelokit/state.toml").write_text(
+            (self.a / ".keelokit/state.toml").read_text().replace("sh .keelokit/fake-verify.sh {head}", "false"))
+        sh(self.a, "git", "update-index", "--assume-unchanged", ".keelokit/state.toml")
+        out = ok(harbor(self.a, "seal"))
+        self.assertIn("already passed Keelokit's verify", out)
+        seal = self.recorded()
+        self.assertEqual((seal["reused"], seal["exit"], seal["level"], seal["duration_seconds"]), (True, 0, "changed", 1562))
+        res = harbor(self.a, "seal", "--rerun")
+        self.assertEqual(res.returncode, 1, "--rerun runs the command (here `false`) instead of reusing")
+
+    def test_a_partial_green_run_is_not_reused(self):
+        ok(self.seal(partial=True))
+        (self.a / ".keelokit/state.toml").write_text(
+            (self.a / ".keelokit/state.toml").read_text().replace("sh .keelokit/fake-verify.sh {head}", "false"))
+        sh(self.a, "git", "update-index", "--assume-unchanged", ".keelokit/state.toml")
+        self.assertEqual(harbor(self.a, "seal").returncode, 1)
 
 
 class TestRedSeal(Base):

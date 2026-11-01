@@ -14,7 +14,8 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py worker register --role vessel|skipper|harbormaster [--convoy N] [--branch B] [--model M]
     harbor.py worker end [--branch B --head SHA] [--verified TEXT] [--pending TEXT]
                          [--worktree PATH] [--log PATH]
-    harbor.py seal                           run the vessel verify on HEAD, record the result by hash
+    harbor.py seal [--rerun]                 record the vessel verify of HEAD by hash: Keelokit's own run of
+                                             this commit against today's main if it passed, else run it
     harbor.py convoy new [--title T] [--expect STORY ...] [--depends N ...]
     harbor.py convoy add N BRANCH [--head SHA] [--story ID] [--tier trivial|light|full]
     harbor.py convoy status [N]
@@ -617,42 +618,60 @@ def cmd_seal(args) -> int:
     base = fetch(MAIN)
     if not base:
         raise HarborError("NO_MAIN", f"{REMOTE} has no {MAIN}")
-    cmd = cfg["vessel_verify"].format(base=base, head=head, branch=branch)
-    started, t0, wall = now(), time.monotonic(), int(time.time()) - 1
-    print(f"harbor: sealing {branch}@{short(head)} with `{cmd}`", flush=True)
-    try:
-        rc = subprocess.run(shlex.split(cmd), cwd=ROOT).returncode
-    except FileNotFoundError as e:
-        raise HarborError("VERIFY_NOT_FOUND", f"`{cmd}`: {e}")
-    duration = int(time.monotonic() - t0)
-    if git("rev-parse", "HEAD") != head or git("status", "--porcelain", "--untracked-files=normal"):
-        raise HarborError("SEAL_INVALID", "HEAD or the tree changed during the run, so the result speaks for no commit; "
-                          "commit what changed and seal again")
-    seal = {"schema": SCHEMA, "kind": "vessel", "head": head, "branch": branch, "base": base, "command": cmd, "exit": rc,
-            "result": "pass" if rc == 0 else "fail", "started": started, "finished": now(),
-            "duration_seconds": duration, "by": me["id"]}
-    if entry := keelokit_history(head, wall):
-        seal["keelokit_level"] = str(entry.get("level") or "") or None
-        seal["failed_steps"] = [str(f) for f in entry.get("failed") or []]
-        seal["causes"] = [str(c) for c in entry.get("causes") or []]
-        seal["steps"] = [{"name": str(n), "seconds": int(t)} for n, t in entry.get("steps") or []
-                         if isinstance(t, (int, float))]
+    previous = None if args.rerun else keelokit_history(head)
+    if previous and full_run(previous, head, base):
+        # build-story already ran Keelokit's verify on this exact commit against today's main: record it
+        # instead of running it a second time.
+        seal = {"schema": SCHEMA, "kind": "vessel", "head": head, "branch": branch, "base": base,
+                "command": "pnpm verify (run by Keelokit, read from keelokit-verify.history)", "exit": 0,
+                "result": "pass", "started": fmt_ts(dt.datetime.fromtimestamp(previous["t"], dt.timezone.utc)),
+                "finished": now(), "duration_seconds": sum(int(t) for _, t in previous.get("steps") or []
+                                                           if isinstance(t, (int, float))),
+                "by": me["id"], "reused": True}
+        rc = 0
+        print(f"harbor: {branch}@{short(head)} already passed Keelokit's verify against {short(base)}; recording that run")
+    else:
+        cmd = cfg["vessel_verify"].format(base=base, head=head, branch=branch)
+        started, t0, wall = now(), time.monotonic(), int(time.time()) - 1
+        print(f"harbor: sealing {branch}@{short(head)} with `{cmd}`", flush=True)
+        try:
+            rc = subprocess.run(shlex.split(cmd), cwd=ROOT).returncode
+        except FileNotFoundError as e:
+            raise HarborError("VERIFY_NOT_FOUND", f"`{cmd}`: {e}")
+        duration = int(time.monotonic() - t0)
+        if git("rev-parse", "HEAD") != head or git("status", "--porcelain", "--untracked-files=normal"):
+            raise HarborError("SEAL_INVALID", "HEAD or the tree changed during the run, so the result speaks for no commit; "
+                              "commit what changed and seal again")
+        seal = {"schema": SCHEMA, "kind": "vessel", "head": head, "branch": branch, "base": base, "command": cmd,
+                "exit": rc, "result": "pass" if rc == 0 else "fail", "started": started, "finished": now(),
+                "duration_seconds": duration, "by": me["id"]}
+        previous = keelokit_history(head, since=wall)
+    if previous:
+        seal.update(steps_from(previous))
+        # Keelokit's pre-push accepts this file as a shared seal only with `level`, so it is written only
+        # when Keelokit's own record says the run was a whole verify (not partial), green, on a clean
+        # tree, against this base. Anything less proves less, and must not skip the pre-push.
+        if rc == 0 and full_run(previous, head, base):
+            seal["level"] = previous["level"]
 
     def mutate(files, h):
         save(files, f"harbor/seals/{head}.toml", seal)
 
     transact(f"seal {branch}@{short(head)} exit {rc}", me["id"], mutate)
-    print(f"harbor: seal for {short(head)} recorded: {seal['result']} (exit {rc}, {duration} s)")
+    shared = (f"Keelokit's pre-push accepts it ({seal['level']})" if seal.get("level")
+              else "not a shared seal: Keelokit's pre-push will run its verify")
+    print(f"harbor: seal for {short(head)} recorded: {seal['result']} (exit {rc}, {seal['duration_seconds']} s); {shared}")
     return 0 if rc == 0 else 1
 
 
-def keelokit_history(head: str, since: float) -> dict | None:
-    """The line Keelokit's verify.sh appended to keelokit-verify.history for this run, if it wrote one:
-    time per step, failed steps, known causes. Read, never required: any other command leaves none."""
+def keelokit_history(head: str, since: float = 0) -> dict | None:
+    """The newest line Keelokit's verify.sh appended to keelokit-verify.history for this commit (since
+    `since`): time per step, planned, passed and failed steps, scope, packages, causes. Read, never
+    required: a command other than Keelokit's verify leaves none."""
     common = Path(git("rev-parse", "--git-common-dir"))
     path = (common if common.is_absolute() else ROOT / common) / "keelokit-verify.history"
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-20:]
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
     except OSError:
         return None
     for line in reversed(lines):
@@ -663,6 +682,26 @@ def keelokit_history(head: str, since: float) -> dict | None:
         if isinstance(entry, dict) and head.startswith(str(entry.get("head") or "-")) and entry.get("t", 0) >= since:
             return entry
     return None
+
+
+def full_run(entry: dict, head: str, base: str) -> bool:
+    """A whole Keelokit verify of exactly this commit against this base: green, not partial (no --steps,
+    --packages, --filter or --rerun-failed), started on a clean tree. Older history lines lack these
+    fields and never qualify."""
+    return (entry.get("head") == head and entry.get("base") == base and entry.get("result") == "pass"
+            and entry.get("rc") == 0 and entry.get("partial") is False and entry.get("clean") is True
+            and entry.get("level") in ("changed", "all"))
+
+
+def steps_from(entry: dict) -> dict:
+    def names(key):
+        return [str(x) for x in entry.get(key) or [] if isinstance(x, str)]
+    return {"keelokit_level": str(entry.get("level") or "") or None, "partial": entry.get("partial"),
+            "scope": str(entry.get("scope") or "") or None, "planned": names("planned"), "passed": names("passed"),
+            "failed_steps": names("failed_steps") or names("failed"), "causes": names("causes"),
+            "packages": names("packages"),
+            "steps": [{"name": str(n), "seconds": int(t)} for n, t in entry.get("steps") or []
+                      if isinstance(t, (int, float))]}
 
 
 def hotspots_of(paths: list[str], spots: dict) -> list[str]:
@@ -935,7 +974,8 @@ def parser() -> argparse.ArgumentParser:
     s = wsub.add_parser("end")
     for f in ("--branch", "--head", "--verified", "--pending", "--worktree", "--log"):
         s.add_argument(f)
-    sub.add_parser("seal")
+    s = sub.add_parser("seal")
+    s.add_argument("--rerun", action="store_true", help="run the verify even if Keelokit already passed this commit")
     cv = sub.add_parser("convoy")
     csub = cv.add_subparsers(dest="action", required=True)
     s = csub.add_parser("new")
