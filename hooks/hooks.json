@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v python3 >/dev/null || { echo 'Harbor: python3 not found, so Harbor is off. Install Python 3.11+.'; exit 0; }; cd \"${CLAUDE_PROJECT_DIR:-.}\" 2>/dev/null; python3 \"${CLAUDE_PLUGIN_ROOT}/bin/harbor.py\" check --hook; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

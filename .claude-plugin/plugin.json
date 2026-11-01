@@ -1,0 +1,17 @@
+{
+  "name": "harbor",
+  "version": "0.1.0",
+  "description": "Convoys for Keelokit: branches from several sessions, accounts and machines, integrated in one branch, verified once and landed on main with one push. The shared state is a git branch only Harbor writes.",
+  "author": {
+    "name": "Leopoldo Simini",
+    "url": "https://leopoldosimini.com"
+  },
+  "repository": "https://github.com/leosimini/keelokit-harbor",
+  "keywords": [
+    "claude-code",
+    "keelokit",
+    "integration",
+    "parallel-sessions",
+    "git"
+  ]
+}
