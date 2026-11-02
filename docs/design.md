@@ -528,6 +528,22 @@ an integrator. What the harbormaster does not see (a session's local verify lock
 (§3.4); that this was intended is a **HIPÓTESIS**, so Harbor's default is Sonnet, with
 `[harbor.models] harbormaster` to change it.
 
+## Keelokit's pre-push and Harbor's pushes
+
+Keelokit's pre-push hook runs `pnpm verify --use-seal` on every push, not only on `main` (checked on
+Keelokit 0.11.0 with `scripts/test-with-keelokit.sh`). Three consequences:
+- **`convoy/<n>`:** pushing the assembled head verifies it. When that run is whole and green
+  against today's `main`, `assemble` records it as the convoy's seal, and `convoy verify` at the
+  `changed` level runs nothing. A red one leaves the merge on the local `convoy/<n>`
+  (`CONVOY_PUSH_FAILED`).
+- **A vessel's branch:** `build-story` verifies with `--since origin/main`, which leaves no local
+  seal, so the push verifies again. Asked of Keelokit: verify a convoy-policy branch with plain
+  `pnpm verify`, the same scope, sealed.
+- **The logbook:** every `harbor.py` write pushes `harbor/log`, and the hook verifies whatever
+  HEAD the session's checkout has: on unverified work, a heartbeat costs a whole verify, and a red
+  one stops the write. Asked of Keelokit: skip a push whose only ref is the `shared_seals` branch,
+  which holds no code. Harbor doesn't use `--no-verify` to get around it.
+
 ## Verifying without a bottleneck
 
 In a large monorepo the verify is the queue everyone waits in. JOUNA's numbers: `--all` took
