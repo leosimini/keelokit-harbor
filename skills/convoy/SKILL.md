@@ -22,14 +22,16 @@ names it in `--depends`. Report the number and the base.
 ## Launching vessels (skipper)
 
 One session per story, each with the model Keelokit's brief gives its role and tier, named on every
-`Agent` or `create_session`. Whoever launches a session owns its result, so the prompt says who:
+`Agent` or `create_session`, and titled from the data, never by hand:
+`python3 "$H" title --role vessel --convoy <n> --story <ID>` prints it (`jouna · C8 · ola 1 ·
+CARGA-001`); launch the session with that title. Whoever launches a session owns its result, so the
+prompt says who:
 `Read .keelokit/harness/agent-brief.md. Register with harbor.py worker register --role vessel
---convoy <n> --spawned-by <your worker id>, then /keelokit:build-story <ID>. You are a vessel of
-convoy <n>: land on your pushed branch, never on main, then deliver as /harbor:convoy says.`
-Before this session ends, every session it launched is delivered, ended or handed over:
-`worker end` lists the ones still running.
-The tier is the vessel's `build-story` call; the first agent follows it: trivial → builder;
-light and full → the verifier writes the tests first.
+--convoy <n> --story <ID> --spawned-by <your worker id>, then /keelokit:build-story <ID>. You are a
+vessel of convoy <n>: land on your pushed branch, never on main, then deliver as /harbor:convoy says.`
+`convoy new` prints your own title as skipper; set it on this session. Before this session ends,
+every session it launched is delivered, ended or handed over: `worker end` lists the ones still
+running.
 
 ## Delivering (vessel)
 
@@ -93,7 +95,7 @@ that completes the plan. Don't run vessel seals on this machine while it verifie
 
 `python3 "$H" --session <id> convoy sail <n>`, from the machine that verified. It pushes the sealed
 head to `main` as a fast-forward; `MAIN_MOVED` means assemble again and a new ok. `NEEDS_PERSON`:
-tell the person what to review (`git show origin/harbor/log:convoys/<n>.md`, `git diff
+tell the person what to review (`git show origin/harbor/log:harbor/convoys/<n>.md`, `git diff
 origin/main...origin/convoy/<n>`) and that they approve by running `python3 <harbor.py> convoy approve
 <n>` in their own terminal. Never run it yourself: Harbor's hook blocks it, and getting around the
 hook is approving in their name. Report the hash on

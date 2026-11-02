@@ -17,7 +17,7 @@ import json, os, subprocess, sys, time
 head, path, level = sys.argv[1], sys.argv[2], sys.argv[3]
 base = subprocess.run(["git", "rev-parse", "origin/main"], capture_output=True, text=True).stdout.strip()
 entry = {"t": int(time.time()), "head": head, "base": base, "level": level, "result": "pass", "rc": 0,
-         "partial": False, "scope": "", "clean": True, "planned": ["unit"], "passed": ["unit"], "failed_steps": [],
+         "partial": False, "since": False, "scope": "", "clean": True, "planned": ["unit"], "passed": ["unit"], "failed_steps": [],
          "packages": [], "steps": [["unit", 5]], "failed": [], "causes": []}
 entry.update(json.loads(os.environ.get("HARBOR_FAKE") or "{}"))
 with open(path, "a") as f:
@@ -103,7 +103,7 @@ class TestWatch(Phase2):
         self.assertEqual((hm["worker"], hm["since"], hm["last_control"], hm["expires"]),
                          ("leo/mbp/s1", NOW, NOW, "2026-11-01T19:00:00Z"))
         self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/s1.toml")["role"], "harbormaster")
-        self.assertIn("leo/mbp/s1, since", self.repo.log_files()["LOGBOOK.md"])
+        self.assertIn("leo/mbp/s1, since", self.repo.log_files()["harbor/LOGBOOK.md"])
 
     def test_a_held_watch_is_refused_until_it_expires(self):
         ok(harbor(self.a, "worker", "register", "--role", "skipper", session="s2"))
@@ -148,7 +148,7 @@ class TestWatch(Phase2):
         moves = self.repo.log_toml("harbor/main.toml")["moves"]
         self.assertEqual((moves[-1]["cause"], moves[-1]["to"]), ("loose", self.repo.main_sha()))
         self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/s2.toml")["state"], "lost")
-        self.assertIn("Moves no convoy explains", self.repo.log_files()["LOGBOOK.md"])
+        self.assertIn("Moves no convoy explains", self.repo.log_files()["harbor/LOGBOOK.md"])
 
 
 class TestOwners(Phase2):
@@ -160,7 +160,7 @@ class TestOwners(Phase2):
         ok(harbor(self.a, "worker", "register", "--role", "vessel", "--branch", "claude/x", session="s2"))
         self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/s2.toml")["spawned_by"], "leo/mbp/s1",
                          "registering again keeps the owner")
-        self.assertIn("| leo/mbp/s2 | vessel |", self.repo.log_files()["LOGBOOK.md"])
+        self.assertIn("| ↳ leo/mbp/s2 | leo/mbp/s2 | vessel |", self.repo.log_files()["harbor/LOGBOOK.md"])
 
     def test_the_owner_must_be_an_active_worker(self):
         res = harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/nobody", session="s2")
@@ -185,6 +185,56 @@ class TestOwners(Phase2):
         out = ok(harbor(self.a, "harbormaster", "control", env={"HARBOR_NOW": "2026-11-01T19:30:00Z"}))
         self.assertIn("lost: leo/mbp/boss", out)
         self.assertIn("orphan: leo/mbp/kid, spawned by leo/mbp/boss, which is lost", out)
+
+
+STATUS = """\
+import sys
+# Keelokit 0.12's status.py title, as far as Harbor sees it.
+waves = {"QA-1": 2, "QA-3": 2}
+args = sys.argv[1:]
+if args[:1] != ["title"]:
+    sys.exit(2)
+if args[1:] == ["--role", "coordinator"]:
+    print("Demo · coordinator")
+elif len(args) == 2 and args[1] in waves:
+    print(f"Demo · wave {waves[args[1]]} · {args[1]}")
+else:
+    sys.exit(2)
+"""
+
+
+class TestTitles(Phase2):
+    def setUp(self):
+        super().setUp()
+        (self.a / ".keelokit/bin").mkdir(exist_ok=True)
+        (self.a / ".keelokit/bin/status.py").write_text(STATUS)
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "status.py")
+
+    def test_each_role_gets_keelokits_title_with_the_convoy(self):
+        out = ok(harbor(self.a, "harbormaster", "takeover"))
+        self.assertIn("session title: Demo · harbormaster", out)
+        ok(harbor(self.a, "worker", "register", "--role", "skipper", session="sk"))
+        out = ok(harbor(self.a, "convoy", "new", session="sk"))
+        self.assertIn("session title: Demo · C1 · skipper", out)
+        out = ok(harbor(self.a, "worker", "register", "--role", "vessel", "--convoy", "1", "--story", "QA-1",
+                        "--spawned-by", "leo/mbp/sk", "--branch", "claude/keen-x", session="v1"))
+        self.assertIn("session title: Demo · C1 · wave 2 · QA-1", out)
+        w = self.repo.log_toml("harbor/workers/leo/mbp/v1.toml")
+        self.assertEqual((w["title"], w["story"], w["canonical_branch"]), ("Demo · C1 · wave 2 · QA-1", "QA-1", "qa-1"))
+        view = self.repo.log_files()["harbor/LOGBOOK.md"]
+        self.assertIn("| Demo · C1 · skipper | leo/mbp/sk |", view)
+        self.assertIn("| ↳ Demo · C1 · wave 2 · QA-1 | leo/mbp/v1 | vessel | claude/keen-x (qa-1) |", view)
+
+    def test_the_title_before_the_session_exists(self):
+        self.assertEqual(ok(harbor(self.a, "title", "--role", "vessel", "--convoy", "3", "--story", "QA-3")).strip(),
+                         "Demo · C3 · wave 2 · QA-3")
+        self.assertEqual(ok(harbor(self.a, "title", "--role", "harbormaster")).strip(), "Demo · harbormaster")
+        self.assertIn("NO_TITLE", harbor(self.a, "title", "--role", "vessel", "--story", "NOPE-1").stderr)
+
+    def test_an_unknown_story_is_refused(self):
+        res = harbor(self.a, "worker", "register", "--role", "vessel", "--story", "NOPE-1", session="v1")
+        self.assertIn("UNKNOWN_STORY", res.stderr)
 
 
 class TestModels(Phase2):
@@ -303,7 +353,7 @@ class TestSail(Phase2):
         out = ok(harbor(self.a, "convoy", "verify", "1"))
         self.assertIn("sealed, ready to sail", out)
         head = self.convoy()["head"]
-        seal = self.repo.log_toml(f"harbor/seals/{head}.toml")
+        seal = self.repo.log_toml(f"harbor/runs/{head}.toml")
         self.assertEqual((seal["kind"], seal["level"], seal["exit"], seal["convoy"]), ("convoy", "changed", 0, 1))
         self.assertEqual(self.events()[-2:], ["verify-start", "verify-pass"])
         ok(harbor(self.a, "convoy", "sail", "1"))
@@ -314,7 +364,10 @@ class TestSail(Phase2):
         trailers = sh(self.repo.remote, "git", "log", "main", "--format=%(trailers:key=Story,valueonly)")
         self.assertIn("QA-1", trailers)
         self.assertIn("QA-3", trailers)
-        self.assertIn("Sailed:", self.repo.log_files()["convoys/1.md"])
+        files = self.repo.log_files()
+        self.assertIn("Sailed:", files["harbor/convoys/1.md"])
+        self.assertEqual([p for p in files if not p.startswith("harbor/")], [],
+                         "Keelokit 0.12 lets the logbook through unverified only when every file is under harbor/")
 
     def test_a_one_vessel_convoy_reuses_the_vessel_seal(self):
         ok(harbor(self.a, "convoy", "new"))
@@ -375,7 +428,7 @@ class TestSail(Phase2):
         ok(harbor(self.a, "convoy", "sail", "1", "--ok", "--level", "all", "--reason", "scripts/ changed"))
         ok(harbor(self.a, "convoy", "verify", "1"))
         self.assertEqual(self.runs()[-1], "convoy-all")
-        seal = self.repo.log_toml(f"harbor/seals/{self.convoy()['head']}.toml")
+        seal = self.repo.log_toml(f"harbor/runs/{self.convoy()['head']}.toml")
         self.assertEqual(seal["level"], "all")
 
     def test_main_moving_voids_the_ok_and_assembly_merges_it(self):
@@ -456,7 +509,7 @@ class TestPrePushSeal(Phase2):
     def test_the_assembly_push_verify_is_the_convoy_verify(self):
         a, b = self.two_vessels_ready()
         head = self.convoy()["head"]
-        seal = self.repo.log_toml(f"harbor/seals/{head}.toml")
+        seal = self.repo.log_toml(f"harbor/runs/{head}.toml")
         self.assertEqual((seal["kind"], seal["level"], seal["reused"]), ("convoy", "changed", True))
         ok(self.ok_changed())
         runs = self.runs()
@@ -498,7 +551,7 @@ class TestPersonOk(Phase2):
         self.assertIn("approved", out)
         person = self.convoy()["ok"]["person"]
         self.assertEqual((person["by"], person["head"], person["note"]), ("leo/mbp/-", self.convoy()["head"], "read the diff"))
-        self.assertIn("Person's yes: given by leo/mbp/-", self.repo.log_files()["convoys/1.md"])
+        self.assertIn("Person's yes: given by leo/mbp/-", self.repo.log_files()["harbor/convoys/1.md"])
         ok(harbor(self.a, "convoy", "sail", "1"))
         self.assertEqual(self.repo.main_sha(), self.convoy()["head"])
 

@@ -12,7 +12,8 @@ description: Keep Harbor's watch — take it when nobody holds it or it expired 
 
 ## takeover
 
-`python3 "$H" --session <id> harbormaster takeover`. Refused with `WATCH_HELD` while another
+`python3 "$H" --session <id> harbormaster takeover`; set this session's title to the one it prints.
+Refused with `WATCH_HELD` while another
 session's watch hasn't expired; `--relieve "<reason>"` only when the person says so in this
 conversation. Then schedule this session's own control every `[harbor] control_every_minutes`
 (a task another session scheduled doesn't reach this one): one scheduled message to itself that
@@ -31,7 +32,7 @@ The ok, and anything else that needs judgment, stays in this session, on `harbor
 (a convoy's sail, or a loose push), marks workers not seen within the expiry as lost, and prints one
 line per open convoy with what it waits for. Act on each line:
 - `waiting for the person's yes`: remind the person once, with what to review; don't approve.
-- `waiting for the ok`: read the convoy (`git show origin/harbor/log:convoys/<n>.md`, its diff
+- `waiting for the ok`: read the convoy (`git show origin/harbor/log:harbor/convoys/<n>.md`, its diff
   against main) and give the ok with its level and reason (`/harbor:convoy`, "The ok"), or say why not.
 - `main moved`: tell the convoy's integrator to assemble again.
 - `skipper … is lost/ended`: tell the person; reassigning is theirs to approve.

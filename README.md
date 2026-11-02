@@ -47,8 +47,7 @@ project yet. What is designed but not written is listed at the top of
 
 ## Try it
 
-It needs Keelokit in the project (`.keelokit/`) with the convoy policy and shared seals (on
-Keelokit's `landing-policy` branch, not released yet), Python 3.11+, git, and a remote `origin`.
+It needs Keelokit 0.12.0 or later in the project (`.keelokit/`), Python 3.11+, git, and a remote `origin`.
 It isn't published yet. To load it from a clone:
 
 ```bash

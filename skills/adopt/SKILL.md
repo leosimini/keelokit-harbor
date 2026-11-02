@@ -8,7 +8,9 @@ description: Set Harbor up on a Keelokit project — the convoy landing policy, 
 `H="${CLAUDE_PLUGIN_ROOT}/bin/harbor.py"`. Every write to the logbook goes through `python3 "$H"`;
 never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
 
-1. **Keelokit first.** No `.keelokit/` → say Harbor works on top of Keelokit, point to
+1. **Keelokit first, 0.12.0 or later** (`version` in its `plugin.json`; `.keelokit/bin/status.py title`
+   exists). Older: say Harbor needs 0.12 (its pre-push lets the logbook through, and it titles
+   sessions) and point to `/keelokit:harness-upgrade`. No `.keelokit/` → say Harbor works on top of Keelokit, point to
    `/keelokit:project-adopt`, and stop. No remote `origin` → stop: the logbook lives there.
 2. **The policy and the config.** Show the block you will add to `.keelokit/state.toml` and ask for
    a yes:

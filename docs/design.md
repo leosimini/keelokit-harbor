@@ -5,8 +5,7 @@ This is the design. **Phases 1 and 2 are implemented** in `bin/harbor.py`.
   the generated views, the one-time `BOARD.md` import.
 - *Phase 2* (`tests/test_phase2.py`): `convoy assemble|verify|sail|abort|defer`, the ok,
   `harbormaster takeover|control`, `harbor/main.toml`.
-Marks *(2)* name what phase 2 added. Designed and **not written yet**: session names (below, waiting
-for Keelokit's `status.py title`), reassigning a skipper
+Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigning a skipper
 (`convoy skipper N WORKER`), the early hotspot warning from stories' `touches`, the warning for
 vessels that share commits, and everything marked *(3)*. The evidence is the survey of a week of convoys run by hand in JOUNA
 (`multi-train-orchestration.md`; its finding ids, `n.m`, are cited as `§n.m`, its candidate
@@ -61,8 +60,8 @@ Harbor depends on Keelokit and copies none of its code. It uses these as interfa
 | `touches`, `critical.toml` | an early hotspot warning, before any code *(phase 2)* |
 | the `Story:` trailer | which story a vessel carries, read from its commits |
 
-Keelokit's side of these interfaces is on its branch `landing-policy` (at `a251e8657`), not yet on
-its `main`: Harbor needs a Keelokit release that contains it.
+Harbor needs **Keelokit 0.12.0** or later: the landing policy, shared seals, the pre-push that lets the
+logbook through, and session titles are all there.
 
 ## Configuration
 
@@ -126,18 +125,23 @@ The orphan branch `harbor/log` on `origin`. It never shares history with `main`,
 never moves `main` or triggers its CI (§2.3).
 
 ```
-LOGBOOK.md                      generated: watch, convoys, workers, accounts, import
-convoys/<n>.md                  generated: one convoy, its vessels and events
+harbor/LOGBOOK.md               generated: watch, convoys, the sessions as a tree, accounts, import
+harbor/convoys/<n>.md           generated: one convoy, its vessels and events
 harbor/logbook.toml             created, created_by
 harbor/harbormaster.toml        the watch
 harbor/accounts/<account>.toml  cap and pause of one account
 harbor/workers/<account>/<host>/<session>.toml
 harbor/convoys/<n>.toml
-harbor/seals/<sha>.toml         one verify result for one exact commit
+harbor/runs/<sha>.toml          Harbor's record of one verify of one exact commit: green, red or partial
+harbor/seals/<sha>.toml         the shared seal Keelokit's pre-push reads: only for a whole green run
 harbor/main.toml                (phase 2) the last main Harbor saw, and every move of it
 harbor/imported/BOARD.md        (once) the hand-kept board, verbatim
 harbor/imported/board.toml      (once) what the import took and left
 ```
+
+Everything is under `harbor/`. Keelokit 0.12's pre-push lets a push of this branch through without a
+verify only then, and only when every new seal in it is backed by a whole green run on that
+machine; logbooks from before keep working, and their root views go on the next write.
 
 **Writes.** Only `harbor.py`, in one transaction per command: fetch `harbor/log`; read the tree;
 apply the command's change, which checks its own preconditions against that state; regenerate the
@@ -289,7 +293,20 @@ detail = "claude/carga-001@4d44fdd8"   # verify-fail fix sailed aborted skipper-
 Imported convoys carry `imported = true`, `imported_skipper` (the board's text) and `handoff`, and no
 vessels: nothing entered them through Harbor, so nothing in them is sealed.
 
-### `harbor/seals/<sha>.toml`
+### `harbor/runs/<sha>.toml` and `harbor/seals/<sha>.toml`
+
+The run record (`runs/`) is Harbor's; the seal (`seals/`) is the contract with Keelokit, and holds
+only what its pre-push reads, written only when the run is whole, green, not `--since`, on a clean
+tree, and against the `main` of the moment it is written:
+
+```toml
+head = "4d44fdd8…"
+base = "a2becf56d…"
+exit = 0
+level = "changed"
+```
+
+The run record:
 
 ```toml
 schema = 1
@@ -557,19 +574,20 @@ an integrator. What the harbormaster does not see (a session's local verify lock
 
 ## Keelokit's pre-push and Harbor's pushes
 
-Keelokit's pre-push hook runs `pnpm verify --use-seal` on every push, not only on `main` (checked on
-Keelokit 0.11.0 with `scripts/test-with-keelokit.sh`). Three consequences:
-- **`convoy/<n>`:** pushing the assembled head verifies it. When that run is whole and green
-  against today's `main`, `assemble` records it as the convoy's seal, and `convoy verify` at the
-  `changed` level runs nothing. A red one leaves the merge on the local `convoy/<n>`
-  (`CONVOY_PUSH_FAILED`).
-- **A vessel's branch:** `build-story` verifies with `--since origin/main`, which leaves no local
-  seal, so the push verifies again. Asked of Keelokit: verify a convoy-policy branch with plain
-  `pnpm verify`, the same scope, sealed.
-- **The logbook:** every `harbor.py` write pushes `harbor/log`, and the hook verifies whatever
-  HEAD the session's checkout has: on unverified work, a heartbeat costs a whole verify, and a red
-  one stops the write. Asked of Keelokit: skip a push whose only ref is the `shared_seals` branch,
-  which holds no code. Harbor doesn't use `--no-verify` to get around it.
+Keelokit's pre-push verifies what is pushed, from any branch, and since 0.12 refuses a push of a
+commit that isn't the one checked out (checked with `scripts/test-with-keelokit.sh`):
+- **`convoy/<n>`** is pushed from its checkout (`assemble`), and its verify is that push's. When
+  the run is whole and green against today's `main`, `assemble` records it as the convoy's seal and
+  `convoy verify` at the `changed` level runs nothing. A red one leaves the merge on the local
+  `convoy/<n>` (`CONVOY_PUSH_FAILED`).
+- **`main`** is pushed by `sail` from a checkout of the sealed head, so the push is that head.
+- **A vessel's branch:** under the convoy policy `build-story` verifies with a plain `pnpm verify`,
+  which seals, so the push reuses it, and `harbor.py seal` reuses the same run: one verify per vessel.
+- **The logbook** is written with commits that are never checked out. Keelokit lets such a push
+  through only for the `[verify] shared_seals` branch, when every file is under `harbor/` and every
+  new seal is backed by a whole green run on that machine. So Harbor keeps everything under
+  `harbor/` and writes a seal only for such a run; everything else about a run goes to `runs/`.
+  Harbor never uses `--no-verify`.
 
 ## Verifying without a bottleneck
 
@@ -668,7 +686,7 @@ Keelokit's `main` yet):
 | history with `head`, `base`, `clean`, `scope`, `planned`, `passed`, `failed_steps`, `packages`, `step_packages` | done | reuse, `level`, measuring |
 | `[verify] shared_seals` | done, as proposed | sealing across machines |
 | related tests | not done: measure first (§6.12) | a lighter vessel verify |
-| `status.py title <ID> [--role ROLE]`: the canonical session title, and the rule in the agent brief | **to ask**, after 0.11.1 | session names (see "Names") |
+| `status.py title <ID> [--role ROLE]`: the canonical session title, and the rule in the agent brief | done (0.12.0) | session names (see "Names") |
 | seal a narrowed `--rerun-failed` that, with the red run before it, covers the whole plan | done (`0dc2fed59`, tightened in `a251e8657`): `composite_of` in history and seal | a red costing one rerun instead of a rerun plus a whole run |
 
 ## When main moves with a convoy assembled
@@ -719,7 +737,7 @@ doesn't end them or move them: who takes them over is the person's call.
 
 ## Names
 
-*(Phase 3, decided 2026-11-02; waiting for Keelokit's `status.py title`.)* JOUNA's sessions were known
+*(Decided 2026-11-02; written on Keelokit 0.12's `status.py title`.)* JOUNA's sessions were known
 by `session_01…` ids (§5.7), its integration branches had random names (§1.4), "train 8" meant two
 things (§1.9), and `train/7` drifted from what it held (§6.9). So a name comes from the data and is
 never typed:
@@ -743,10 +761,11 @@ never typed:
 - **Branches keep Keelokit's convention**, the story id in lower case. A cloud session that is
   given its own branch (`claude/…`) can't rename it: the worker file keeps both, `branch` (real)
   and `canonical_branch`, and the views show both.
-- **What can be checked:** titles live in the Claude app, not in the repo, so Keelokit alone can't
-  check them. With Harbor, `worker register` records the title, `control` reports a worker whose
-  title isn't the canonical one, and `LOGBOOK.md` shows workers as a tree, each under the session
-  that launched it (`spawned_by`), grouped by convoy.
+- **What can be checked:** titles live in the Claude app, not in the repo, so neither Keelokit nor
+  Harbor can read the title a session really has. Harbor computes the canonical one (`worker
+  register --story`, `convoy new`, `harbormaster takeover` print it, and the skills apply it),
+  records it in the worker, and `harbor/LOGBOOK.md` lists sessions by it, as a tree, each under the
+  session that launched it (`spawned_by`).
 
 ## Models and the first agent
 

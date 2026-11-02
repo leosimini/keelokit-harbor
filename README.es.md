@@ -47,8 +47,7 @@ proyecto real. Lo diseñado y no escrito está al principio de [`docs/design.md`
 
 ## Probarlo
 
-Necesita Keelokit en el proyecto (`.keelokit/`) con la política de convoys y los sellos compartidos
-(en la rama `landing-policy` de Keelokit, todavía sin publicar), Python 3.11+, git y un remoto `origin`. Todavía no
+Necesita Keelokit 0.12.0 o posterior en el proyecto (`.keelokit/`), Python 3.11+, git y un remoto `origin`. Todavía no
 está publicado. Para cargarlo desde un clon:
 
 ```bash
