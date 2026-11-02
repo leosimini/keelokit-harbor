@@ -5,7 +5,8 @@ This is the design. **Phases 1 and 2 are implemented** in `bin/harbor.py`.
   the generated views, the one-time `BOARD.md` import.
 - *Phase 2* (`tests/test_phase2.py`): `convoy assemble|verify|sail|abort|defer`, the ok,
   `harbormaster takeover|control`, `harbor/main.toml`.
-Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigning a skipper
+Marks *(2)* name what phase 2 added. Designed and **not written yet**: session names (below, waiting
+for Keelokit's `status.py title`), reassigning a skipper
 (`convoy skipper N WORKER`), the early hotspot warning from stories' `touches`, the warning for
 vessels that share commits, and everything marked *(3)*. The evidence is the survey of a week of convoys run by hand in JOUNA
 (`multi-train-orchestration.md`; its finding ids, `n.m`, are cited as `§n.m`, its candidate
@@ -215,6 +216,8 @@ last_seen = "2026-11-01T15:02:00Z"   # every write by this worker
 state = "ended"                  # active | ended | lost (2: set by the harbormaster's control)
 ended = "2026-11-01T16:48:00Z"
 spawned_by = "leo/mbp/session_01Sk"   # the session that launched this one, and owns its result
+title = "jouna · C8 · ola 1 · CARGA-001"   # (3) the canonical session title (see "Names")
+canonical_branch = "carga-001"   # (3) the story id in lower case; `branch` is the one the session really uses
 children_at_end = ["leo/mbp/session_01Ve"]   # sessions it launched that were still running when it ended
 
 [handover]                       # on a budget cut or any early end (R22)
@@ -641,6 +644,7 @@ Keelokit's `main` yet):
 | history with `head`, `base`, `clean`, `scope`, `planned`, `passed`, `failed_steps`, `packages`, `step_packages` | done | reuse, `level`, measuring |
 | `[verify] shared_seals` | done, as proposed | sealing across machines |
 | related tests | not done: measure first (§6.12) | a lighter vessel verify |
+| `status.py title <ID> [--role ROLE]`: the canonical session title, and the rule in the agent brief | **to ask**, after 0.11.1 | session names (see "Names") |
 | seal a narrowed `--rerun-failed` that, with the red run before it, covers the whole plan | done (`0dc2fed59`, tightened in `a251e8657`): `composite_of` in history and seal | a red costing one rerun instead of a rerun plus a whole run |
 
 ## When main moves with a convoy assembled
@@ -688,6 +692,37 @@ Whoever launches a session owns its result. A session launched by another regist
 lists the sessions it launched that still run, and keeps them in `children_at_end`. Each control
 names the orphans: active sessions whose owner ended, got lost or has its account paused. Harbor
 doesn't end them or move them: who takes them over is the person's call.
+
+## Names
+
+*(Phase 3, decided 2026-11-02; waiting for Keelokit's `status.py title`.)* JOUNA's sessions were known
+by `session_01…` ids (§5.7), its integration branches had random names (§1.4), "train 8" meant two
+things (§1.9), and `train/7` drifted from what it held (§6.9). So a name comes from the data and is
+never typed:
+
+| Session | Keelokit alone | With Harbor |
+|---|---|---|
+| A story | `jouna · ola 1 · CARGA-001` | `jouna · C8 · ola 1 · CARGA-001` |
+| Coordinating | `jouna · coordinador` | `jouna · harbormaster` |
+| Carrying a convoy | — | `jouna · C8 · skipper` |
+| A subagent (an `Agent` description, not a session) | `CARGA-001 · verifier` | the same |
+
+- From the grouping to the item: what groups goes first, so the sessions of one convoy or one
+  wave sit together in a list. With Harbor the convoy goes before the wave, because the convoy
+  decides what lands together; without it the wave is all that groups. The story id goes whole: it
+  is the one stable key (its file, its `Story:` trailer). The word for wave follows
+  `[dashboard] lang`.
+- **Keelokit owns the rule** (sessions, stories and waves are its concepts): `status.py title <ID>`
+  computes the title from `.keelokit/answers.yml`, the story's front matter and the language, and
+  the agent brief says every session launched gets it. Harbor calls that command and puts `C<n>`
+  first; it copies nothing.
+- **Branches keep Keelokit's convention**, the story id in lower case. A cloud session that is
+  given its own branch (`claude/…`) can't rename it: the worker file keeps both, `branch` (real)
+  and `canonical_branch`, and the views show both.
+- **What can be checked:** titles live in the Claude app, not in the repo, so Keelokit alone can't
+  check them. With Harbor, `worker register` records the title, `control` reports a worker whose
+  title isn't the canonical one, and `LOGBOOK.md` shows workers as a tree, each under the session
+  that launched it (`spawned_by`), grouped by convoy.
 
 ## Models and the first agent
 
