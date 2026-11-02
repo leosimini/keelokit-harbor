@@ -474,6 +474,102 @@ class TestPrePushSeal(Phase2):
         self.assertEqual(sh(self.repo.remote, "git", "branch", "--list", "convoy/1"), "")
 
 
+class TestPersonOk(Phase2):
+    """Critical convoys (a full-tier vessel, or a critical area) also wait for a person's yes, bound to the exact head."""
+
+    def full_convoy(self, tier="full"):
+        ok(harbor(self.a, "convoy", "new"))
+        vessel(self.a, "claude/pay", "apps/web/pay.ts", story="PAY-1")
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", "1", "claude/pay", "--tier", tier))
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+
+    def test_a_full_tier_convoy_waits_for_the_person(self):
+        self.full_convoy()
+        out = ok(self.ok_changed())
+        self.assertIn("needs the person's yes before it sails (full-tier vessels claude/pay)", out)
+        ok(harbor(self.a, "convoy", "verify", "1"))
+        res = harbor(self.a, "convoy", "sail", "1")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("NEEDS_PERSON", res.stderr)
+        self.assertIn("waiting for the person's yes", ok(harbor(self.a, "harbormaster", "control")))
+        out = ok(harbor(self.a, "convoy", "approve", "1", "--note", "read the diff", session=None,
+                        env={"HARBOR_SESSION": "", "CLAUDE_SESSION_ID": ""}))
+        self.assertIn("approved", out)
+        person = self.convoy()["ok"]["person"]
+        self.assertEqual((person["by"], person["head"], person["note"]), ("leo/mbp/-", self.convoy()["head"], "read the diff"))
+        self.assertIn("Person's yes: given by leo/mbp/-", self.repo.log_files()["convoys/1.md"])
+        ok(harbor(self.a, "convoy", "sail", "1"))
+        self.assertEqual(self.repo.main_sha(), self.convoy()["head"])
+
+    def test_a_commit_after_the_yes_needs_another(self):
+        self.full_convoy()
+        ok(self.ok_changed())
+        ok(harbor(self.a, "convoy", "verify", "1"))
+        ok(harbor(self.a, "convoy", "approve", "1"))
+        (self.a / "apps/web/fix.ts").write_text("fix\n")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "fix")
+        sh(self.a, "git", "push", "--quiet", "origin", "convoy/1")
+        ok(harbor(self.a, "convoy", "verify", "1"))
+        res = harbor(self.a, "convoy", "sail", "1")
+        self.assertIn("NEEDS_PERSON", res.stderr)
+        self.assertIn("they approved", res.stderr)
+
+    def test_a_critical_area_needs_the_person_whatever_the_tier(self):
+        (self.a / ".keelokit/critical.toml").write_text(
+            'mutation_break = 70\n\n[[area]]\nname = "payments"\npaths = ["apps/web/pay.ts"]\n')
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "critical area")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        self.full_convoy(tier="light")
+        self.assertEqual(self.convoy()["vessels"][0]["critical"], ["payments"])
+        self.assertIn("critical areas payments", ok(self.ok_changed()))
+
+    def test_a_light_convoy_sails_on_the_harbormasters_ok(self):
+        self.full_convoy(tier="light")
+        ok(self.ok_changed())
+        self.assertNotIn("needs_person", self.convoy()["ok"])
+        ok(harbor(self.a, "convoy", "verify", "1"))
+        self.assertIn("NOT_NEEDED", harbor(self.a, "convoy", "approve", "1").stderr)
+        ok(harbor(self.a, "convoy", "sail", "1"))
+
+    def test_never_and_always(self):
+        state = self.a / ".keelokit/state.toml"
+        state.write_text(state.read_text().replace('ci_check = "true"', 'ci_check = "true"\nperson_ok = "never"'))
+        sh(self.a, "git", "update-index", "--assume-unchanged", ".keelokit/state.toml")
+        self.full_convoy()
+        ok(self.ok_changed())
+        self.assertNotIn("needs_person", self.convoy()["ok"])
+        state.write_text(state.read_text().replace('person_ok = "never"', 'person_ok = "always"'))
+        ok(harbor(self.a, "convoy", "new"))
+        vessel(self.a, "claude/doc", "docs/x.md", story="DOC-1")
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", "2", "claude/doc", "--tier", "trivial"))
+        ok(harbor(self.a, "convoy", "assemble", "2"))
+        ok(self.ok_changed(2))
+        self.assertEqual(self.convoy(2)["ok"]["needs_person"], '[harbor] person_ok = "always"')
+
+
+class TestGuard(unittest.TestCase):
+    def guard(self, stdin: str) -> int:
+        import subprocess, sys
+        from test_harbor import HARBOR
+        return subprocess.run([sys.executable, str(HARBOR), "guard", "--claude"], input=stdin, capture_output=True,
+                              text=True, cwd="/").returncode
+
+    def test_an_agent_cant_approve(self):
+        bash = lambda cmd: json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
+        self.assertEqual(self.guard(bash('python3 "$H" --session s convoy approve 3')), 2)
+        self.assertEqual(self.guard(bash("python3 harbor.py convoy  approve 3 --note ok")), 2)
+        self.assertEqual(self.guard(bash("python3 harbor.py convoy sail 3")), 0)
+        self.assertEqual(self.guard(bash("git status")), 0)
+        self.assertEqual(self.guard(json.dumps({"tool_name": "Read", "tool_input": {"file_path": "convoy approve"}})), 0)
+        self.assertEqual(self.guard("not json: harbor.py convoy approve 1"), 2)
+        self.assertEqual(self.guard(""), 0)
+
+
 class TestAbortDefer(Phase2):
     def test_abort_frees_the_vessels(self):
         ok(harbor(self.a, "convoy", "new"))

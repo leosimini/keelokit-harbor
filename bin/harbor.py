@@ -23,6 +23,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py convoy assemble N              merge main and the vessels into convoy/<n>, check migrations, push it
     harbor.py convoy sail N --ok --level changed|all --reason TEXT    the harbormaster's ok
     harbor.py convoy verify N                the convoy's one verify on its exact head (or its seal, reused)
+    harbor.py convoy approve N [--note TEXT] the person's yes for a critical convoy, from their own terminal
     harbor.py convoy sail N                  push the verified head to main (fast-forward, no force)
     harbor.py convoy abort N --reason TEXT
     harbor.py convoy defer N STORY           a late expected story leaves this convoy for the next one
@@ -30,6 +31,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py harbormaster control           the round: heartbeat, main, convoys, workers
     harbor.py log                            print LOGBOOK.md as the remote has it
     harbor.py models                         the model of each Harbor role, and where it comes from
+    harbor.py guard --claude                 PreToolUse hook: an agent can't run `convoy approve`
     harbor.py import-board FILE              once: a hand-kept BOARD.md into the logbook
 
 Global: --session ID (else $HARBOR_SESSION, else $CLAUDE_SESSION_ID). A worker is
@@ -82,6 +84,10 @@ DEFAULTS = {
     "convoy_verify_all": "pnpm verify --all --keep-going",
     "convoy_rerun": "pnpm verify --rerun-failed --keep-going",
     "ci_check": None,  # None: Keelokit's `ci.py health` when the project has it; "" turns it off
+    # When a convoy also needs a person's yes before it sails: "critical" (a full-tier vessel or one that
+    # touches an area of .keelokit/critical.toml), "always" or "never". The playbook's rule: humans for
+    # critical code, layered agent review for the rest.
+    "person_ok": "critical",
 }
 # Harbor's own roles. The story roles (verifier, builder, reviewer, breaker) follow Keelokit's model table
 # in .keelokit/harness/agent-brief.md, by role and tier; Harbor doesn't keep a second one.
@@ -462,6 +468,10 @@ def render_convoy(c: dict, files: dict) -> str:
         meta.append(("Head", short(c["head"])))
     if ok := c.get("ok"):
         meta.append(("Ok", f"{ok.get('level')} by {ok.get('by')} at {ok.get('at')}: {ok.get('reason')}"))
+        if ok.get("needs_person"):
+            person = ok.get("person")
+            meta.append(("Person's yes", f"given by {person['by']} at {person['at']} for {short(person['head'])}" if person
+                         else f"waiting ({ok['needs_person']})"))
     if sail := c.get("sail"):
         meta.append(("Sailed", f"{sail.get('at')} by {sail.get('by')}: main {short(sail.get('main_before'))} → "
                                f"{short(sail.get('main_after'))}"))
@@ -763,6 +773,36 @@ def steps_from(entry: dict) -> dict:
                       if isinstance(t, (int, float))]}
 
 
+def critical_areas() -> dict[str, list[str]]:
+    """Keelokit's critical areas (.keelokit/critical.toml [[area]] name, paths); none when the file is missing or unreadable."""
+    try:
+        data = tomllib.loads((ROOT / ".keelokit/critical.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    areas = data.get("area") if isinstance(data.get("area"), list) else []
+    return {str(a["name"]): [str(x) for x in a.get("paths") or [] if isinstance(x, str)]
+            for a in areas if isinstance(a, dict) and isinstance(a.get("name"), str)}
+
+
+def areas_of(paths: list[str], areas: dict[str, list[str]]) -> list[str]:
+    def hit(path: str, pat: str) -> bool:
+        return path == pat or path.startswith(pat.rstrip("/") + "/") or fnmatch.fnmatchcase(path, pat)
+    return sorted(name for name, pats in areas.items() if any(hit(p, pat) for p in paths for pat in pats))
+
+
+def needs_person(c: dict, cfg: dict) -> str | None:
+    """Why this convoy needs a person's yes before it sails, or None."""
+    policy = cfg.get("person_ok", "critical")
+    if policy == "always":
+        return "[harbor] person_ok = \"always\""
+    if policy != "critical":
+        return None
+    full = [v["branch"] for v in c.get("vessels") or [] if v.get("tier") == "full"]
+    crit = sorted({a for v in c.get("vessels") or [] for a in v.get("critical") or []})
+    why = ([f"full-tier vessels {', '.join(full)}"] if full else []) + ([f"critical areas {', '.join(crit)}"] if crit else [])
+    return "; ".join(why) or None
+
+
 def hotspots_of(paths: list[str], spots: dict) -> list[str]:
     hit = []
     for name, patterns in spots.items():
@@ -777,7 +817,7 @@ def cmd_convoy(args) -> int:
     cfg = config(state)
     if args.action == "status":
         return convoy_status(args)
-    me = identity(args.session)
+    me = identity(args.session, need_session=args.action != "approve")
     if args.action in PHASE2:
         return PHASE2[args.action](args, cfg, me)
 
@@ -836,6 +876,7 @@ def cmd_convoy(args) -> int:
         found = {s.strip() for s in git("log", f"{mb}..{tip}", "--format=%(trailers:key=Story,valueonly)").splitlines() if s.strip()}
         story = ", ".join(sorted(found)) or None
     spots = hotspots_of(changed, cfg["hotspots"])
+    crit = areas_of(changed, critical_areas())
 
     def mutate(files, head):
         w = registered(files)
@@ -867,7 +908,7 @@ def cmd_convoy(args) -> int:
         vessels = [v for v in c.get("vessels") or [] if v["branch"] != args.branch]
         again = len(vessels) != len(c.get("vessels") or [])
         vessels.append({"branch": args.branch, "head": tip, "story": story, "tier": args.tier, "hotspots": spots,
-                        "seal_base": seal.get("base"), "added": now(), "added_by": me["id"]})
+                        "critical": crit, "seal_base": seal.get("base"), "added": now(), "added_by": me["id"]})
         c["vessels"] = vessels
         c.setdefault("events", []).append(event(me["id"], "redelivered" if again else "add", f"{args.branch}@{short(tip)}"))
         save(files, f"harbor/convoys/{args.number}.toml", c)
@@ -1217,7 +1258,7 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
             raise HarborError("CONVOY_MOVED", f"{c2['branch']} is at {short(tip)}, the logbook says {short(c2.get('head'))}: "
                               "assemble again")
         c2["ok"] = {"by": me["id"], "at": now(), "level": args.level, "reason": args.reason.strip(), "base": main_tip,
-                    "head": tip, "ci": line}
+                    "head": tip, "ci": line, "needs_person": needs_person(c2, cfg)}
         c2["state"] = "verifying"
         c2.setdefault("events", []).append(event(me["id"], "ok", f"{args.level}: {args.reason.strip()}"))
         save_convoy(files, c2)
@@ -1225,6 +1266,9 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
 
     transact(f"convoy {args.number} ok ({args.level})", me["id"], mutate)
     print(f"harbor: ok for convoy {args.number} at {short(tip)}, level {args.level}; {line}")
+    if why := needs_person(convoy_of(snapshot()[1], args.number), cfg):
+        print(f"harbor: it also needs the person's yes before it sails ({why}): they review it and run, in their own "
+              f"terminal, python3 <harbor.py> convoy approve {args.number}. The verify can run meanwhile")
     return 0
 
 
@@ -1333,6 +1377,12 @@ def convoy_sail(args, cfg: dict, me: dict) -> int:
     tip = fetch(c["branch"])
     if tip != c.get("head"):
         raise HarborError("CONVOY_MOVED", f"{c['branch']} is at {short(tip)}, its verify was for {short(c.get('head'))}: verify again")
+    if ok.get("needs_person"):
+        person = ok.get("person") or {}
+        if person.get("head") != tip:
+            raise HarborError("NEEDS_PERSON", f"convoy {args.number} needs the person's yes ({ok['needs_person']})"
+                              + (f"; they approved {short(person.get('head'))}, and the head is now {short(tip)}"
+                                 if person else "") + f": they run `convoy approve {args.number}` in their own terminal")
     seal = load(files, f"harbor/seals/{tip}.toml") or {}
     if not (seal.get("exit") == 0 and covers(seal.get("level"), ok["level"]) and seal.get("base") == main_tip):
         raise HarborError("NOT_SEALED", f"{short(tip)} has no green {ok['level']} seal against {short(main_tip)}: convoy verify first")
@@ -1403,7 +1453,51 @@ def convoy_defer(args, cfg: dict, me: dict) -> int:
     return 0
 
 
-PHASE2 = {"assemble": convoy_assemble, "verify": convoy_verify, "sail": convoy_sail, "abort": convoy_abort,
+def convoy_approve(args, cfg: dict, me: dict) -> int:
+    """The person's yes. Harbor's PreToolUse hook stops an agent from running it, so it comes from a terminal
+    the person types in. A speed bump, not a sandbox: Bash can reach anything."""
+    tip = None
+
+    def mutate(files, h):
+        nonlocal tip
+        c = convoy_of(files, args.number)
+        require_open(c, "verifying")
+        ok = c.get("ok") or {}
+        if not ok.get("needs_person"):
+            raise HarborError("NOT_NEEDED", f"convoy {args.number} doesn't need a person's yes")
+        tip = fetch(c["branch"])
+        if tip != c.get("head"):
+            raise HarborError("CONVOY_MOVED", f"{c['branch']} is at {short(tip)}, the logbook says {short(c.get('head'))}: "
+                              "approve once the integrator has verified the new head")
+        ok["person"] = {"by": me["id"], "at": now(), "head": tip, "note": (args.note or "").strip() or None}
+        c.setdefault("events", []).append(event(me["id"], "approved", f"{short(tip)} by a person"
+                                                + (f": {args.note.strip()}" if (args.note or "").strip() else "")))
+        save_convoy(files, c)
+
+    transact(f"convoy {args.number} approved by {me['id']}", me["id"], mutate)
+    print(f"harbor: convoy {args.number} approved at {short(tip)}; a later commit on it needs another yes")
+    return 0
+
+
+GUARDED = re.compile(r"\bconvoy\s+approve\b")
+
+
+def cmd_guard(args) -> int:
+    """Claude Code's PreToolUse hook. Exit 2 blocks the call and shows the reason to the agent."""
+    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    try:
+        event_ = json.loads(raw or "{}")
+        text = json.dumps(event_.get("tool_input") or {}) if event_.get("tool_name") == "Bash" else ""
+    except ValueError:
+        text = raw
+    if GUARDED.search(text):
+        print("Blocked by Harbor: only the person approves a critical convoy. Ask them to review it and run "
+              "`harbor.py convoy approve <n>` in their own terminal.", file=sys.stderr)
+        return 2
+    return 0
+
+
+PHASE2 = {"assemble": convoy_assemble, "approve": convoy_approve, "verify": convoy_verify, "sail": convoy_sail, "abort": convoy_abort,
           "defer": convoy_defer}
 
 
@@ -1503,6 +1597,9 @@ def cmd_harbormaster(args) -> int:
                 flags.append(f"skipper {c['skipper']} is {(sk or {}).get('state', 'unknown')}: reassign")
             if c.get("state") == "ready":
                 flags.append("waiting for the ok")
+            ok_ = c.get("ok") or {}
+            if ok_.get("needs_person") and (ok_.get("person") or {}).get("head") != c.get("head"):
+                flags.append(f"waiting for the person's yes ({ok_['needs_person']})")
             evs = c.get("events") or []
             last_start = max((i for i, e in enumerate(evs) if e.get("what") == "verify-start"), default=None)
             if last_start is not None and not any(e.get("what", "").startswith("verify-") and e.get("what") != "verify-start"
@@ -1659,6 +1756,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--ok", action="store_true", help="the harbormaster's ok, with --level and --reason")
     s.add_argument("--level", choices=("changed", "all"))
     s.add_argument("--reason")
+    s = csub.add_parser("approve")
+    s.add_argument("number", type=int)
+    s.add_argument("--note")
     s = csub.add_parser("abort")
     s.add_argument("number", type=int)
     s.add_argument("--reason", required=True)
@@ -1672,6 +1772,8 @@ def parser() -> argparse.ArgumentParser:
     hsub.add_parser("control")
     sub.add_parser("log")
     sub.add_parser("models")
+    g = sub.add_parser("guard")
+    g.add_argument("--claude", action="store_true")
     i = sub.add_parser("import-board")
     i.add_argument("file")
     return p
@@ -1679,7 +1781,7 @@ def parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"check": cmd_check, "init": cmd_init, "account": cmd_account, "worker": cmd_worker, "seal": cmd_seal,
             "convoy": cmd_convoy, "log": cmd_log, "import-board": cmd_import_board, "harbormaster": cmd_harbormaster,
-            "models": cmd_models}
+            "models": cmd_models, "guard": cmd_guard}
 
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
@@ -1688,6 +1790,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         args = parser().parse_args(argv)
     except SystemExit as e:
         return 0 if e.code == 0 else 2
+    if args.cmd == "guard":
+        return cmd_guard(args)
     start = Path(root or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
     top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start, capture_output=True, text=True)
     if top.returncode != 0:

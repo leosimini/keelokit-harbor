@@ -66,6 +66,10 @@ Después corré `/harbor:adopt` en un proyecto con Keelokit. Tests: `python3 -m 
   y `.keelokit/local.toml` del proyecto. Funciona sin red y nunca bloquea una sesión.
 - `harbor.py seal` corre el comando de `[harbor] vessel_verify` del `state.toml` del proyecto. Es
   código del proyecto, igual que sus tests.
+- Un convoy con una historia de nivel full o que toca un área crítica también espera tu sí antes
+  de zarpar: corrés `convoy approve <n>` en tu propia terminal. Un hook PreToolUse impide que lo
+  corra un agente; como el guard de Keelokit, es un freno, no un sandbox
+  (`[harbor] person_ok` = `critical`, `always` o `never`).
 - Harbor empuja a `harbor/log` y a `convoy/<n>`, y a `main` solo en `convoy sail`: un fast-forward a
   una cabeza con sello verde y el ok del harbormaster. Nunca con `--force`.
 

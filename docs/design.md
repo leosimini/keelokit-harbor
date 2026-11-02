@@ -83,6 +83,7 @@ convoy_verify = "pnpm verify --keep-going"          # (2) level "changed": scope
 convoy_verify_all = "pnpm verify --all --keep-going" # (2) level "all": only what the routing can't bound
 convoy_rerun = "pnpm verify --rerun-failed --keep-going"   # (2) after a red; Keelokit seals it when it completes the plan
 ci_check = "python3 .keelokit/bin/ci.py health"     # (2) the ok needs it green (exit 1 = red); default when ci.py exists
+person_ok = "critical"             # (2) a person's yes too: "critical" (full tier or a critical area), "always", "never"
 control_every_minutes = 90         # JOUNA's value (§5.3)
 watch_expiry_minutes = 180         # JOUNA's value (§5.3): relief after 3 hours without a control
 
@@ -252,6 +253,13 @@ level = "all"                    # changed | all
 reason = "migrations and verify scripts: the risk table says --all"
 base = "a2becf56d…"              # main when the ok was given
 head = "60099ef60…"              # the convoy head the ok covers
+needs_person = "full-tier vessels claude/carga-001"   # why a person's yes is also needed; absent when it isn't
+
+[ok.person]                      # (2) that yes, from the person's own terminal
+by = "leo/mbp/-"
+at = "2026-11-01T13:20:00Z"
+head = "60099ef60…"              # bound to this head: a later commit needs another yes
+note = "read the diff"
 
 [sail]                           # (2)
 by = "leo/mbp/session_01Abc"
@@ -372,6 +380,7 @@ board written from that description, not the real file.
 | assembling, waiting → ready | `convoy assemble` *(2)* | the integrator | every expected vessel merged, `main` merged in, every dependency sailed, migration check passed |
 | ready, verifying → assembling | `convoy assemble` *(2)* | the integrator | `main` moved, a vessel was redelivered, or one was added: the ok is cleared |
 | ready → verifying | `convoy sail --ok` *(2)* | the harbormaster, holding an unexpired watch | the ok conditions below |
+| verifying → same | `convoy approve` *(2)* | the person, from their own terminal | only a critical convoy (`person_ok`); bound to the head |
 | verifying → verifying | `convoy verify` *(2)* | the integrator | a run, green or red; fixes in between |
 | verifying → sailed | `convoy sail` *(2)* | the integrator | green convoy seal on the exact head at the ok's level; `main` still the ok's base |
 | assembling, waiting → same | `convoy defer N STORY` *(2)* | the skipper | an expected vessel is late: it leaves `expected` and goes to the next convoy, so the rest don't wait for it. **Needs your ok:** not in the agreed command list |
@@ -457,6 +466,21 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
 - **Errors:** `NOT_HARBORMASTER` (also for an expired watch), `WRONG_STATE`, `MAIN_MOVED`,
   `CONVOY_MOVED`, `MAIN_RED`.
 
+### `harbor.py convoy approve N [--note TEXT]` *(phase 2)*
+
+- **Who:** the person, from their own terminal. Harbor's PreToolUse hook (`harbor.py guard
+  --claude`) blocks the command when an agent runs it; Bash can reach anything, so it is a speed
+  bump, as Keelokit's `allowTamper` is, not a sandbox.
+- **When it's needed:** `[harbor] person_ok`. `"critical"` (default): a vessel of the full tier or one
+  whose diff touches an area of `.keelokit/critical.toml`; `"always"`; `"never"`. The ok records why
+  (`needs_person`).
+- **Before:** state verifying; the ok says a person is needed; `convoy/<n>` is at the head the
+  logbook has. The yes is bound to that head: a later commit needs another.
+- **Logbook:** `[ok.person]` (`by`, `at`, `head`, `note`), event `approved`. The verify doesn't wait for
+  it; only `sail` does (`NEEDS_PERSON`).
+- This follows Anthropic's AI-native SDLC playbook: layered agent review for routine work, people
+  for critical code, and the agent acts up to the gate and doesn't cross it.
+
 ### `/harbor:convoy verify N` *(phase 2)*
 
 - **Before:** the integrator; state verifying; `origin/main` is still the ok's base (else
@@ -483,7 +507,7 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   pre-push seal recognises the commit and doesn't repeat the run. Rejected: `MAIN_MOVED`, back to
   assemble.
 - **Logbook:** `[sail]`, state sailed, `main.toml`, event `sailed`; the next control records the CI.
-- **Errors:** `NO_OK`, `NOT_SEALED`, `MAIN_MOVED`, `CONVOY_MOVED`, `NOT_INTEGRATOR`, `PUSH_FAILED`
+- **Errors:** `NO_OK`, `NEEDS_PERSON`, `NOT_SEALED`, `MAIN_MOVED`, `CONVOY_MOVED`, `NOT_INTEGRATOR`, `PUSH_FAILED`
   (the pre-push hook's own refusal included). If the push lands and the logbook write fails, the
   next control finds `main` at a verifying convoy's head and records the sail.
 

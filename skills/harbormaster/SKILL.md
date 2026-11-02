@@ -30,6 +30,7 @@ The ok, and anything else that needs judgment, stays in this session, on `harbor
 `harbormaster control` renews the heartbeat, records any move of `main`
 (a convoy's sail, or a loose push), marks workers not seen within the expiry as lost, and prints one
 line per open convoy with what it waits for. Act on each line:
+- `waiting for the person's yes`: remind the person once, with what to review; don't approve.
 - `waiting for the ok`: read the convoy (`git show origin/harbor/log:convoys/<n>.md`, its diff
   against main) and give the ok with its level and reason (`/harbor:convoy`, "The ok"), or say why not.
 - `main moved`: tell the convoy's integrator to assemble again.
