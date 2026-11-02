@@ -151,6 +151,53 @@ class TestWatch(Phase2):
         self.assertIn("Moves no convoy explains", self.repo.log_files()["LOGBOOK.md"])
 
 
+class TestOwners(Phase2):
+    """Whoever spawns a session owns its result: the logbook knows who, and control names the orphans."""
+
+    def test_a_spawned_session_names_its_owner(self):
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/s1", session="s2"))
+        self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/s2.toml")["spawned_by"], "leo/mbp/s1")
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--branch", "claude/x", session="s2"))
+        self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/s2.toml")["spawned_by"], "leo/mbp/s1",
+                         "registering again keeps the owner")
+        self.assertIn("| leo/mbp/s2 | vessel |", self.repo.log_files()["LOGBOOK.md"])
+
+    def test_the_owner_must_be_an_active_worker(self):
+        res = harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/nobody", session="s2")
+        self.assertIn("SPAWNER_UNKNOWN", res.stderr)
+        res = harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/s2", session="s2")
+        self.assertIn("doesn't spawn itself", res.stderr)
+
+    def test_ending_with_children_says_so_and_control_names_the_orphans(self):
+        ok(harbor(self.a, "worker", "register", "--role", "skipper", session="boss"))
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/boss", session="kid"))
+        out = ok(harbor(self.a, "worker", "end", session="boss"))
+        self.assertIn("still running, launched by this session: leo/mbp/kid", out)
+        self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/boss.toml")["children_at_end"], ["leo/mbp/kid"])
+        out = ok(harbor(self.a, "harbormaster", "control"))
+        self.assertIn("orphan: leo/mbp/kid, spawned by leo/mbp/boss, which is ended", out)
+
+    def test_an_owner_lost_in_the_round_leaves_an_orphan(self):
+        ok(harbor(self.a, "worker", "register", "--role", "skipper", session="boss"))
+        later = {"HARBOR_NOW": "2026-11-01T18:00:00Z"}
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/boss", session="kid", env=later))
+        ok(harbor(self.a, "harbormaster", "takeover", env=later))
+        out = ok(harbor(self.a, "harbormaster", "control", env={"HARBOR_NOW": "2026-11-01T19:30:00Z"}))
+        self.assertIn("lost: leo/mbp/boss", out)
+        self.assertIn("orphan: leo/mbp/kid, spawned by leo/mbp/boss, which is lost", out)
+
+
+class TestModels(Phase2):
+    def test_defaults_and_overrides(self):
+        out = ok(harbor(self.a, "models"))
+        self.assertIn("control haiku (default)", out)
+        self.assertIn("skipper sonnet (default)", out)
+        state = self.a / ".keelokit/state.toml"
+        state.write_text(state.read_text() + '\n[harbor.models]\nharbormaster = "opus"\n')
+        out = ok(harbor(self.a, "models"))
+        self.assertIn("harbormaster opus (state.toml [harbor.models])", out)
+
+
 class TestAssemble(Phase2):
     def test_two_vessels_are_merged_pushed_and_ready(self):
         a, b = self.two_vessels_ready()
@@ -387,6 +434,44 @@ class TestSail(Phase2):
         c = self.convoy()
         self.assertEqual((c["state"], c["sail"]["main_after"]), ("sailed", head))
         self.assertEqual(self.repo.log_toml("harbor/main.toml")["moves"][-1]["cause"], "convoy 1")
+
+
+class TestPrePushSeal(Phase2):
+    """Keelokit's pre-push verifies every push. The one assemble triggers is recorded as the convoy's seal."""
+
+    def setUp(self):
+        super().setUp()
+        hook = self.a / ".githooks/pre-push"
+        hook.parent.mkdir(exist_ok=True)
+        # Keelokit's hook, with the change Harbor asked for: a push of only the logbook branch verifies nothing.
+        hook.write_text("#!/bin/sh\nrefs=$(cat | awk '{print $3}' | sort -u)\n"
+                        "[ \"$refs\" = refs/heads/harbor/log ] && exit 0\n"
+                        "exec sh .keelokit/fake-verify.sh \"$(git rev-parse HEAD)\" changed pre-push\n")
+        hook.chmod(0o755)
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "pre-push hook")
+        sh(self.a, "git", "config", "core.hooksPath", ".githooks")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+
+    def test_the_assembly_push_verify_is_the_convoy_verify(self):
+        a, b = self.two_vessels_ready()
+        head = self.convoy()["head"]
+        seal = self.repo.log_toml(f"harbor/seals/{head}.toml")
+        self.assertEqual((seal["kind"], seal["level"], seal["reused"]), ("convoy", "changed", True))
+        ok(self.ok_changed())
+        runs = self.runs()
+        self.assertIn("nothing to run", ok(harbor(self.a, "convoy", "verify", "1")))
+        self.assertEqual(self.runs(), runs)
+        ok(harbor(self.a, "convoy", "sail", "1"))
+        self.assertEqual(self.repo.main_sha(), head)
+
+    def test_a_red_pre_push_leaves_the_merge_local(self):
+        ok(harbor(self.a, "convoy", "new"))
+        self.deliver(1, "claude/qa-1", "apps/web/a.ts", "QA-1")
+        res = harbor(self.a, "convoy", "assemble", "1", env={"HARBOR_FAKE": json.dumps({"rc": 1, "result": "fail"})})
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("CONVOY_PUSH_FAILED", res.stderr)
+        self.assertEqual(sh(self.repo.remote, "git", "branch", "--list", "convoy/1"), "")
 
 
 class TestAbortDefer(Phase2):

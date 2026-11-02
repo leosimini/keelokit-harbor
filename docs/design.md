@@ -85,13 +85,12 @@ ci_check = "python3 .keelokit/bin/ci.py health"     # (2) the ok needs it green 
 control_every_minutes = 90         # JOUNA's value (§5.3)
 watch_expiry_minutes = 180         # JOUNA's value (§5.3): relief after 3 hours without a control
 
-[harbor.models]                    # model per role; Harbor names it on every Agent and create_session (§3.3)
+[harbor.models]                    # Harbor's own roles; `harbor.py models` prints what applies (§3.3)
 skipper = "sonnet"
-harbormaster = "sonnet"
-verifier = "sonnet"
-builder = "sonnet"
-reviewer = "sonnet"                # light; full stories: see "Models and the first agent"
-breaker = "sonnet"
+harbormaster = "sonnet"            # the ok: judgment
+control = "haiku"                  # the round: reads the logbook, git and the CI, and reports
+# The story roles (verifier, builder, reviewer, breaker) follow Keelokit's table by role and tier in
+# .keelokit/harness/agent-brief.md (Opus for tests and review in the full tier); no second table here.
 
 [harbor.hotspots]                  # name = path globs; a trailing "/" is a prefix
 schema = ["apps/api/prisma/schema.prisma", "apps/api/prisma/migrations/"]
@@ -215,6 +214,8 @@ registered = "2026-11-01T10:40:00Z"
 last_seen = "2026-11-01T15:02:00Z"   # every write by this worker
 state = "ended"                  # active | ended | lost (2: set by the harbormaster's control)
 ended = "2026-11-01T16:48:00Z"
+spawned_by = "leo/mbp/session_01Sk"   # the session that launched this one, and owns its result
+children_at_end = ["leo/mbp/session_01Ve"]   # sessions it launched that were still running when it ended
 
 [handover]                       # on a budget cut or any early end (R22)
 branch = "claude/carga-001"
@@ -664,6 +665,14 @@ JOUNA's sessions stopped together on account limits for 71 hours (§1.7), and le
 - a convoy verify cut on one machine shows as `verify-start` without a result; the next integrator
   reruns it (Keelokit's `status.py` shows it as CUT on that machine).
 
+## Who owns a session
+
+Whoever launches a session owns its result. A session launched by another registers with
+`--spawned-by <its worker id>`; the owner must be an active worker. When an owner ends, `worker end`
+lists the sessions it launched that still run, and keeps them in `children_at_end`. Each control
+names the orphans: active sessions whose owner ended, got lost or has its account paused. Harbor
+doesn't end them or move them: who takes them over is the person's call.
+
 ## Models and the first agent
 
 The vessel's tier is Keelokit's (trivial, light, full), chosen by the vessel session's
@@ -673,12 +682,14 @@ anywhere machine-readable in Keelokit, so the skipper copies it from the vessel'
 
 | Tier | First agent | Model |
 |---|---|---|
-| trivial | builder | `[harbor.models] builder` |
-| light | verifier (mode A: tests before code, R9) | `verifier` |
-| full | verifier (mode A) | `verifier`; reviewer and breaker as Keelokit's `build-story` says for `integrity` |
+| trivial | builder | Sonnet (Keelokit's brief) |
+| light | verifier (mode A: tests before code, R9) | Sonnet; review Sonnet |
+| full | verifier (mode A) | Opus for tests and review; the builder stays on Sonnet |
 
-Every `Agent` and `create_session` Harbor starts names its model from `[harbor.models]` (§3.3). The
-defaults are the cheap case and the expensive one is the exception (R11, §3.11, §3.12). That the
+Every `Agent` and `create_session` Harbor starts names its model (§3.3): its own roles from
+`[harbor.models]`, the story roles from Keelokit's brief. The defaults are the cheap case and the
+expensive one is the exception (R11, §3.11, §3.12). The harbormaster's round runs on `control`
+(Haiku): it only reads and reports, and the harbormaster acts on it on its own model. That the
 model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tokens).
 
 ## Assumptions to validate
@@ -750,7 +761,7 @@ model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tok
 | R8 risk level from the diff; unknown goes up; the agent can't lower it | Keelokit's `build-story` tier rules (escalate only); Harbor records the tier | delegated |
 | R9 the first agent of N1/N2 is the test writer | tier → first agent (verifier mode A for light and full) | 2 (skills) |
 | R10 roles enforced by tools | Harbor's agents have `tools:` lists (skipper without Write, harbormaster read-only). Keelokit's reviewer and breaker are read-only by tools; its verifier needs Write for tests, and weakened tests are caught by `doctor --scope` (VERIFY-2), not by tools. Bash in any list is not a sandbox | 1 (agents) |
-| R11 model per role and level in project config, coordinator included; cheap defaults | `[harbor.models]`, Sonnet defaults, named on every launch | 1 (config), 2 (launches) |
+| R11 model per role and level in project config, coordinator included; cheap defaults | `[harbor.models]` for skipper, harbormaster and the control round (Haiku); story roles by Keelokit's table per tier; `harbor.py models` | 2 |
 | R12 concurrency cap tied to budget, staggered starts | per-account `max_sessions` and `paused_until`; staggering without a decision | 1 |
 | R13 counter of review rounds, a third only with P0/P1 | dropped: Keelokit's `build-story` already stops after two rounds, and the case behind it is a **HIPÓTESIS** (§3.14) | — |
 | R14 hotspots in config, branches serialized, warn on shared declarations | `[harbor.hotspots]`, `HOTSPOT_HELD` at `add`; the early warning from `touches` | 1, 2 (warning) |

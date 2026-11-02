@@ -21,10 +21,13 @@ names it in `--depends`. Report the number and the base.
 
 ## Launching vessels (skipper)
 
-One session per story, each with its model from `[harbor.models]`, named on every `Agent` or
-`create_session`. The prompt is short:
-`Read .keelokit/harness/agent-brief.md, then /keelokit:build-story <ID>. You are a vessel of convoy
-<n>: land on your pushed branch, never on main, then deliver as /harbor:convoy says.`
+One session per story, each with the model Keelokit's brief gives its role and tier, named on every
+`Agent` or `create_session`. Whoever launches a session owns its result, so the prompt says who:
+`Read .keelokit/harness/agent-brief.md. Register with harbor.py worker register --role vessel
+--convoy <n> --spawned-by <your worker id>, then /keelokit:build-story <ID>. You are a vessel of
+convoy <n>: land on your pushed branch, never on main, then deliver as /harbor:convoy says.`
+Before this session ends, every session it launched is delivered, ended or handed over:
+`worker end` lists the ones still running.
 The tier is the vessel's `build-story` call; the first agent follows it: trivial → builder;
 light and full → the verifier writes the tests first.
 

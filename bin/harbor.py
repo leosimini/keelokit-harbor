@@ -12,6 +12,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py account pause ACCOUNT --until TIMESTAMP [--reason TEXT]
     harbor.py account resume ACCOUNT
     harbor.py worker register --role vessel|skipper|harbormaster [--convoy N] [--branch B] [--model M]
+                              [--spawned-by WORKER]   the session that launched this one owns its result
     harbor.py worker end [--branch B --head SHA] [--verified TEXT] [--pending TEXT]
                          [--worktree PATH] [--log PATH]
     harbor.py seal [--rerun]                 record the vessel verify of HEAD by hash: Keelokit's own run of
@@ -28,6 +29,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py harbormaster takeover [--relieve REASON]
     harbor.py harbormaster control           the round: heartbeat, main, convoys, workers
     harbor.py log                            print LOGBOOK.md as the remote has it
+    harbor.py models                         the model of each Harbor role, and where it comes from
     harbor.py import-board FILE              once: a hand-kept BOARD.md into the logbook
 
 Global: --session ID (else $HARBOR_SESSION, else $CLAUDE_SESSION_ID). A worker is
@@ -80,6 +82,13 @@ DEFAULTS = {
     "convoy_verify_all": "pnpm verify --all --keep-going",
     "convoy_rerun": "pnpm verify --rerun-failed --keep-going",
     "ci_check": None,  # None: Keelokit's `ci.py health` when the project has it; "" turns it off
+}
+# Harbor's own roles. The story roles (verifier, builder, reviewer, breaker) follow Keelokit's model table
+# in .keelokit/harness/agent-brief.md, by role and tier; Harbor doesn't keep a second one.
+DEFAULT_MODELS = {
+    "skipper": "sonnet",       # integrate, resolve conflicts (survey §3.3)
+    "harbormaster": "sonnet",  # the ok is judgment; Opus for it is a HIPÓTESIS of the survey (§3.4)
+    "control": "haiku",        # the round only reads the logbook, git and the CI, and reports (§3.3)
 }
 DEFAULT_MIGRATIONS = ["apps/*/prisma/migrations", "*/migrations", "db/migrations"]
 ENV_CODES = {"NO_KEELOKIT", "POLICY_NOT_CONVOY", "NO_IDENTITY", "NO_SESSION", "NOT_A_REPO", "USAGE", "FETCH_FAILED",
@@ -411,10 +420,11 @@ def render_logbook(files: dict, cs: dict) -> str:
     live = {k: w for k, w in ws.items() if w.get("state") not in ("ended", "lost")}
     out += ["", "## Workers", ""]
     if live:
-        out += ["| Worker | Role | Convoy | Branch | Model | Last seen | State |", "|---|---|---|---|---|---|---|"]
+        out += ["| Worker | Role | Convoy | Branch | Model | Spawned by | Last seen | State |",
+                "|---|---|---|---|---|---|---|---|"]
         for wid, w in live.items():
             out.append(f"| {wid} | {cell(w.get('role'))} | {cell(w.get('convoy'))} | {cell(w.get('branch'))} | "
-                       f"{cell(w.get('model'))} | {cell(w.get('last_seen'))} | {w.get('state')} |")
+                       f"{cell(w.get('model'))} | {cell(w.get('spawned_by'))} | {cell(w.get('last_seen'))} | {w.get('state')} |")
     else:
         out.append("No active workers.")
     ended = len(ws) - len(live)
@@ -599,6 +609,14 @@ def cmd_worker(args) -> int:
                               f"{acc['max_sessions']} session(s): {', '.join(others)}")
         cur = load(files, path) or {"schema": SCHEMA, "id": me["id"], "account": me["account"], "host": me["host"],
                                     "session": me["session"], "registered": now()}
+        if args.spawned_by:
+            if args.spawned_by == me["id"]:
+                raise HarborError("USAGE", "a session doesn't spawn itself: --spawned-by names the one that launched it")
+            owner = workers(files).get(args.spawned_by)
+            if not owner or owner.get("state") != "active":
+                raise HarborError("SPAWNER_UNKNOWN", f"{args.spawned_by} is not an active worker: a session that "
+                                  "ended or is lost can't own new work")
+            cur["spawned_by"] = args.spawned_by
         cur.pop("handover", None)
         cur.pop("ended", None)
         cur.update(role=args.role, convoy=args.convoy, branch=args.branch, model=args.model, state="active", last_seen=now())
@@ -624,6 +642,9 @@ def cmd_worker(args) -> int:
         cur.update(state="ended", ended=now(), last_seen=now())
         if any(handover.values()):
             cur["handover"] = handover
+        children = sorted(w["id"] for w in workers(files).values()
+                          if w.get("spawned_by") == me["id"] and w.get("state") == "active")
+        cur["children_at_end"] = children or None
         save(files, path, cur)
         return cur
 
@@ -633,6 +654,9 @@ def cmd_worker(args) -> int:
     else:
         cur = transact(f"worker end {me['id']}", me["id"], end)
         print(f"harbor: {cur['id']} ended" + (" with a handover" if cur.get("handover") else ""))
+        if cur.get("children_at_end"):
+            print(f"harbor: still running, launched by this session: {', '.join(cur['children_at_end'])}. "
+                  "Their results are yours: end them, or hand them over in the handover")
     return 0
 
 
@@ -884,6 +908,15 @@ def convoy_status(args) -> int:
     return 0
 
 
+def cmd_models(args) -> int:
+    cfg = config(keelokit())
+    for role, default in DEFAULT_MODELS.items():
+        chosen = cfg["models"].get(role)
+        print(f"{role} {chosen or default} ({'state.toml [harbor.models]' if chosen else 'default'})")
+    print("story roles: Keelokit's table in .keelokit/harness/agent-brief.md")
+    return 0
+
+
 def cmd_log(args) -> int:
     keelokit()
     head, files = snapshot()
@@ -1092,11 +1125,29 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         merged[v["branch"]] = v.get("merged") or git("rev-parse", "HEAD")
     check_migrations(main_tip, vessels, cfg["migrations"])
     head = git("rev-parse", "HEAD")
+    pushed_at = int(time.time()) - 1
     if head != remote:
         res = run("git", "push", "--quiet", REMOTE, f"HEAD:refs/heads/{branch}", check=False)
         if res.returncode != 0:
-            raise HarborError("CONVOY_PUSH_REJECTED", f"{REMOTE} refused {branch} (someone else pushed it?): "
-                              f"{res.stderr.strip()[:200]}")
+            text = res.stdout + res.stderr
+            if any(x in text for x in ("non-fast-forward", "fetch first", "[rejected]")):
+                raise HarborError("CONVOY_PUSH_REJECTED", f"{REMOTE} refused {branch}: someone else pushed it. "
+                                  "Never force: fetch it and assemble again")
+            raise HarborError("CONVOY_PUSH_FAILED", f"pushing {branch} failed, usually its pre-push verify: the merge "
+                              f"is on the local {branch}; fix it there in its own commit and assemble again. "
+                              f"{text.strip()[-300:]}")
+    # Keelokit's pre-push verifies whatever is pushed. When that run was a whole, green verify of this exact
+    # head against today's main, it is the convoy's verify at its level: record it, so `convoy verify`
+    # doesn't run it again.
+    entry = keelokit_history(head, since=pushed_at) if head != remote else None
+    pre_seal = None
+    if entry and full_run(entry, head, main_tip):
+        pre_seal = {"schema": SCHEMA, "kind": "convoy", "convoy": args.number, "head": head, "branch": branch,
+                    "base": main_tip, "command": "pnpm verify (Keelokit's pre-push of the assembled head)", "exit": 0,
+                    "result": "pass", "level": entry["level"], "reused": True,
+                    "started": fmt_ts(dt.datetime.fromtimestamp(entry["t"], dt.timezone.utc)), "finished": now(),
+                    "duration_seconds": sum(int(t) for _, t in entry.get("steps") or [] if isinstance(t, (int, float))),
+                    "by": me["id"], **steps_from(entry)}
     delivered = [(v["branch"], v["head"]) for v in vessels]
 
     def mutate(files, h):
@@ -1127,12 +1178,15 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         events.append(event(me["id"], "assembled", f"head {short(head)}, {len(vessels)} vessel(s)"
                             + (f"; waiting for {' and '.join(waits)}" if waits else "")))
         save_convoy(files, c2)
+        if pre_seal and not load(files, f"harbor/seals/{head}.toml"):
+            save(files, f"harbor/seals/{head}.toml", pre_seal)
         touch(files, w)
         return c2["state"], waits
 
     state, waits = transact(f"convoy {args.number} assemble at {short(head)}", me["id"], mutate)
     print(f"harbor: convoy {args.number} assembled at {short(head)} on main {short(main_tip)}: {state}"
-          + (f" (waiting for {' and '.join(waits)})" if waits else "") + ("" if head == before else f"; {branch} pushed"))
+          + (f" (waiting for {' and '.join(waits)})" if waits else "") + ("" if head == before else f"; {branch} pushed")
+          + (f"; its pre-push verify ({pre_seal['level']}) is recorded as the convoy's seal" if pre_seal else ""))
     return 0
 
 
@@ -1426,6 +1480,16 @@ def cmd_harbormaster(args) -> int:
                 save(files, worker_path(wid), wk)
                 lines.append(f"lost: {wid} (last seen {wk.get('last_seen')}): its account's place is free")
         ws = workers(files)
+        for wid, wk in ws.items():
+            owner_id = wk.get("spawned_by")
+            if wk.get("state") != "active" or not owner_id:
+                continue
+            owner = ws.get(owner_id)
+            why = ("is not in the logbook" if not owner else f"is {owner.get('state')}" if owner.get("state") != "active"
+                   else f"has its account paused until {p}" if (p := paused(accounts(files).get(owner.get("account"))))
+                   else None)
+            if why:
+                lines.append(f"orphan: {wid}, spawned by {owner_id}, which {why}: nobody owns its result")
         for n, c in convoys(files).items():
             if c.get("state") not in OPEN:
                 continue
@@ -1568,6 +1632,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--convoy", type=int)
     s.add_argument("--branch")
     s.add_argument("--model")
+    s.add_argument("--spawned-by", metavar="WORKER", help="the session that launched this one, which owns its result")
     s = wsub.add_parser("end")
     for f in ("--branch", "--head", "--verified", "--pending", "--worktree", "--log"):
         s.add_argument(f)
@@ -1606,13 +1671,15 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--relieve", metavar="REASON", help="only when the owner says so: take a watch that hasn't expired")
     hsub.add_parser("control")
     sub.add_parser("log")
+    sub.add_parser("models")
     i = sub.add_parser("import-board")
     i.add_argument("file")
     return p
 
 
 COMMANDS = {"check": cmd_check, "init": cmd_init, "account": cmd_account, "worker": cmd_worker, "seal": cmd_seal,
-            "convoy": cmd_convoy, "log": cmd_log, "import-board": cmd_import_board, "harbormaster": cmd_harbormaster}
+            "convoy": cmd_convoy, "log": cmd_log, "import-board": cmd_import_board, "harbormaster": cmd_harbormaster,
+            "models": cmd_models}
 
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
