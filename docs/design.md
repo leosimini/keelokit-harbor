@@ -871,3 +871,33 @@ model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tok
 | R24 coherence of process docs with the tools | dropped for Harbor: its state is generated, so it can't describe a tool that changed; prose docs are Keelokit's doctor's (vague phrases) | — |
 | R25 the CI trigger as a project policy (`landing: train \| direct`) | Keelokit's `[landing] policy`; Harbor runs only under `convoy` | 1 (read) |
 | R26 trains that change the API declare the consuming app version and who deploys | without a decision (see above) | — |
+
+## Proposals from JOUNA's process (2026-11-02, not built)
+
+A reading of JOUNA's trains (`3-Tasks/process/trains.md`, `CLAUDE.md`) alongside Keelokit 0.13. Three of
+its five coordination ideas are already here: a board off `main` (the logbook, `harbor/log`), relief of
+a lost coordinator after 3 hours with the first commit winning (`watch_expiry_minutes = 180`), and a
+verification level chosen by risk (`convoy sail --level --reason`). Two are not:
+
+- **A vessel never asks the person directly.** JOUNA lost a train for 2 hours to a session blocked on
+  AskUserQuestion that nobody saw. A worker in a convoy sends its question to the harbormaster with
+  `send_message` and goes on with what doesn't depend on the answer; the harbormaster asks the person.
+  Where: the worker's brief, and `worker` refusing to start a vessel's prompt without that line.
+- **A red convoy leaves a cause.** Each red of a convoy's verify adds a row to the project's
+  `.keelokit/red-causes.toml` (pattern, where to look) or to `docs/escapes.md` when it was a bug, in
+  the commit that fixes it, so the next red with the same signature names itself. Where: `convoy
+  verify` refusing a re-verify of a red convoy whose fix commit adds neither.
+
+What Keelokit 0.13 changes for Harbor:
+
+- `[verify] wip_branches = "wip/"` (opt-in, WIP-1): unfinished work moves on `wip/<topic>`, unverified,
+  and Keelokit's pre-push refuses any other push holding an unproven wip tip. `convoy add` should refuse
+  a branch whose head holds one before the hook does (`verify_tools.py wip-inside origin <sha>`).
+- The pre-push lets a commit that isn't checked out reach a non-main branch when it already passed a
+  clean, full verify here against `origin/main` (`verify_tools.py proven`): a worker can deliver a
+  verified head from another worktree.
+- `--rerun-failed` reruns only the failed integration specs and what the fix reaches, and a narrowed
+  green still completes the red run into a composite seal: §"Verifying without a bottleneck" can count
+  on it for a convoy's red integration step.
+- A new verify step, `zones`, runs a change's unit tests at awkward clocks; it is a full step for
+  `level`, like `unit`.
