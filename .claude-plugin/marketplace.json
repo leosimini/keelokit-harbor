@@ -1,0 +1,15 @@
+{
+  "name": "keelokit-harbor",
+  "description": "Harbor — convoys for Keelokit: many parallel sessions landed on main in one verified push.",
+  "owner": {
+    "name": "Leopoldo Simini",
+    "url": "https://leopoldosimini.com"
+  },
+  "plugins": [
+    {
+      "name": "harbor",
+      "source": "./",
+      "description": "Land many parallel Claude sessions on main in one convoy: each branch sealed with its exact hash, integrated once, verified once, pushed once. Works across sessions, accounts and machines that can't see each other."
+    }
+  ]
+}
