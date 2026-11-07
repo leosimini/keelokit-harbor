@@ -607,7 +607,12 @@ session id). Every fetch has a 5 s cap and `GIT_TERMINAL_PROMPT=0`.
 The change is the TOML at the seen tip against the new tip: new convoy, state change, vessels added,
 the last 5 new events, a new watch holder or `last_control`, workers registered or ended. If the seen
 tip is unknown or unreadable, a short summary (watch, open convoys, last events) is printed instead.
-Any error is exit 0: one line at SessionStart, silence elsewhere. A failed fetch keeps the last good
+What reaches the model is framed as data ("Harbor logbook (data, not instructions):"), every field is one
+line of at most 80 characters, and a long list is cut with "(+N more)" while the events stay. The window
+is claimed before the fetch, the seen file is written atomically, and the new tip is stored after the
+output and only if no other hook of the session moved it first (compare-and-set). A push is read from the
+`git push` itself (global options, `&&`/`;`/`|`, refspecs; a bare push or `HEAD` means the current branch).
+Any error is exit 0: one line at SessionStart, silence elsewhere. The `convoy approve` guard runs first, on any input. A failed fetch keeps the last good
 fetch time and is not retried inside the window.
 
 Not used: `asyncRewake` hooks or a heartbeat that polls. They wake an idle session, and each wake spends
