@@ -7,7 +7,8 @@
 I wrote Harbor after a week of landing parallel sessions by hand on a real monorepo built with
 [Keelokit](https://github.com/leosimini/keelokit). The board we kept drifted from reality, a
 branch's "green" stopped matching its last commit, and migration timestamps had to be renamed
-during integration. Harbor keeps that process and takes the hand work away. I maintain it as a
+during integration. Harbor keeps that process and takes the hand work away. It comes from hundreds of hours running many projects in parallel, many sessions on several
+accounts, delivering software around the clock with minimal intervention. I maintain it as a
 hobby, next to Keelokit, and it is opinionated and built around how I work, so take what's useful.
 
 ## The idea
@@ -52,17 +53,18 @@ gets the open convoys before it pushes to `main`. Details are in
 You need Keelokit 0.12.0 or later in the project (`.keelokit/`), Python 3.11+, git, and a remote
 `origin`.
 
-Harbor is version 0.1.0 and isn't released. The whole cycle is written and tested against stand-ins
-for Keelokit's verify: the logbook, accounts and workers, seals, convoys from `new` to `sail`, the
-harbormaster's watch, a one-time import of an existing `BOARD.md`, and the fresh reads. It has
-never run on a real project. What is designed but not written is listed at the top of
-[`docs/design.md`](docs/design.md). To load it from a clone:
-
 ```bash
-claude --plugin-dir /path/to/keelokit-harbor
+claude plugin marketplace add leosimini/keelokit-harbor
+claude plugin install harbor@keelokit-harbor
 ```
 
-Then run `/harbor:adopt` in a Keelokit project. Tests: `python3 -m unittest discover -s tests`.
+Or [download `harbor-plugin.zip`](https://github.com/leosimini/keelokit-harbor/releases/latest/download/harbor-plugin.zip)
+and upload it in Claude (*Customize → Plugins → Upload*). All versions are in the
+[releases](https://github.com/leosimini/keelokit-harbor/releases). To load it from a clone:
+`claude --plugin-dir /path/to/keelokit-harbor`.
+
+Then run `/harbor:adopt` in a Keelokit project. Tests: `python3 -m unittest discover -s tests`. What is
+designed but not written is listed at the top of [`docs/design.md`](docs/design.md).
 
 ## Good to know
 

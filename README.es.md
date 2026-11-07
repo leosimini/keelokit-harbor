@@ -7,7 +7,8 @@
 Escribí Harbor después de una semana subiendo sesiones en paralelo a mano en un monorepo real
 hecho con [Keelokit](https://github.com/leosimini/keelokit). El tablero se separó de la realidad,
 el «verde» de una rama dejó de corresponder a su último commit y hubo que renombrar timestamps de
-migraciones al integrar. Harbor mantiene ese proceso y saca el trabajo manual. Lo mantengo como
+migraciones al integrar. Harbor mantiene ese proceso y saca el trabajo manual. Sale de cientos de horas corriendo muchos proyectos en paralelo, muchas sesiones en varias
+cuentas, entregando software las 24 horas con una intervención mínima. Lo mantengo como
 hobby, al lado de Keelokit; es opinado y está hecho a mi manera de trabajar, así que tomá lo que te
 sirva.
 
@@ -54,17 +55,18 @@ herramientas, y recibe los convoys abiertos antes de subir a `main`. Los detalle
 Necesitás Keelokit 0.12.0 o posterior en el proyecto (`.keelokit/`), Python 3.11+, git y un remoto
 `origin`.
 
-Harbor está en la versión 0.1.0 y no está publicado. El ciclo completo está escrito y probado contra
-sustitutos del verify de Keelokit: el logbook, las cuentas y los workers, los sellos, los convoys de
-`new` a `sail`, la guardia del harbormaster, la importación única de un `BOARD.md` existente y las
-lecturas frescas. Nunca corrió en un proyecto real. Lo diseñado y no escrito está al principio de
-[`docs/design.md`](docs/design.md). Para cargarlo desde un clon:
-
 ```bash
-claude --plugin-dir /ruta/a/keelokit-harbor
+claude plugin marketplace add leosimini/keelokit-harbor
+claude plugin install harbor@keelokit-harbor
 ```
 
-Después corré `/harbor:adopt` en un proyecto con Keelokit. Tests: `python3 -m unittest discover -s tests`.
+O [descargá `harbor-plugin.zip`](https://github.com/leosimini/keelokit-harbor/releases/latest/download/harbor-plugin.zip)
+y subilo en Claude (*Customize → Plugins → Upload*). Todas las versiones están en
+[releases](https://github.com/leosimini/keelokit-harbor/releases). Para cargarlo desde un clon:
+`claude --plugin-dir /ruta/a/keelokit-harbor`.
+
+Después corré `/harbor:adopt` en un proyecto con Keelokit. Tests: `python3 -m unittest discover -s tests`. Lo
+diseñado y no escrito está al principio de [`docs/design.md`](docs/design.md).
 
 ## Bueno saber
 
