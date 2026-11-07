@@ -178,7 +178,7 @@ class TestHook(Base):
         command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         ok(harbor(self.a, "init"))
         res = subprocess.run(["bash", "-c", command], cwd=self.tmp, capture_output=True, text=True,
-                             input='{"session_id": "s42"}',
+                             input='{"hook_event_name": "SessionStart", "session_id": "s42"}',
                              env={**os.environ, "CLAUDE_PLUGIN_ROOT": str(HARBOR.parents[1]), "CLAUDE_PROJECT_DIR": str(self.a)})
         self.assertEqual(res.returncode, 0)
         self.assertIn("this session is leo/mbp/s42", res.stdout)

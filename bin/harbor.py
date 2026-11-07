@@ -33,6 +33,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py log                            print LOGBOOK.md as the remote has it
     harbor.py models                         the model of each Harbor role, and where it comes from
     harbor.py guard --claude                 PreToolUse hook: an agent can't run `convoy approve`
+    harbor.py sync --hook                    every Claude Code hook: fresh reads of the logbook (and the guard)
     harbor.py title --role vessel|skipper|harbormaster [--convoy N] [--story ID]
                                              the canonical session title, before the session exists
     harbor.py import-board FILE              once: a hand-kept BOARD.md into the logbook
@@ -556,6 +557,11 @@ def cmd_check(args) -> int:
             session = (json.loads(sys.stdin.read() or "{}") or {}).get("session_id")
         except (ValueError, OSError):
             session = None
+    return session_start(session, args.session, fresh=bool(args.hook))
+
+
+def session_start(session: str | None, arg_session: str | None, fresh: bool) -> int:
+    """The SessionStart lines. `fresh`: fetch first (5 s cap) and say so; else read the last fetch."""
     try:
         state = keelokit()
     except HarborError as e:
@@ -564,12 +570,15 @@ def cmd_check(args) -> int:
     cfg = config(state)
     lines = []
     try:
-        me = identity(args.session or session, need_session=False)
-        lines.append(f"Harbor: this session is {me['account']}/{me['host']}/{session or args.session or '<session>'}"
+        me = identity(arg_session or session, need_session=False)
+        lines.append(f"Harbor: this session is {me['account']}/{me['host']}/{session or arg_session or '<session>'}"
                      " — pass --session to harbor.py.")
     except HarborError as e:
         lines.append(f"Harbor: {e.why}.")
+    got = fetch_capped() if fresh else None
     head = rev(f"refs/remotes/{REMOTE}/{LOG_BRANCH}")
+    if fresh:
+        record_seen(session, head, got)
     if not head:
         lines.append(f"Harbor: no logbook fetched ({REMOTE}/{LOG_BRANCH}); /harbor:adopt creates it, /harbor:log fetches it.")
         print("\n".join(lines))
@@ -583,7 +592,8 @@ def cmd_check(args) -> int:
             counts[c["state"]] = counts.get(c["state"], 0) + 1
     watch = f"harbormaster {hm['worker']} (last control {hm.get('last_control')})" if hm.get("worker") else "nobody holds the watch"
     open_line = ", ".join(f"{k} {v}" for k, v in counts.items()) or "none"
-    lines.append(f"Harbor: logbook @{short(head)} as of the last fetch · {watch} · open convoys: {open_line} · "
+    age = "as of the last fetch" if not fresh else "fetched now" if got else f"offline: as of the last fetch, {fetch_age(session)}"
+    lines.append(f"Harbor: logbook @{short(head)} {age} · {watch} · open convoys: {open_line} · "
                  f"integrator: {cfg['integrator']}.")
     print("\n".join(lines))
     return 0
@@ -1593,9 +1603,10 @@ def convoy_approve(args, cfg: dict, me: dict) -> int:
 GUARDED = re.compile(r"\bconvoy\s+approve\b")
 
 
-def cmd_guard(args) -> int:
+def cmd_guard(args, raw: str | None = None) -> int:
     """Claude Code's PreToolUse hook. Exit 2 blocks the call and shows the reason to the agent."""
-    raw = sys.stdin.read() if not sys.stdin.isatty() else ""
+    if raw is None:
+        raw = sys.stdin.read() if not sys.stdin.isatty() else ""
     try:
         event_ = json.loads(raw or "{}")
         text = json.dumps(event_.get("tool_input") or {}) if event_.get("tool_name") == "Bash" else ""
@@ -1605,6 +1616,264 @@ def cmd_guard(args) -> int:
         print("Blocked by Harbor: only the person approves a critical convoy. Ask them to review it and run "
               "`harbor.py convoy approve <n>` in their own terminal.", file=sys.stderr)
         return 2
+    return 0
+
+
+# --- fresh reads: `sync --hook` (docs/design.md, «Fresh reads») -----------------------------------
+# One entry for Claude Code's hooks. A session sees the logbook as fresh as the hooks make it: fetched
+# at SessionStart, again on a prompt (>= 60 s since the last), after a tool (>= 120 s), and before a push
+# to main, to convoy/* or a convoy add|sail|verify. Inside a window only the seen file is read: no git.
+# Every error is exit 0, one line at SessionStart and silence elsewhere. Nothing here denies, except the
+# `convoy approve` guard, which is unchanged.
+
+FETCH_CAP = 5  # seconds, the git child's hard limit
+PROMPT_GAP, TOOL_GAP = 60, 120
+DELTA_MAX = 1000
+PUSHES = re.compile(r"\bgit\s+push\b")
+PUSH_MAIN = re.compile(r"(?<![\w./-])(?:refs/heads/)?main(?![\w./-])")
+PUSH_CONVOY = re.compile(r"(?<![\w./-])(?:refs/heads/)?convoy/")
+HARBOR_CONVOY = re.compile(r"harbor\.py\b(?:\s+--session\s+\S+)?\s+convoy\s+(add|sail|verify)\b")
+
+
+def find_git(start: Path) -> tuple[Path, Path] | None:
+    """(worktree root, common git dir) without running git: the throttled hooks must cost no process."""
+    for d in [start, *start.parents]:
+        g = d / ".git"
+        try:
+            if g.is_dir():
+                return d, g
+            if g.is_file():
+                gd = Path(g.read_text().split("gitdir:", 1)[1].strip())
+                gd = gd if gd.is_absolute() else d / gd
+                cd = gd / "commondir"
+                return d, (gd / cd.read_text().strip()).resolve() if cd.is_file() else gd
+        except (OSError, IndexError):
+            return None
+    return None
+
+
+COMMON: Path | None = None
+
+
+def epoch() -> float:
+    return parse_ts(now()).timestamp()
+
+
+def seen_path(session: str | None) -> Path | None:
+    sid = session if session and NAME.fullmatch(session) else "-"
+    return COMMON / "harbor/seen" / f"{sid}.json" if COMMON else None
+
+
+def read_seen(session: str | None) -> dict:
+    try:
+        d = json.loads(seen_path(session).read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def record_seen(session: str | None, tip: str | None, fetched: bool) -> None:
+    """The tip this session was shown. `fetched` False (a failed attempt) keeps the last good fetch time."""
+    p = seen_path(session)
+    if p is None:
+        return
+    d = read_seen(session)
+    d["tip"] = tip
+    d["attempt_epoch"] = epoch()
+    if fetched:
+        d["fetched_epoch"] = d["attempt_epoch"]
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(d))
+    except OSError:
+        pass
+
+
+def fetch_capped() -> bool:
+    """Fetch the logbook with a 5 s cap and no prompt. True when the remote answered (even: no logbook yet)."""
+    try:
+        res = subprocess.run(["git", "fetch", "--quiet", "--no-tags", REMOTE,
+                              f"+refs/heads/{LOG_BRANCH}:refs/remotes/{REMOTE}/{LOG_BRANCH}"],
+                             cwd=ROOT, capture_output=True, text=True, timeout=FETCH_CAP,
+                             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if res.returncode == 0:
+        return True
+    if "ouldn't find remote ref" in res.stderr or "ould not find remote ref" in res.stderr:
+        run("git", "update-ref", "-d", f"refs/remotes/{REMOTE}/{LOG_BRANCH}", check=False)
+        return True
+    return False
+
+
+def fetch_age(session: str | None) -> str:
+    t = read_seen(session).get("fetched_epoch")
+    if t is None and COMMON:
+        try:
+            t = (COMMON / "FETCH_HEAD").stat().st_mtime
+        except OSError:
+            pass
+    return f"{max(0, int(epoch() - t)) // 60} min old" if t is not None else "age unknown"
+
+
+def cap(text: str) -> str:
+    return text if len(text) <= DELTA_MAX else text[:DELTA_MAX - 3].rstrip() + "..."
+
+
+def who(w: str | None) -> str:
+    return w or "nobody"
+
+
+def open_lines(files: dict) -> list[str]:
+    out = []
+    for n, c in convoys(files).items():
+        if c.get("state") in OPEN:
+            vs = c.get("vessels") or []
+            out.append(f"convoy {n}{' ' + repr(c['title']) if c.get('title') else ''}: {c['state']}"
+                       f"{' on ' + short(c['head']) if c.get('head') else ''}, {len(vs)} vessel{'' if len(vs) == 1 else 's'}"
+                       f"{', skipper ' + c['skipper'] if c.get('skipper') else ''}")
+    return out
+
+
+def event_line(n: int, e: dict) -> str:
+    return f"convoy {n} · {e.get('what')}{' ' + str(e['detail']) if e.get('detail') else ''} · {e.get('by')}"
+
+
+def summary(tip: str, files: dict) -> str:
+    hm = watch(files)
+    holder = f"watch: {hm['worker']} (last control {hm.get('last_control', '—')})" if hm.get("worker") else "watch: nobody"
+    lines = [f"Harbor: logbook @{short(tip)}", holder, *(open_lines(files) or ["no open convoys"])]
+    ev = [event_line(n, e) for n, c in convoys(files).items() if c.get("state") in OPEN for e in c.get("events") or []]
+    lines += ["last events:", *ev[-5:]] if ev else []
+    return cap("\n".join(lines))
+
+
+def delta(old: dict, new: dict, old_tip: str, tip: str) -> str:
+    """What changed between two logbook trees, in a few lines."""
+    out, oc, nc = [], convoys(old), convoys(new)
+    events = []
+    for n, c in nc.items():
+        o = oc.get(n)
+        if o is None:
+            out.append(f"convoy {n} new: {c.get('title') or '(untitled)'} ({c.get('state')})")
+            continue
+        if o.get("state") != c.get("state"):
+            out.append(f"convoy {n}: {o.get('state')} -> {c.get('state')}")
+        have = {v.get("branch") for v in o.get("vessels") or []}
+        added = [v.get("branch") for v in c.get("vessels") or [] if v.get("branch") not in have]
+        if added:
+            out.append(f"convoy {n}: vessels added: {', '.join(map(str, added))}")
+        seen = [json.dumps(e, sort_keys=True, default=str) for e in o.get("events") or []]
+        events += [event_line(n, e) for e in c.get("events") or [] if json.dumps(e, sort_keys=True, default=str) not in seen]
+    o, h = watch(old), watch(new)
+    if o.get("worker") != h.get("worker"):
+        out.append(f"watch: {who(o.get('worker'))} -> {who(h.get('worker'))}")
+    elif o.get("last_control") != h.get("last_control"):
+        out.append(f"watch: control by {who(h.get('worker'))} at {h.get('last_control')}")
+    ow, nw = workers(old), workers(new)
+    for wid, w in nw.items():
+        if wid not in ow:
+            out.append(f"worker registered: {wid} ({w.get('role')}{', convoy ' + str(w['convoy']) if w.get('convoy') else ''})")
+        elif ow[wid].get("state") != w.get("state") and w.get("state") in ("ended", "lost"):
+            out.append(f"worker {w['state']}: {wid}")
+    if events[-5:]:
+        out += ["new events:", *events[-5:]]
+    return cap("\n".join([f"Harbor: logbook @{short(old_tip)} -> @{short(tip)}", *out]))
+
+
+def what_changed(seen_tip: str | None, tip: str) -> str:
+    try:
+        new = read_tree(tip)
+        if seen_tip and seen_tip != tip:
+            try:
+                return delta(read_tree(seen_tip), new, seen_tip, tip)
+            except HarborError:
+                pass
+        return summary(tip, new)
+    except HarborError:
+        return ""
+
+
+def fresh_read(session: str | None, gap: int) -> str:
+    """Fetch unless one happened less than `gap` s ago; the text of what changed since the seen tip, or ''."""
+    seen = read_seen(session)
+    last = max(seen.get("fetched_epoch") or 0, seen.get("attempt_epoch") or 0)
+    if seen and 0 <= epoch() - last < gap:
+        return ""
+    got = fetch_capped()
+    tip = rev(f"refs/remotes/{REMOTE}/{LOG_BRANCH}")
+    record_seen(session, tip, got)
+    if not tip or (seen.get("tip") == tip and "tip" in seen):
+        return ""
+    return what_changed(seen.get("tip"), tip)
+
+
+def push_note(command: str, session: str | None) -> str:
+    """PreToolUse: before a push that moves main or a convoy, or a convoy add|sail|verify, the convoys as of now."""
+    via = HARBOR_CONVOY.search(command)
+    push = PUSHES.search(command)
+    to_main = bool(push and PUSH_MAIN.search(command))
+    if not (via or (push and (to_main or PUSH_CONVOY.search(command)))):
+        return ""
+    got = fetch_capped()
+    tip = rev(f"refs/remotes/{REMOTE}/{LOG_BRANCH}")
+    record_seen(session, tip, got)
+    if not tip:
+        return ""
+    files = read_tree(tip)
+    lines = [f"Harbor: open convoys @{short(tip)}" + ("" if got else f" (offline, {fetch_age(session)})")]
+    lines += open_lines(files) or ["no open convoys"]
+    if to_main and not (via and via.group(1) == "sail"):
+        for n, c in convoys(files).items():
+            if c.get("state") == "verifying":
+                lines.append(f"Convoy {n} is verifying: a push to main now moves main under its verify. "
+                             "Wait for it or land through `convoy sail`.")
+    return cap("\n".join(lines))
+
+
+def json_context(name: str, text: str) -> None:
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": name, "additionalContext": text}}))
+
+
+def cmd_sync(args, root: Path | None = None) -> int:
+    global ROOT, REMOTE, COMMON
+    raw = "" if sys.stdin.isatty() else sys.stdin.read()
+    try:
+        ev = json.loads(raw or "{}") or {}
+    except ValueError:
+        ev = {}
+    if not isinstance(ev, dict):
+        ev = {}
+    name = ev.get("hook_event_name")
+    command = (ev.get("tool_input") or {}).get("command", "") if ev.get("tool_name") == "Bash" else ""
+    if name == "PreToolUse" and isinstance(command, str) and GUARDED.search(json.dumps(ev.get("tool_input") or {})):
+        return cmd_guard(args, raw)
+    try:
+        start = Path(root or os.environ.get("CLAUDE_PROJECT_DIR") or ev.get("cwd") or Path.cwd())
+        found = find_git(start.resolve())
+        if not found:
+            return 0
+        ROOT, COMMON = found
+        REMOTE = os.environ.get("HARBOR_REMOTE", "origin")
+        session = ev.get("session_id") if isinstance(ev.get("session_id"), str) else None
+        if name == "SessionStart":
+            return session_start(session, args.session, fresh=True)
+        keelokit()
+        if name == "UserPromptSubmit":
+            text = fresh_read(session, PROMPT_GAP)
+            if text:
+                print(text)
+        elif name == "PostToolUse":
+            text = fresh_read(session, TOOL_GAP)
+            if text:
+                json_context(name, text)
+        elif name == "PreToolUse" and isinstance(command, str):
+            text = push_note(command, session)
+            if text:
+                json_context(name, text)
+    except Exception:  # a hook never fails the session
+        if name == "SessionStart":
+            print("Harbor: could not read the logbook just now.")
     return 0
 
 
@@ -1894,6 +2163,8 @@ def parser() -> argparse.ArgumentParser:
     t.add_argument("--role", choices=ROLES, required=True)
     t.add_argument("--convoy", type=int)
     t.add_argument("--story")
+    y = sub.add_parser("sync")
+    y.add_argument("--hook", action="store_true", help="read the Claude Code hook JSON on stdin")
     g = sub.add_parser("guard")
     g.add_argument("--claude", action="store_true")
     i = sub.add_parser("import-board")
@@ -1903,7 +2174,7 @@ def parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"check": cmd_check, "init": cmd_init, "account": cmd_account, "worker": cmd_worker, "seal": cmd_seal,
             "convoy": cmd_convoy, "log": cmd_log, "import-board": cmd_import_board, "harbormaster": cmd_harbormaster,
-            "models": cmd_models, "guard": cmd_guard, "title": cmd_title}
+            "models": cmd_models, "guard": cmd_guard, "sync": cmd_sync, "title": cmd_title}
 
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
@@ -1914,6 +2185,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         return 0 if e.code == 0 else 2
     if args.cmd == "guard":
         return cmd_guard(args)
+    if args.cmd == "sync":
+        return cmd_sync(args, root)
     start = Path(root or os.environ.get("CLAUDE_PROJECT_DIR") or Path.cwd())
     top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=start, capture_output=True, text=True)
     if top.returncode != 0:
@@ -1922,6 +2195,8 @@ def main(argv: list[str] | None = None, root: Path | None = None) -> int:
         print("harbor: NOT_A_REPO: run it inside the project's git repository", file=sys.stderr)
         return 2
     ROOT = Path(top.stdout.strip())
+    global COMMON
+    COMMON = (find_git(ROOT) or (None, None))[1]
     REMOTE = os.environ.get("HARBOR_REMOTE", "origin")
     try:
         return COMMANDS[args.cmd](args)

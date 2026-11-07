@@ -5,7 +5,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v python3 >/dev/null || { echo 'Harbor: python3 not found, so Harbor is off. Install Python 3.11+.'; exit 0; }; cd \"${CLAUDE_PROJECT_DIR:-.}\" 2>/dev/null; python3 \"${CLAUDE_PLUGIN_ROOT}/bin/harbor.py\" check --hook; exit 0"
+            "command": "command -v python3 >/dev/null || { echo 'Harbor: python3 not found, so Harbor is off. Install Python 3.11+.'; exit 0; }; cd \"${CLAUDE_PROJECT_DIR:-.}\" 2>/dev/null; python3 \"${CLAUDE_PLUGIN_ROOT}/bin/harbor.py\" sync --hook; exit 0",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v python3 >/dev/null || exit 0; cd \"${CLAUDE_PROJECT_DIR:-.}\" 2>/dev/null; python3 \"${CLAUDE_PLUGIN_ROOT}/bin/harbor.py\" sync --hook; exit 0",
+            "timeout": 10
           }
         ]
       }
@@ -16,7 +28,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v python3 >/dev/null || exit 0; exec python3 \"${CLAUDE_PLUGIN_ROOT}/bin/harbor.py\" guard --claude"
+            "command": "command -v python3 >/dev/null || exit 0; cd \"${CLAUDE_PROJECT_DIR:-.}\" 2>/dev/null; exec python3 \"${CLAUDE_PLUGIN_ROOT}/bin/harbor.py\" sync --hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v python3 >/dev/null || exit 0; cd \"${CLAUDE_PROJECT_DIR:-.}\" 2>/dev/null; python3 \"${CLAUDE_PLUGIN_ROOT}/bin/harbor.py\" sync --hook; exit 0",
+            "timeout": 10
           }
         ]
       }

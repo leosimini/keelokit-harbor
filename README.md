@@ -61,8 +61,10 @@ Then run `/harbor:adopt` in a Keelokit project. Tests: `python3 -m unittest disc
 - Harbor depends on Keelokit and copies none of its code. It runs Keelokit's `pnpm verify`, reads its
   `state.toml`, and uses its tiers and its `Story:` trailer. Without `.keelokit/`, Harbor prints one
   line and does nothing.
-- The SessionStart hook runs `bin/harbor.py check` from the plugin and reads the project's
-  `.keelokit/state.toml` and `.keelokit/local.toml`. It works offline and never blocks a session.
+- The hooks run `bin/harbor.py sync --hook` from the plugin and read the project's
+  `.keelokit/state.toml` and `.keelokit/local.toml`. A session starts with a fresh fetch (5 s cap), sees
+  what changed in the logbook at each prompt (at most every 60 s) and after tools (every 2 min), and
+  gets the open convoys before a push to `main`. They work offline and never block a session.
 - `harbor.py seal` runs the command in `[harbor] vessel_verify` from the project's `state.toml`. That
   is project code, just like the project's tests.
 - A convoy with a full-tier story or one that touches a critical area also waits for your yes

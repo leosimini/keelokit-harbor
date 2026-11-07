@@ -157,8 +157,8 @@ break a rule (two adds of the same hotspot in different files). **Needs your ok.
 rejections in a row the command stops without writing (a bound chosen for the code, not from the
 survey).
 
-**Reads.** Every command fetches first. The SessionStart line reads the last fetched tip without
-the network and says so ("as of the last fetch").
+**Reads.** Every command fetches first. The hooks keep a session's view fresh between commands
+(§"Fresh reads").
 
 **Views.** `LOGBOOK.md` and `convoys/<n>.md` are rendered from the TOML on every write, start with
 a do-not-edit comment, and carry no clock of their own, so a write that changes no TOML changes
@@ -559,7 +559,8 @@ Read-only: fetches and prints `LOGBOOK.md`, or `convoys/<n>.md`.
 ### `harbor.py` without a slash command
 
 `account set|pause|resume`, `worker register|end`, `seal`, `import-board` are run by the skills.
-`check --hook` is the SessionStart hook: never fails the session; prints one to three lines.
+`sync --hook` is the entry of every Claude Code hook (§"Fresh reads"); `check --hook` is its SessionStart
+part, never fails the session and prints one to three lines.
 
 ## The watch and its relief
 
@@ -588,6 +589,29 @@ commit that isn't the one checked out (checked with `scripts/test-with-keelokit.
   new seal is backed by a whole green run on that machine. So Harbor keeps everything under
   `harbor/` and writes a seal only for such a run; everything else about a run goes to `runs/`.
   Harbor never uses `--no-verify`.
+
+## Fresh reads
+
+A session used to see the logbook only at SessionStart, from the last fetch, or when it ran a Harbor
+command, and decided on stale state. `harbor.py sync --hook` reads the hook JSON on stdin and keeps a
+per-clone file `<git-common-dir>/harbor/seen/<session>.json` (`tip`, `fetched_epoch`; `-` without a
+session id). Every fetch has a 5 s cap and `GIT_TERMINAL_PROMPT=0`.
+
+| Hook | What it does | Delay |
+| --- | --- | --- |
+| SessionStart | fetches, prints the `check` lines ("fetched now", or "offline: as of the last fetch, N min old") | 0 |
+| UserPromptSubmit | fetches when the last fetch is 60 s old or more; prints, to stdout, only what changed since the seen tip (at most 1000 characters); nothing if the tip is the same | up to 60 s |
+| PostToolUse | the same at 120 s, as `additionalContext` JSON; inside the window it reads only the seen file and starts no git process | up to 2 min in a long turn |
+| PreToolUse, Bash | `convoy approve` is denied as before. Before a `git push` to `main` or `convoy/*`, or `harbor.py convoy add\|sail\|verify`, it fetches without waiting and adds the open convoys' states; if one is `verifying` and the push goes to `main` not through `convoy sail`, it says so. It never denies for this | 0 |
+
+The change is the TOML at the seen tip against the new tip: new convoy, state change, vessels added,
+the last 5 new events, a new watch holder or `last_control`, workers registered or ended. If the seen
+tip is unknown or unreadable, a short summary (watch, open convoys, last events) is printed instead.
+Any error is exit 0: one line at SessionStart, silence elsewhere. A failed fetch keeps the last good
+fetch time and is not retried inside the window.
+
+Not used: `asyncRewake` hooks or a heartbeat that polls. They wake an idle session, and each wake spends
+tokens for a logbook nobody is acting on; a session that is working already passes through the hooks above.
 
 ## Verifying without a bottleneck
 
@@ -901,3 +925,6 @@ What Keelokit 0.13 changes for Harbor:
   on it for a convoy's red integration step.
 - A new verify step, `zones`, runs a change's unit tests at awkward clocks; it is a full step for
   `level`, like `unit`.
+
+Fresh reads (§"Fresh reads") came from JOUNA's board incident of 2026-11-07: a convoy started verifying
+while another session kept adding pieces, because the second session read the board as of its last fetch.
