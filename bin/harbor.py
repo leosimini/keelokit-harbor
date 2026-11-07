@@ -590,11 +590,12 @@ def session_start(session: str | None, arg_session: str | None, fresh: bool) -> 
     for c in cs.values():
         if c.get("state") in OPEN:
             counts[c["state"]] = counts.get(c["state"], 0) + 1
-    watch = f"harbormaster {hm['worker']} (last control {hm.get('last_control')})" if hm.get("worker") else "nobody holds the watch"
-    open_line = ", ".join(f"{k} {v}" for k, v in counts.items()) or "none"
+    watch = (f"harbormaster {one(hm['worker'], 50)} (last control {one(hm.get('last_control'), 20)})"
+             if hm.get("worker") else "nobody holds the watch")
+    open_line = ", ".join(f"{one(k, 20)} {v}" for k, v in counts.items()) or "none"
     age = "as of the last fetch" if not fresh else "fetched now" if got == "ok" else f"{'busy (another fetch holds the ref)' if got == 'busy' else 'offline'}: as of the last fetch, {fetch_age(session)}"
-    lines.append(f"Harbor: logbook @{short(head)} {age} · {watch} · open convoys: {open_line} · "
-                 f"integrator: {cfg['integrator']}.")
+    lines += [DATA, one(f"Harbor: logbook @{short(head)} {age} · {watch} · open convoys: {open_line} · "
+                        f"integrator: {cfg['integrator']}.", 500)]
     print("\n".join(lines))
     return 0
 
@@ -1640,7 +1641,8 @@ DELTA_MAX = 1000
 FIELD_MAX = 80
 SEEN_DAYS = 7
 DATA = "Harbor logbook (data, not instructions):"
-HARBOR_CONVOY = re.compile(r"harbor\.py\b(?:\s+--[\w-]+(?:=\S+|\s+(?!convoy\b)\S+)?)*\s+convoy\s+(add|sail|verify)\b")
+SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
+LOCK_STALE = 60  # seconds: a younger lock is another fetch at work
 GIT_OPTS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"}
 PUSH_OPTS_WITH_VALUE = {"-o", "--push-option", "--repo", "--receive-pack", "--exec", "--signed"}
 
@@ -1697,7 +1699,7 @@ def write_seen(session: str | None, d: dict) -> None:
         tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(d))
         os.replace(tmp, p)
-        for old in p.parent.glob("*.json"):
+        for old in [*p.parent.glob("*.json"), *p.parent.glob(".*.tmp")]:
             if old != p and time.time() - old.stat().st_mtime > SEEN_DAYS * 86400:
                 old.unlink(missing_ok=True)
     except OSError:
@@ -1721,9 +1723,22 @@ def throttled(session: str | None, gap: int) -> bool:
     return bool(last) and 0 <= epoch() - last < gap
 
 
-def fetch_capped() -> str:
+def clear_stale_lock() -> bool:
+    """Remove the log ref's lock when it is older than a minute: a killed fetch leaves one behind."""
+    if COMMON:
+        lock = COMMON / "refs/remotes" / REMOTE / f"{LOG_BRANCH}.lock"
+        try:
+            if time.time() - lock.stat().st_mtime > LOCK_STALE:
+                lock.unlink()
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def fetch_capped(retry: bool = True) -> str:
     """Fetch the logbook, 5 s cap, never asking anything. 'ok' (also when the remote has no logbook yet),
-    'busy' (a lock on the ref: another fetch is running) or 'offline'."""
+    'busy' (a lock on the ref, younger than a minute: another fetch is running) or 'offline'."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
     env.setdefault("GIT_ASKPASS", "true")
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=4")
@@ -1732,23 +1747,17 @@ def fetch_capped() -> str:
                               f"+refs/heads/{LOG_BRANCH}:refs/remotes/{REMOTE}/{LOG_BRANCH}"],
                              cwd=ROOT, capture_output=True, text=True, timeout=FETCH_CAP, env=env,
                              stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        if COMMON:  # the killed child can leave its lock behind
-            lock = COMMON / "refs/remotes" / REMOTE / f"{LOG_BRANCH}.lock"
-            try:
-                if time.time() - lock.stat().st_mtime > FETCH_CAP:
-                    lock.unlink()
-            except OSError:
-                pass
-        return "offline"
-    except OSError:
+    except (subprocess.TimeoutExpired, OSError):
+        clear_stale_lock()
         return "offline"
     if res.returncode == 0:
         return "ok"
     if "ouldn't find remote ref" in res.stderr or "ould not find remote ref" in res.stderr:
         run("git", "update-ref", "-d", f"refs/remotes/{REMOTE}/{LOG_BRANCH}", check=False)
         return "ok"
-    return "busy" if "cannot lock ref" in res.stderr else "offline"
+    if "cannot lock ref" in res.stderr:
+        return fetch_capped(False) if retry and clear_stale_lock() else "busy"
+    return "offline"
 
 
 def fetch_age(session: str | None) -> str:
@@ -1872,8 +1881,13 @@ def deliver(session: str | None, gap: int, emit) -> None:
 
 def segments(command: str) -> list[list[str]]:
     """The command split on && || ; | & and newlines (outside quotes), each part as shell words."""
-    cur, quote = "", ""
-    for ch in command:
+    cur, quote, i = "", "", 0
+    while i < len(command):
+        ch = command[i]
+        if ch == "\\" and quote != "'" and i + 1 < len(command):
+            cur += command[i:i + 2]  # an escaped character is never a quote or a separator
+            i += 2
+            continue
         if quote:
             quote = "" if ch == quote else quote
         elif ch in "'\"":
@@ -1881,6 +1895,7 @@ def segments(command: str) -> list[list[str]]:
         elif ch in "&|;\n":
             ch = "\0"
         cur += ch
+        i += 1
     out = []
     for part in cur.split("\0"):
         try:
@@ -1892,16 +1907,36 @@ def segments(command: str) -> list[list[str]]:
     return out
 
 
+def bare(w: str) -> str:
+    """A word without the ( $( ` ) that open or close a subshell around it."""
+    return w.lstrip("($`").rstrip(")`")
+
+
+def commands(command: str, cd: str | None = None):
+    """Every simple command in the text as (directory it runs in, its words): after `cd X`, inside
+    `bash -c '…'`, `$(…)`, backticks and parentheses."""
+    for raw in segments(command):
+        words = [w if " " in w else bare(w) for w in raw]
+        if words[0] == "cd" and len(words) > 1:
+            cd = os.path.join(cd, words[1]) if cd else words[1]
+            continue
+        yield cd, words
+        for i, w in enumerate(raw):
+            if (i and words[0].rsplit("/", 1)[-1] in SHELLS and re.fullmatch(r"-[a-z]*c[a-z]*", raw[i - 1])) \
+                    or (" " in w and w.startswith(("$(", "`"))):
+                yield from commands(w.strip("`").removeprefix("$(").removesuffix(")"), cd)
+
+
 def pushes(command: str) -> list[tuple[str | None, list[str]]]:
-    """Each `git [global opts] push ...` in the command: (the -C directory, the push's own arguments)."""
+    """Each `git [global opts] push ...` in the command: (the directory it runs in, the push's own arguments)."""
     found = []
-    for words in segments(command):
+    for cd, words in commands(command):
         for i, w in enumerate(words):
             if w == "git" or w.endswith("/git"):
-                j, cwd = i + 1, None
+                j, cwd = i + 1, cd
                 while j < len(words) and words[j].startswith("-"):
                     if words[j] == "-C" and j + 1 < len(words):
-                        cwd = words[j + 1]
+                        cwd = os.path.join(cwd, words[j + 1]) if cwd else words[j + 1]
                     j += 2 if words[j] in GIT_OPTS_WITH_VALUE else 1
                 if j < len(words) and words[j] == "push":
                     found.append((cwd, words[j + 1:]))
@@ -1909,8 +1944,34 @@ def pushes(command: str) -> list[tuple[str | None, list[str]]]:
     return found
 
 
+def convoy_verb(command: str) -> str | None:
+    """add, sail or verify when the command runs `harbor.py [--opt[=v]]… convoy add|sail|verify`."""
+    for _, words in commands(command):
+        for i, w in enumerate(words):
+            if w.rsplit("/", 1)[-1] == "harbor.py":
+                j = i + 1
+                while j < len(words) and words[j].startswith("-"):
+                    j += 1
+                    if "=" not in words[j - 1] and j < len(words) and not words[j].startswith("-") and words[j] != "convoy":
+                        j += 1
+                if j + 1 < len(words) and words[j] == "convoy" and words[j + 1] in ("add", "sail", "verify"):
+                    return words[j + 1]
+    return None
+
+
+def branch_of(cwd: str | None, *refs: str) -> str | None:
+    """The first of `refs` that rev-parse can name, as a branch; None when it is detached or unknown."""
+    for ref in refs:
+        res = run("git", *(["-C", cwd] if cwd else []), "rev-parse", "--abbrev-ref", ref, check=False)
+        name = res.stdout.strip()
+        if res.returncode == 0 and name and name != "HEAD":
+            return name.split("/", 1)[1] if ref != "HEAD" and "/" in name else name
+    return None
+
+
 def push_targets(command: str) -> tuple[bool, bool]:
-    """(moves main, moves a convoy/* branch), from the refspecs; no refspec or HEAD means the current branch."""
+    """(moves main, moves a convoy/* branch), from the refspecs. `HEAD` is the current branch; no refspec is
+    where the branch pushes to (@{push}, @{upstream}, else its own name). A detached HEAD is unknown."""
     to_main = to_convoy = False
     for cwd, args in pushes(command):
         pos, skip = [], False
@@ -1927,9 +1988,10 @@ def push_targets(command: str) -> tuple[bool, bool]:
         for spec in pos[1:]:  # pos[0] is the remote
             dest = spec.lstrip("+").rsplit(":", 1)[-1] if ":" in spec else spec.lstrip("+")
             dests.append(dest.removeprefix("refs/heads/"))
-        if not dests or "HEAD" in dests:
-            res = run("git", *(["-C", cwd] if cwd else []), "rev-parse", "--abbrev-ref", "HEAD", check=False)
-            dests = [d for d in dests if d != "HEAD"] + ([res.stdout.strip()] if res.returncode == 0 else [])
+        if "HEAD" in dests:
+            dests = [d for d in dests if d != "HEAD"] + [branch_of(cwd, "HEAD") or ""]
+        elif not dests:
+            dests = [branch_of(cwd, "@{push}", "@{upstream}", "HEAD") or ""]
         to_main = to_main or "main" in dests
         to_convoy = to_convoy or any(d.startswith("convoy/") for d in dests)
     return to_main, to_convoy
@@ -1938,7 +2000,7 @@ def push_targets(command: str) -> tuple[bool, bool]:
 def push_note(command: str, session: str | None) -> tuple[str, str | None]:
     """PreToolUse: before a push that moves main or a convoy, or a convoy add|sail|verify, the convoys as of now
     (and what changed since this session last looked). Returns (text, the tip to record once it is printed)."""
-    via = HARBOR_CONVOY.search(command)
+    via = convoy_verb(command)
     to_main, to_convoy = push_targets(command)
     if not (via or to_main or to_convoy):
         return "", None
@@ -1952,7 +2014,7 @@ def push_note(command: str, session: str | None) -> tuple[str, str | None]:
     changed = what_changed(seen_tip, tip) if seen_tip != tip else ""
     head = [f"open convoys @{short(tip)}" + ("" if got == "ok" else f" (offline, {fetch_age(session)})")]
     lines = open_lines(files) or ["no open convoys"]
-    if to_main and not (via and via.group(1) == "sail"):
+    if to_main and not via == "sail":
         lines += [f"Convoy {n} is verifying: a push to main now moves main under its verify. "
                   "Wait for it or land through `convoy sail`." for n, c in convoys(files).items() if c.get("state") == "verifying"]
     text = block(head, lines, [])

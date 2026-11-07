@@ -611,8 +611,8 @@ What reaches the model is framed as data ("Harbor logbook (data, not instruction
 line of at most 80 characters, and a long list is cut with "(+N more)" while the events stay. The window
 is claimed before the fetch, the seen file is written atomically, and the new tip is stored after the
 output and only if no other hook of the session moved it first (compare-and-set). A push is read from the
-`git push` itself (global options, `&&`/`;`/`|`, refspecs; a bare push or `HEAD` means the current branch).
-Any error is exit 0: one line at SessionStart, silence elsewhere. The `convoy approve` guard runs first, on any input. A failed fetch keeps the last good
+`git push` itself (global options, `cd X &&`, `bash -c`, `$(…)`, refspecs; a bare push or `HEAD` means the current branch).
+Any error is exit 0: one line at SessionStart, silence elsewhere. The `convoy approve` guard runs first, on any input. A lock on the log ref younger than a minute reads as "busy"; an older one is removed. A failed fetch keeps the last good
 fetch time and is not retried inside the window.
 
 Not used: `asyncRewake` hooks or a heartbeat that polls. They wake an idle session, and each wake spends
