@@ -1,6 +1,6 @@
 ---
 name: convoy
-description: Run a convoy — a batch of vessel branches from several sessions, accounts or machines integrated in convoy/<n>, verified once and landed on main with one push. Subcommands new, add, assemble, verify, sail, status; also how a vessel session delivers its branch. Use when the user says "new convoy", "add this branch to the convoy", "convoy status", "sail", "armá un convoy", "sumá esta rama al convoy", "estado del convoy", "zarpá", or when a vessel finished and must be delivered.
+description: Run a convoy — a batch of vessel branches from several sessions, accounts or machines integrated in convoy/N, verified once and landed on main with one push. Subcommands new, add, assemble, verify, sail, status; also how a vessel session delivers its branch. Use when the user says "new convoy", "add this branch to the convoy", "convoy status", "sail", "armá un convoy", "sumá esta rama al convoy", "estado del convoy", "zarpá", or when a vessel finished and must be delivered.
 ---
 
 # Convoy — a branch enters with its hash and its seal, or not at all

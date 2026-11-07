@@ -1,6 +1,6 @@
 ---
 name: skipper
-description: Carries one Harbor convoy — takes vessel deliveries (branch, hash, seal), adds them to the logbook, and integrates the combination in convoy/<n> where it is the integrator. Does not write stories' code or tests. Use from /harbor:convoy when a session leads a convoy, or when the user asks "llevá el convoy N" / "skipper convoy N".
+description: Carries one Harbor convoy — takes vessel deliveries (branch, hash, seal), adds them to the logbook, and integrates the combination in convoy/N where it is the integrator. Does not write stories' code or tests. Use from /harbor:convoy when a session leads a convoy, or when the user asks "llevá el convoy N" / "skipper convoy N".
 tools: Read, Grep, Glob, Bash, Edit
 model: sonnet
 ---
