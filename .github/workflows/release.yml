@@ -1,0 +1,124 @@
+# Tags each release. A push to `release` gets the tag `v<version>` from .claude-plugin/plugin.json. Tags are made
+# here, never by hand. The process is in docs/releasing.md.
+# Every GitHub Release also gets harbor-plugin.zip, the plugin ready to install (scripts/package.sh); run this
+# workflow by hand with a tag to attach it to a release that doesn't have it yet.
+name: Release
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing release tag (vX.Y.Z) to attach its plugin zip to
+        required: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Tag v<version>
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # main and the existing tags
+      - name: Check the release and tag it
+        id: tag
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import json; print(json.load(open(".claude-plugin/plugin.json"))["version"])')
+          tag="v$version"
+          git merge-base --is-ancestor HEAD origin/main \
+            || { echo "::error::release must point at a commit of main"; exit 1; }
+          heading=$(grep -m1 "^## $version — " CHANGELOG.md) \
+            || { echo "::error::CHANGELOG.md has no '## $version — <date>' entry"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            [ "$(git rev-parse "$tag^{commit}")" = "$(git rev-parse HEAD)" ] \
+              || { echo "::error::$tag is already on another commit; a release raises the version (scripts/release.sh)"; exit 1; }
+            echo "$tag is already on this commit"
+            exit 0
+          fi
+          rest=${heading#"## $version — "}
+          title=""
+          case "$rest" in *" — "*) title=" — ${rest#* — }" ;; esac
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Harbor $version$title"
+          git push origin "$tag"
+          echo "Tagged $tag: Harbor $version$title"
+      # The GitHub Release is what people read for release notes: its notes are this version's CHANGELOG entry.
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "$TAG already has a release"; exit 0; fi
+          version=${TAG#v}
+          python3 - "$version" > notes.md <<'PY'
+          import re, sys
+          v = re.escape(sys.argv[1])
+          log = open("CHANGELOG.md").read()
+          m = re.search(rf"^## {v} — .*?\n(.*?)(?=^## |\Z)", log, re.S | re.M)
+          print(m.group(1).strip() if m else "")
+          PY
+          title=$(grep -m1 "^## $version — " CHANGELOG.md | sed "s/^## $version — [0-9-]*//; s/^ — //")
+          gh release create "$TAG" --verify-tag --title "Harbor $version${title:+ — $title}" --notes-file notes.md
+
+  # The zip to install from attached to the release with a fixed name so
+  # https://github.com/<repo>/releases/latest/download/harbor-plugin.zip always gives the latest version.
+  package:
+    name: Attach harbor-plugin.zip
+    needs: tag
+    if: always() && (needs.tag.result == 'success' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Build it from the tag and check it
+        env:
+          TAG: ${{ inputs.tag || needs.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
+          git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || { echo "::error::no tag $TAG"; exit 1; }
+          scripts/package.sh "$TAG" dist/harbor-plugin.zip
+          version=$(unzip -p dist/harbor-plugin.zip .claude-plugin/plugin.json | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
+          [ "v$version" = "$TAG" ] || { echo "::error::$TAG's plugin.json says $version"; exit 1; }
+      - name: Attach it and say what it is
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || needs.tag.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/harbor-plugin.zip --clobber
+          gh release view "$TAG" --json body -q .body > notes.md
+          if ! grep -q 'harbor:install' notes.md; then
+            cat >> notes.md <<EOF
+
+          <!-- harbor:install -->
+          ## Install
+
+          **[harbor-plugin.zip](https://github.com/$REPO/releases/download/$TAG/harbor-plugin.zip)** is this version of the plugin, ready to install: on claude.ai or in the Claude desktop app, *Customize → Plugins → Upload* and pick the file.
+
+          What it contains, at the zip's root: \`.claude-plugin/\` (the manifest), \`skills/\` (the \`/harbor\` commands), \`agents/\` (skipper and harbormaster), \`hooks/\` (the fresh reads), \`bin/\` (\`harbor.py\`) and \`docs/design.md\`, plus the README, CHANGELOG and LICENSE. It leaves out what only the repository needs: its CI, tests and scripts. Harbor needs Keelokit 0.12.0 or later in the project, Python 3.11+, git and a remote \`origin\`.
+
+          *Source code (zip)* is the whole repository, to read or contribute to; it isn't the file to upload.
+          EOF
+            gh release edit "$TAG" --notes-file notes.md
+          fi
+          echo "Attached harbor-plugin.zip to $TAG"
