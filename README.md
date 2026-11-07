@@ -1,18 +1,23 @@
 # Harbor
 
-**Convoys for [Keelokit](https://github.com/leosimini/keelokit): many sessions, one push to main.**
+**A Claude Code plugin for landing many parallel sessions on `main` in one convoy.**
 
-*[Leer en español](README.es.md)*
+*[Keelokit](https://github.com/leosimini/keelokit) · [Leer en español](README.es.md)*
 
-Keelokit builds one story per session and lands it on `main`. When the sessions are many, run on
-more than one Claude account or on more than one machine, that becomes one full verify per landing,
-and nobody sees the combination before it is on `main`. Harbor batches them: each session finishes
-on its own branch (a *vessel*), a *skipper* integrates a batch in `convoy/<n>`, it is verified once,
-and after the *harbormaster*'s ok it reaches `main` with one push.
+I wrote Harbor after a week of landing parallel sessions by hand on a real monorepo built with
+[Keelokit](https://github.com/leosimini/keelokit). The board we kept drifted from reality, a
+branch's "green" stopped matching its last commit, and migration timestamps had to be renamed
+during integration. Harbor keeps that process and takes the hand work away. I maintain it as a
+hobby, next to Keelokit, and it is opinionated and built around how I work, so take what's useful.
 
-I wrote it after a week of doing this by hand on a real monorepo. The board we kept drifted from
-reality, a branch's "green" stopped matching its last commit, and migration timestamps had to be
-renamed during integration. Harbor keeps the process and takes the hand work away:
+## The idea
+
+Keelokit builds one story per session and lands it on `main`. When the sessions are many, on more
+than one Claude account or more than one machine, that becomes one full verify per landing, and
+nobody sees the combination before it is on `main`. Harbor batches them: each session finishes on
+its own branch (a *vessel*), a *skipper* integrates a batch in `convoy/<n>`, it is verified once,
+and after the *harbormaster*'s ok it reaches `main` with one push. The rules that matter are
+written as checks, not left to memory:
 
 - **The state is a git branch only Harbor writes** (`harbor/log`): TOML files with a fixed schema,
   and pages generated from them that nobody edits. It is never on `main`, so writing it doesn't
@@ -26,15 +31,7 @@ renamed during integration. Harbor keeps the process and takes the hand work awa
 - **Accounts have a session cap and a pause.** When an account hits its limit, its sessions hand over
   what they pushed, with hashes, instead of leaving half-done work.
 
-## Status
-
-Version 0.1.0, not released. The whole cycle is written and tested against stand-ins for
-Keelokit's verify: the logbook, accounts and workers, seals, convoys from `new` to `sail`, the
-harbormaster's watch, and a one-time import of an existing `BOARD.md`. It hasn't run on a real
-project yet. What is designed but not written is listed at the top of
-[`docs/design.md`](docs/design.md).
-
-## Commands
+## What it does
 
 | Command | What happens |
 |---|---|
@@ -45,10 +42,21 @@ project yet. What is designed but not written is listed at the top of
 | `/harbor:log` | The logbook: watch, convoys, workers, accounts |
 | `/harbor:harbormaster takeover\|control` | Takes the watch; the round that renews it, records every move of `main` and says what each convoy waits for |
 
+Its hooks keep a session's view of the logbook fresh, so it doesn't decide on stale state. A
+session starts with a fetch, sees what changed in the logbook at each prompt and after tools, and
+gets the open convoys before it pushes to `main`. Details are in
+[`docs/design.md`](docs/design.md#fresh-reads).
+
 ## Try it
 
-It needs Keelokit 0.12.0 or later in the project (`.keelokit/`), Python 3.11+, git, and a remote `origin`.
-It isn't published yet. To load it from a clone:
+You need Keelokit 0.12.0 or later in the project (`.keelokit/`), Python 3.11+, git, and a remote
+`origin`.
+
+Harbor is version 0.1.0 and isn't released. The whole cycle is written and tested against stand-ins
+for Keelokit's verify: the logbook, accounts and workers, seals, convoys from `new` to `sail`, the
+harbormaster's watch, a one-time import of an existing `BOARD.md`, and the fresh reads. It has
+never run on a real project. What is designed but not written is listed at the top of
+[`docs/design.md`](docs/design.md). To load it from a clone:
 
 ```bash
 claude --plugin-dir /path/to/keelokit-harbor
@@ -74,6 +82,11 @@ Then run `/harbor:adopt` in a Keelokit project. Tests: `python3 -m unittest disc
 - Harbor pushes to `harbor/log` and `convoy/<n>`, and to `main` only in `convoy sail`: a fast-forward
   to a head with a green seal and the harbormaster's ok. Never with `--force`.
 
+## How it's built
+
+[`docs/design.md`](docs/design.md) explains the pieces and the reasons behind them. Harbor tests
+itself with `python3 -m unittest discover -s tests`.
+
 ## License
 
-No license file yet: the choice is the author's.
+MIT — see [LICENSE](LICENSE). Made by [Leopoldo Simini](https://leopoldosimini.com).

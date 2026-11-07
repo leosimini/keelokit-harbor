@@ -13,5 +13,6 @@
     "integration",
     "parallel-sessions",
     "git"
-  ]
+  ],
+  "license": "MIT"
 }
