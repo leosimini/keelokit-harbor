@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — a zip claude.ai accepts
+## 0.2.1 — 2026-11-11 — a zip claude.ai accepts
 
 - **`harbor.py` moved from `bin/` to `lib/`.** claude.ai's upload (Customize → Plugins → Upload) refuses a plugin
   with a top-level `bin/` directory, so the 0.2.0 zip could not be installed there. The hooks, skills and agents call
