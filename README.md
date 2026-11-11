@@ -80,7 +80,8 @@ designed but not written is listed at the top of [`docs/design.md`](docs/design.
 - A convoy with a full-tier story or one that touches a critical area also waits for your yes
   before it sails: you run `convoy approve <n>` in your own terminal. A PreToolUse hook stops an
   agent from running it; like Keelokit's guard, it's a speed bump, not a sandbox
-  (`[harbor] person_ok` = `critical`, `always` or `never`).
+  (`[harbor] person_ok` = `critical`, `areas`, `always` or `never`; `areas` waits only for a critical area,
+  not for the full tier).
 - Harbor pushes to `harbor/log` and `convoy/<n>`, and to `main` only in `convoy sail`: a fast-forward
   to a head with a green seal and the harbormaster's ok. Never with `--force`.
 - If the project's verify is its own command and not Keelokit's `pnpm verify` (Keelokit adopted in

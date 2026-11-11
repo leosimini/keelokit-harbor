@@ -82,7 +82,7 @@ a void delivery.
 `changed` unless the convoy touches what Keelokit's routing can't bound (verify tooling, test config,
 CI, `.keelokit/`, `scripts/`, root manifests, the lockfile): then `all`. Money, permissions and
 migrations don't force `all`. It refuses if main is red, moved, or the convoy isn't `ready`. When the convoy is critical (a
-full-tier vessel or a critical area, per `[harbor] person_ok`), the ok says it also needs the
+full-tier vessel or a critical area, per `[harbor] person_ok`; with `"areas"`, only a critical area), the ok says it also needs the
 person's yes: the verify runs meanwhile, and only the sail waits.
 
 ## verify (integrator)

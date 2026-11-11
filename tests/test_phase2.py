@@ -588,6 +588,28 @@ class TestPersonOk(Phase2):
         self.assertIn("NOT_NEEDED", harbor(self.a, "convoy", "approve", "1").stderr)
         ok(harbor(self.a, "convoy", "sail", "1"))
 
+    def test_areas_waits_for_a_critical_area_and_not_for_the_full_tier(self):
+        state = self.a / ".keelokit/state.toml"
+        state.write_text(state.read_text().replace('ci_check = "true"', 'ci_check = "true"\nperson_ok = "areas"'))
+        (self.a / ".keelokit/critical.toml").write_text(
+            'mutation_break = 70\n\n[[area]]\nname = "payments"\npaths = ["docs/pay.md"]\n')
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "areas policy and a critical area")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        self.full_convoy()
+        ok(self.ok_changed())
+        self.assertNotIn("needs_person", self.convoy()["ok"])
+        ok(harbor(self.a, "convoy", "verify", "1"))
+        ok(harbor(self.a, "convoy", "sail", "1"))
+        ok(harbor(self.a, "convoy", "new"))
+        vessel(self.a, "claude/doc", "docs/pay.md", story="DOC-1")
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", "2", "claude/doc", "--tier", "light"))
+        ok(harbor(self.a, "convoy", "assemble", "2"))
+        ok(self.ok_changed(2))
+        self.assertEqual(self.convoy(2)["ok"]["needs_person"], "critical areas payments")
+
     def test_never_and_always(self):
         state = self.a / ".keelokit/state.toml"
         state.write_text(state.read_text().replace('ci_check = "true"', 'ci_check = "true"\nperson_ok = "never"'))

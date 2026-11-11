@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **`[harbor] person_ok = "areas"`.** A convoy waits for the person's yes only when a vessel touches an area of
+  `.keelokit/critical.toml`. A full-tier story outside those areas sails on the harbormaster's ok and a green verify.
+  `"critical"` (the default), `"always"` and `"never"` are unchanged.
+
 ## 0.2.1 — 2026-11-11 — a zip claude.ai accepts
 
 - **`harbor.py` moved from `bin/` to `lib/`.** claude.ai's upload (Customize → Plugins → Upload) refuses a plugin

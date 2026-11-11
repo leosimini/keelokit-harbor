@@ -933,9 +933,9 @@ def needs_person(c: dict, cfg: dict) -> str | None:
     policy = cfg.get("person_ok", "critical")
     if policy == "always":
         return "[harbor] person_ok = \"always\""
-    if policy != "critical":
+    if policy not in ("critical", "areas"):
         return None
-    full = [v["branch"] for v in c.get("vessels") or [] if v.get("tier") == "full"]
+    full = [v["branch"] for v in c.get("vessels") or [] if v.get("tier") == "full"] if policy == "critical" else []
     crit = sorted({a for v in c.get("vessels") or [] for a in v.get("critical") or []})
     why = ([f"full-tier vessels {', '.join(full)}"] if full else []) + ([f"critical areas {', '.join(crit)}"] if crit else [])
     return "; ".join(why) or None

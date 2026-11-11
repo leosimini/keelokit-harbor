@@ -84,7 +84,7 @@ convoy_verify_all = "pnpm verify --all --keep-going" # (2) level "all": only wha
 convoy_rerun = "pnpm verify --rerun-failed --keep-going"   # (2) after a red; Keelokit seals it when it completes the plan
 own_verify = false                 # true: the verify commands are the project's own, not Keelokit's ("A level without Keelokit's record")
 ci_check = "python3 .keelokit/bin/ci.py health"     # (2) the ok needs it green (exit 1 = red); default when ci.py exists
-person_ok = "critical"             # (2) a person's yes too: "critical" (full tier or a critical area), "always", "never"
+person_ok = "critical"             # (2) a person's yes too: "critical" (full tier or a critical area), "areas" (a critical area only), "always", "never"
 control_every_minutes = 90         # JOUNA's value (§5.3)
 watch_expiry_minutes = 180         # JOUNA's value (§5.3): relief after 3 hours without a control
 
@@ -555,7 +555,8 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   --claude`) blocks the command when an agent runs it; Bash can reach anything, so it is a speed
   bump, as Keelokit's `allowTamper` is, not a sandbox.
 - **When it's needed:** `[harbor] person_ok`. `"critical"` (default): a vessel of the full tier or one
-  whose diff touches an area of `.keelokit/critical.toml`; `"always"`; `"never"`. The ok records why
+  whose diff touches an area of `.keelokit/critical.toml`; `"areas"`: only that second case, so a full-tier
+  story outside the critical areas sails on the harbormaster's ok; `"always"`; `"never"`. The ok records why
   (`needs_person`).
 - **Before:** state verifying; the ok says a person is needed; `convoy/<n>` is at the head the
   logbook has. The yes is bound to that head: a later commit needs another.
