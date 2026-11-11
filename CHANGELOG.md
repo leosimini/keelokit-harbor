@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — a trunk other than `main`
+## Unreleased — a trunk other than `main`, and a project's own verify
 
 ### The trunk
 - **Convoys can land on a branch that isn't `main`.** `[harbor] trunk` in `.keelokit/state.toml` names the branch
@@ -8,6 +8,14 @@
   `main` is production, Harbor never pushes `main`, and its messages, its pages and the note before a push name
   `develop`. The logbook's schema doesn't change: `harbor/main.toml` and its keys keep their names and hold the trunk.
   `harbor/log` and `convoy/<n>` are refused as a trunk (`BAD_CONFIG`).
+
+### The project's own verify
+- **A convoy can sail on a verify that isn't Keelokit's.** A project with Keelokit in harness mode has no
+  `pnpm verify`, so no run ever got a level and no convoy could sail. With `[harbor] own_verify = true`, a green
+  convoy run of the project's own command gets its level from Harbor: `changed` for `convoy_verify`, `all` for
+  `convoy_verify_all`. After a red, the same command runs again; `convoy_rerun` is not used.
+- **Never a shared seal for it.** Such a run is recorded in `harbor/runs/` with `level_source = "harbor"` and never in
+  `harbor/seals/`, so Keelokit's pre-push doesn't skip its own verify because of it. Off by default.
 
 ## 0.1.0 — 2026-11-07 — convoys for many sessions at once
 

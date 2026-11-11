@@ -82,6 +82,7 @@ convoy_preflight = "pnpm verify --preflight"        # (2) before every convoy ve
 convoy_verify = "pnpm verify --keep-going"          # (2) level "changed": scoped by the convoy's diff against main
 convoy_verify_all = "pnpm verify --all --keep-going" # (2) level "all": only what the routing can't bound
 convoy_rerun = "pnpm verify --rerun-failed --keep-going"   # (2) after a red; Keelokit seals it when it completes the plan
+own_verify = false                 # true: the verify commands are the project's own, not Keelokit's ("A level without Keelokit's record")
 ci_check = "python3 .keelokit/bin/ci.py health"     # (2) the ok needs it green (exit 1 = red); default when ci.py exists
 person_ok = "critical"             # (2) a person's yes too: "critical" (full tier or a critical area), "always", "never"
 control_every_minutes = 90         # JOUNA's value (§5.3)
@@ -135,7 +136,8 @@ the PreToolUse note goes to a push that moves it. With another trunk Harbor neve
   `level` only when that base is the trunk's tip, so with another trunk Keelokit's verify has to
   measure against that branch too, or its runs get no `level` here (safe: the pre-push runs its
   verify, and a convoy doesn't sail on a run measured against something else). **Assumption:** not
-  checked against a Keelokit configured for another branch; the tests use a stand-in.
+  checked against a Keelokit configured for another branch; the tests use a stand-in. A project
+  with its own verify and no Keelokit `verify.sh` uses `own_verify`, which needs no history line.
 
 Per clone, git-ignored, in `.keelokit/local.toml`:
 
@@ -162,7 +164,7 @@ harbor/accounts/<account>.toml  cap and pause of one account
 harbor/workers/<account>/<host>/<session>.toml
 harbor/convoys/<n>.toml
 harbor/runs/<sha>.toml          Harbor's record of one verify of one exact commit: green, red or partial
-harbor/seals/<sha>.toml         the shared seal Keelokit's pre-push reads: only for a whole green run
+harbor/seals/<sha>.toml         the shared seal Keelokit's pre-push reads: only for a whole green run Keelokit recorded
 harbor/main.toml                (phase 2) the last main (the trunk) Harbor saw, and every move of it
 harbor/imported/BOARD.md        (once) the hand-kept board, verbatim
 harbor/imported/board.toml      (once) what the import took and left
@@ -351,6 +353,7 @@ finished = "2026-11-01T11:06:00Z"
 duration_seconds = 840
 by = "leo/mbp/session_01Abc"
 level = "changed"                # only for a whole green verify (below): what Keelokit's pre-push reads
+level_source = "harbor"          # only when Harbor gave the level itself (own_verify): such a run has no seals/ file
 reused = true                    # recorded from Keelokit's own run of this commit instead of running again
 composite_of = "9f3c…"           # a composite run: the head of the first red run it builds on (and rerun_of, inherited)
 keelokit_level = "changed"       # the rest is copied from keelokit-verify.history when it has a line for this run
@@ -374,6 +377,38 @@ commit, this base, `result = "pass"`, `rc = 0`, `partial = false`, `clean = true
 `--rerun-failed` that narrowed), a dirty start or another base: the seal still lets the vessel into
 a convoy (it is green on that hash), but it carries no `level`, and the pre-push runs its verify.
 Checked against Keelokit's `verify_tools.py shared-seal` from `landing-policy`.
+
+**A level without Keelokit's record (`own_verify`).** A project adopted in Keelokit's harness mode
+has `.keelokit/` and no `scripts/verify.sh`: its verify is its own command, which writes no history
+line, so by the rule above no run of it gets a `level` and no convoy sails. `[harbor] own_verify =
+true` declares that the verify commands are the project's own. Then a convoy verify that exits 0 on
+a clean tree with `HEAD` unchanged (`SEAL_INVALID` otherwise, as always), and that left no Keelokit
+history line, gets its level from Harbor: `changed` when it ran `convoy_verify`, `all` when it ran
+`convoy_verify_all`, which is the level the ok asked for. The run record says where it came from
+(`level_source = "harbor"`), and the convoy's events and view show it (`changed (own verify)`).
+- **Never a shared seal.** `harbor/seals/<sha>.toml` is written only for a level Keelokit's own
+  record gave. A project's command proves nothing about Keelokit's verify, so a Keelokit pre-push,
+  where there is one, runs its verify. `convoy verify` and `sail` read `harbor/runs/`, so the convoy
+  sails without the seal.
+- **No rerun.** `convoy_rerun` stands for a whole verify only because Keelokit records when it
+  completed the plan. A project's own rerun leaves no such record, so with `own_verify` the key is
+  not used: after a red, the next `convoy verify` runs the level's command again. **Needs your
+  ok:** running `convoy_rerun` and never sealing it would have left a red convoy with no way to a
+  seal short of another commit and another ok.
+- **No level for a vessel.** `convoy add` asks a vessel's seal for `exit = 0` only; its `level`
+  matters to the shared seal and to a one-vessel convoy skipping its verify. So `harbor.py seal` is
+  unchanged, and with `own_verify` a one-vessel convoy runs its convoy verify.
+- **Keelokit's record decides when there is one.** If the command did run Keelokit's verify (a
+  history line for this commit, written during the run), that line gives the level or withholds
+  it, as without the key.
+- **Assumption:** Harbor trusts the declaration. `changed` and `all` here name the command that
+  ran, not a scope anyone measured: that `convoy_verify` is the project's whole verify of what the
+  convoy changed, and `convoy_verify_all` of everything, is the project's word, like
+  `vessel_verify`. With `own_verify` the project also sets `vessel_verify` and `convoy_preflight`
+  (`""` turns it off): their defaults are Keelokit's `pnpm verify`.
+
+With `own_verify = false`, the default, nothing changes: a green run without Keelokit's record is
+`verify-unsealed`, and sail refuses it (`NOT_SEALED`).
 
 **No second run.** With the convoy policy, `build-story` pushes the vessel's branch, and its
 pre-push runs Keelokit's whole verify on that exact commit. `harbor.py seal` finds that run in the
@@ -535,7 +570,7 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   `MAIN_MOVED`: back to assemble); `convoy/<n>` still contains the head the ok covered (fixes are
   commits on top, never a rewrite). After a red, the next run is `pnpm verify --rerun-failed`: it
   runs the fix's own routed steps plus the failed ones, which is what R7 asked of a separate fix
-  seal (§6.3), so there is no fix seal.
+  seal (§6.3), so there is no fix seal. With `own_verify`, the next run is the level's command again.
 - **Does:** nothing, when the convoy is one vessel sealed against today's `main` and its head is
   that vessel's head: the seal already is the convoy verify. Otherwise `pnpm verify --preflight`,
   then the level's command on the convoy head, in the background with a log (Keelokit's agent
@@ -545,7 +580,8 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
 - **Logbook:** a `kind = "convoy"` seal; `verify-pass` or `verify-fail` with the failed steps.
 - **Errors:** `NOT_INTEGRATOR`, `MAIN_MOVED`, `CONVOY_REWRITTEN`, `DIRTY_TREE`, `SEAL_INVALID`
   (HEAD or the tree changed during the run). A red preflight is a red run (`verify-fail`). A green
-  run Keelokit didn't record as whole at the ok's level is `verify-unsealed`, and sail refuses it.
+  run Keelokit didn't record as whole at the ok's level is `verify-unsealed`, and sail refuses it;
+  with `own_verify`, a green run Keelokit didn't record at all gets its level from Harbor.
 
 ### `/harbor:convoy sail N` *(phase 2)*
 

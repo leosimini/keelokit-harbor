@@ -100,6 +100,9 @@ DEFAULTS = {
     # touches an area of .keelokit/critical.toml), "always" or "never". The playbook's rule: humans for
     # critical code, layered agent review for the rest.
     "person_ok": "critical",
+    # true: the verify commands above are the project's own, not Keelokit's. No history line says what a
+    # run covered, so Harbor gives a green convoy run its level itself; it never becomes a shared seal.
+    "own_verify": False,
 }
 # Harbor's own roles. The story roles (verifier, builder, reviewer, breaker) follow Keelokit's model table
 # in .keelokit/harness/agent-brief.md, by role and tier; Harbor doesn't keep a second one.
@@ -282,7 +285,11 @@ def keelokit() -> dict:
     if policy != "convoy":
         raise HarborError("POLICY_NOT_CONVOY", f"[landing] policy is {json.dumps(policy) if policy else 'not set'} in "
                           ".keelokit/state.toml; Harbor runs only with policy = \"convoy\" (/harbor:adopt)")
-    TRUNK = trunk_of(state.get("harbor") if isinstance(state.get("harbor"), dict) else {})
+    harbor = state.get("harbor") if isinstance(state.get("harbor"), dict) else {}
+    TRUNK = trunk_of(harbor)
+    if not isinstance(harbor.get("own_verify", False), bool):
+        raise HarborError("BAD_CONFIG", f"[harbor] own_verify = {harbor['own_verify']!r} in .keelokit/state.toml: "
+                          "it is true or false")
     return state
 
 
@@ -407,7 +414,8 @@ def snapshot() -> tuple[str | None, dict]:
 # harbor/seals/<sha>.toml is what Keelokit's pre-push reads ([verify] shared_seals): head, base, exit and
 # level, written only for a whole green run against the main of that moment. Keelokit 0.12 lets a push of
 # this branch through unverified only when every seal in it is backed by such a run on that machine and
-# every file is under harbor/.
+# every file is under harbor/. A level Harbor gave itself ([harbor] own_verify, level_source = "harbor")
+# lives in runs/ only: the project's own command proves nothing about Keelokit's verify.
 
 def run_of(files: dict, sha: str | None) -> dict | None:
     if not sha:
@@ -418,7 +426,8 @@ def run_of(files: dict, sha: str | None) -> dict | None:
 def save_run(files: dict, record: dict, main_now: str | None) -> bool:
     """Record a run; also the shared seal when Keelokit can take it. True when the seal was written."""
     save(files, f"harbor/runs/{record['head']}.toml", record)
-    if record.get("exit") == 0 and record.get("level") in ("changed", "all") and record.get("base") == main_now:
+    if record.get("exit") == 0 and record.get("level") in ("changed", "all") and record.get("base") == main_now \
+            and record.get("level_source") != "harbor":
         save(files, f"harbor/seals/{record['head']}.toml",
              {"head": record["head"], "base": record["base"], "exit": 0, "level": record["level"]})
         return True
@@ -1177,6 +1186,11 @@ def covers(have: str | None, want: str) -> bool:
     return have == "all" or (have == "changed" and want == "changed")
 
 
+def level_text(record: dict) -> str:
+    """A run's level as events and views show it, marked when Harbor gave it ([harbor] own_verify)."""
+    return f"{record['level']} (own verify)" if record.get("level_source") == "harbor" else record["level"]
+
+
 def ci_health(cfg: dict) -> tuple[str, str]:
     """('green' | 'red' | 'unknown', its line). Keelokit's ci.py health: exit 1 is an alarm."""
     cmd = cfg.get("ci_check")
@@ -1439,7 +1453,7 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
         def reuse(files, h):
             c2 = convoy_of(files, args.number)
             c2["head"] = tip
-            c2.setdefault("events", []).append(event(me["id"], "verify-pass", f"{short(tip)}: its seal ({seal['level']}) "
+            c2.setdefault("events", []).append(event(me["id"], "verify-pass", f"{short(tip)}: its seal ({level_text(seal)}) "
                                                      "already covers it, nothing ran"))
             save_convoy(files, c2)
         transact(f"convoy {args.number} verify reused for {short(tip)}", me["id"], reuse)
@@ -1448,7 +1462,10 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
     evs = c.get("events") or []
     since_ok = evs[max((i for i, e in enumerate(evs) if e.get("what") == "ok"), default=0):]
     red_before = any(e.get("what") == "verify-fail" for e in since_ok)
-    template = cfg["convoy_rerun"] if red_before else cfg["convoy_verify_all" if level == "all" else "convoy_verify"]
+    # A rerun counts as a whole verify only through Keelokit's record of what it completed. The project's
+    # own commands leave none, so with own_verify a red is followed by the level's command again.
+    own = cfg.get("own_verify") is True
+    template = cfg["convoy_rerun"] if red_before and not own else cfg["convoy_verify_all" if level == "all" else "convoy_verify"]
 
     def start(files, h):
         c2 = convoy_of(files, args.number)
@@ -1473,6 +1490,12 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
         new.update(steps_from(entry))
         if rc == 0 and full_run(entry, tip, main_tip):
             new["level"] = entry["level"]
+    elif own and rc == 0:
+        # Nothing of Keelokit's ran, so no record says what this run covered. It was the level's own
+        # command (never the rerun), green, on this exact clean head: Harbor names the level, and marks
+        # it so that it never becomes a shared seal (save_run). A run Keelokit did record is Keelokit's
+        # to judge, above.
+        new.update(level=level, level_source="harbor")
     sealed = rc == 0 and covers(new.get("level"), level)
 
     main_now = fetch(TRUNK)
@@ -1481,7 +1504,7 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
         save_run(files, new, main_now)
         c2 = convoy_of(files, args.number)
         if sealed:
-            what, detail = "verify-pass", f"{short(tip)}: {new['level']}, {new['duration_seconds']} s"
+            what, detail = "verify-pass", f"{short(tip)}: {level_text(new)}, {new['duration_seconds']} s"
         elif rc == 0:
             what, detail = "verify-unsealed", (f"{short(tip)} green, but Keelokit's record doesn't make it a whole {level} "
                                                "verify: sail will refuse")

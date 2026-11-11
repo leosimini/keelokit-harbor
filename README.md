@@ -83,6 +83,11 @@ designed but not written is listed at the top of [`docs/design.md`](docs/design.
   (`[harbor] person_ok` = `critical`, `always` or `never`).
 - Harbor pushes to `harbor/log` and `convoy/<n>`, and to `main` only in `convoy sail`: a fast-forward
   to a head with a green seal and the harbormaster's ok. Never with `--force`.
+- If the project's verify is its own command and not Keelokit's `pnpm verify` (Keelokit adopted in
+  harness mode), set `[harbor] own_verify = true` and put your commands in `vessel_verify`,
+  `convoy_verify` and `convoy_verify_all`. Harbor then gives a green convoy run its level itself, so
+  the convoy can sail, and never writes a shared seal for it: Keelokit's pre-push, where there is
+  one, still runs its own verify.
 - Where this page says `main`, it means the trunk: `[harbor] trunk` in `.keelokit/state.toml`, `main`
   by default. If your `main` is production and you integrate on `develop`, set `trunk = "develop"`:
   convoys are measured against it, merge it and sail to it, and Harbor never pushes `main`.

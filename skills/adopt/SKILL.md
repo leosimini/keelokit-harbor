@@ -24,6 +24,7 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    [harbor]
    integrator = "any"     # or a pilot account that integrates every convoy
    # trunk = "develop"    # optional: the branch convoys land on, when it isn't main
+   # own_verify = true    # optional: the verify commands are the project's own, not Keelokit's
 
    [harbor.models]
    skipper = "sonnet"
@@ -38,6 +39,10 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    is production, work lands on `develop`): then write `trunk` with that branch, in this same
    change (a checkout with the policy and without the trunk would land on `main`), and Harbor never
    pushes `main`.
+   If the project has no Keelokit verify (harness mode: no `scripts/verify.sh`, no `pnpm verify`),
+   ask for its own commands and write `own_verify = true` with `vessel_verify`, `convoy_verify`,
+   `convoy_verify_all` and `convoy_preflight = ""`. Say what it means: Harbor takes a green run of
+   those commands as the convoy's verify, and writes no shared seal for it.
    Land this change on the trunk the way the project lands today; it is the last direct landing.
 3. **This clone.** Ask the account name (the Claude account these sessions run on) and a short
    host name. Write `.keelokit/local.toml` (`[harbor] account = …, host = …`) and add

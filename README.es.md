@@ -86,6 +86,11 @@ diseñado y no escrito está al principio de [`docs/design.md`](docs/design.md).
   (`[harbor] person_ok` = `critical`, `always` o `never`).
 - Harbor empuja a `harbor/log` y a `convoy/<n>`, y a `main` solo en `convoy sail`: un fast-forward a
   una cabeza con sello verde y el ok del harbormaster. Nunca con `--force`.
+- Si el verify del proyecto es un comando propio y no el `pnpm verify` de Keelokit (Keelokit adoptado
+  en modo harness), poné `[harbor] own_verify = true` y tus comandos en `vessel_verify`,
+  `convoy_verify` y `convoy_verify_all`. Harbor le da entonces su nivel a una corrida verde del
+  convoy, así el convoy puede zarpar, y nunca escribe un sello compartido por ella: el pre-push de
+  Keelokit, donde lo haya, sigue corriendo su propio verify.
 - Donde esta página dice `main`, es el trunk: `[harbor] trunk` en `.keelokit/state.toml`, `main` por
   defecto. Si tu `main` es producción e integrás en `develop`, poné `trunk = "develop"`: los convoys
   se miden contra esa rama, la mergean y zarpan hacia ella, y Harbor nunca empuja a `main`.
