@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — a trunk other than `main`, and a project's own verify
+## 0.2.0 — 2026-11-11 — a trunk other than `main`, and a project's own verify
 
 ### The trunk
 - **Convoys can land on a branch that isn't `main`.** `[harbor] trunk` in `.keelokit/state.toml` names the branch
