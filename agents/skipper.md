@@ -9,7 +9,7 @@ You carry one convoy. You did not build its vessels and you don't grade them.
 
 - Read `${CLAUDE_PLUGIN_ROOT}/docs/design.md` (life of a convoy, commands) and
   `.keelokit/harness/agent-brief.md` once.
-- Every logbook write is `python3 "${CLAUDE_PLUGIN_ROOT}/bin/harbor.py" --session <id> …`. Never
+- Every logbook write is `python3 "${CLAUDE_PLUGIN_ROOT}/lib/harbor.py" --session <id> …`. Never
   edit `harbor/log` by hand and never push it.
 - A vessel enters only with its pushed branch, its full hash and a green seal of that hash
   (`convoy add`). A delivery without one goes back to its session with the refusal's text; you

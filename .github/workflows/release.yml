@@ -115,7 +115,7 @@ jobs:
 
           **[harbor-plugin.zip](https://github.com/$REPO/releases/download/$TAG/harbor-plugin.zip)** is this version of the plugin, ready to install: on claude.ai or in the Claude desktop app, *Customize → Plugins → Upload* and pick the file.
 
-          What it contains, at the zip's root: \`.claude-plugin/\` (the manifest), \`skills/\` (the \`/harbor\` commands), \`agents/\` (skipper and harbormaster), \`hooks/\` (the fresh reads), \`bin/\` (\`harbor.py\`) and \`docs/design.md\`, plus the README, CHANGELOG and LICENSE. It leaves out what only the repository needs: its CI, tests and scripts. Harbor needs Keelokit 0.12.0 or later in the project, Python 3.11+, git and a remote \`origin\`.
+          What it contains, at the zip's root: \`.claude-plugin/\` (the manifest), \`skills/\` (the \`/harbor\` commands), \`agents/\` (skipper and harbormaster), \`hooks/\` (the fresh reads), \`lib/\` (\`harbor.py\`) and \`docs/design.md\`, plus the README, CHANGELOG and LICENSE. It leaves out what only the repository needs: its CI, tests and scripts. Harbor needs Keelokit 0.12.0 or later in the project, Python 3.11+, git and a remote \`origin\`.
 
           *Source code (zip)* is the whole repository, to read or contribute to; it isn't the file to upload.
           EOF

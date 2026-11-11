@@ -4,7 +4,7 @@
 #
 #   scripts/package.sh [ref] [out.zip]      # defaults: HEAD, dist/harbor-plugin.zip
 #
-# The zip holds the plugin at its root — .claude-plugin/, skills/, agents/, hooks/, bin/ and docs/design.md (the
+# The zip holds the plugin at its root — .claude-plugin/, skills/, agents/, hooks/, lib/ and docs/design.md (the
 # skills and agents read it) — plus README, README.es, CHANGELOG and LICENSE. It leaves out what only this repository
 # needs: its CI (.github/), its tests and scripts, and docs/releasing.md. The Release workflow attaches it to every
 # GitHub Release as harbor-plugin.zip.
@@ -33,6 +33,9 @@ def fail(msg):
 if ".claude-plugin/plugin.json" not in names:
     fail("no .claude-plugin/plugin.json at the zip's root")
 version = json.loads(z.read(".claude-plugin/plugin.json"))["version"]
+# claude.ai refuses a plugin with a top-level bin/: the CLI adds it to PATH, and the approval page doesn't show it.
+if any(n == "bin" or n.startswith("bin/") for n in names):
+    fail("a top-level bin/ directory, which claude.ai's upload rejects; harbor.py lives in lib/")
 unsafe = [n for n in names if not re.fullmatch(r"[A-Za-z0-9._/@+-]+", n)]
 if unsafe:
     fail(f"paths claude.ai rejects: {unsafe[:5]}")
@@ -41,7 +44,7 @@ for n in names:
         m = re.search(r"(?m)^description:(.*)$", z.read(n).decode())
         if m and re.search(r"<[^>]+>", m.group(1)):
             fail(f"{n}: a description with tag-like text")
-for need in ("skills/adopt/SKILL.md", "skills/convoy/SKILL.md", "hooks/hooks.json", "bin/harbor.py", "docs/design.md"):
+for need in ("skills/adopt/SKILL.md", "skills/convoy/SKILL.md", "hooks/hooks.json", "lib/harbor.py", "docs/design.md"):
     if need not in names:
         fail(f"missing {need}")
 skills = sorted({n.split("/")[1] for n in names if n.startswith("skills/") and n.count("/") >= 2})

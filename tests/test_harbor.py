@@ -14,7 +14,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-HARBOR = Path(__file__).resolve().parents[1] / "bin/harbor.py"
+HARBOR = Path(__file__).resolve().parents[1] / "lib/harbor.py"
 NOW = "2026-11-01T16:00:00Z"
 GIT_ENV = {"GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.com",
            "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.com"}

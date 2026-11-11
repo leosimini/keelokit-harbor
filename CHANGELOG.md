@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — a zip claude.ai accepts
+
+- **`harbor.py` moved from `bin/` to `lib/`.** claude.ai's upload (Customize → Plugins → Upload) refuses a plugin
+  with a top-level `bin/` directory, so the 0.2.0 zip could not be installed there. The hooks, skills and agents call
+  `lib/harbor.py`; nothing else changes. `scripts/package.sh` now fails on a top-level `bin/`.
+
 ## 0.2.0 — 2026-11-11 — a trunk other than `main`, and a project's own verify
 
 ### The trunk

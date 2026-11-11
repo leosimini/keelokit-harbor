@@ -5,7 +5,7 @@ description: Set Harbor up on a Keelokit project — the convoy landing policy, 
 
 # Adopt — Harbor on top of Keelokit
 
-`H="${CLAUDE_PLUGIN_ROOT}/bin/harbor.py"`. Every write to the logbook goes through `python3 "$H"`;
+`H="${CLAUDE_PLUGIN_ROOT}/lib/harbor.py"`. Every write to the logbook goes through `python3 "$H"`;
 never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
 
 1. **Keelokit first, 0.12.0 or later** (`version` in its `plugin.json`; `.keelokit/bin/status.py title`

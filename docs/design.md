@@ -1,6 +1,6 @@
 # How Harbor is built
 
-This is the design. **Phases 1 and 2 are implemented** in `bin/harbor.py`.
+This is the design. **Phases 1 and 2 are implemented** in `lib/harbor.py`.
 - *Phase 1* (`tests/test_harbor.py`): logbook init, accounts, workers, seals, `convoy new|add|status`,
   the generated views, the one-time `BOARD.md` import.
 - *Phase 2* (`tests/test_phase2.py`): `convoy assemble|verify|sail|abort|defer`, the ok,

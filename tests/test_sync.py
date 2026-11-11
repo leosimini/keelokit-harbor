@@ -273,7 +273,7 @@ class TestPreToolUse(SyncBase):
     def test_convoy_sail_does_not_get_the_verifying_warning(self):
         self.new_convoy()
         self.set_state(1, "verifying")
-        res = self.bash("python3 bin/harbor.py convoy sail 1")
+        res = self.bash("python3 lib/harbor.py convoy sail 1")
         ctx = json.loads(res.stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertIn("verifying", ctx)
         self.assertNotIn("Convoy 1 is verifying", ctx)
@@ -300,7 +300,7 @@ class TestPreToolUse(SyncBase):
         self.assertEqual(self.git_calls(), [])
 
     def test_approve_is_still_denied(self):
-        res = self.bash("python3 bin/harbor.py convoy approve 3")
+        res = self.bash("python3 lib/harbor.py convoy approve 3")
         self.assertEqual(res.returncode, 2)
         self.assertIn("only the person approves", res.stderr)
 
@@ -364,7 +364,7 @@ class TestPreToolUse(SyncBase):
         import time
         opts = " ".join(f"--o{i} v{i}" for i in range(60))
         t0 = time.time()
-        res = self.bash(f"python3 bin/harbor.py {opts} convoy sail 1", secs=1)
+        res = self.bash(f"python3 lib/harbor.py {opts} convoy sail 1", secs=1)
         self.assertLess(time.time() - t0, 5)
         self.assertIn("open convoys", res.stdout)
         self.assertIn("open convoys", self.bash("harbor.py --session=s1 convoy verify 1", secs=2).stdout)

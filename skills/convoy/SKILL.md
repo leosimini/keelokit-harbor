@@ -5,7 +5,7 @@ description: Run a convoy — a batch of vessel branches from several sessions, 
 
 # Convoy — a branch enters with its hash and its seal, or not at all
 
-`H="${CLAUDE_PLUGIN_ROOT}/bin/harbor.py"`; pass `--session <id>` (the SessionStart line gives it).
+`H="${CLAUDE_PLUGIN_ROOT}/lib/harbor.py"`; pass `--session <id>` (the SessionStart line gives it).
 Design and the state table: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`. Keelokit's
 `.keelokit/harness/agent-brief.md` still applies to every session. Where this says `main`, it is the
 trunk: `[harbor] trunk` in `.keelokit/state.toml` when the project sets it (`harbor.py` names it in

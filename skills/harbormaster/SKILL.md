@@ -5,7 +5,7 @@ description: Keep Harbor's watch — take it when nobody holds it or it expired 
 
 # Harbormaster — one watch, an expiry, the first commit wins
 
-`H="${CLAUDE_PLUGIN_ROOT}/bin/harbor.py"`. The role, its expiry and its relief are in
+`H="${CLAUDE_PLUGIN_ROOT}/lib/harbor.py"`. The role, its expiry and its relief are in
 `${CLAUDE_PLUGIN_ROOT}/docs/design.md` ("The watch and its relief"). Run on the model in
 `[harbor.models] harbormaster`. The harbormaster reads code and git, and writes only through
 `harbor.py`. Where this says `main`, it is the trunk (`[harbor] trunk` in `.keelokit/state.toml`

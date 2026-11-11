@@ -73,7 +73,7 @@ diseñado y no escrito está al principio de [`docs/design.md`](docs/design.md).
 - Harbor depende de Keelokit y no copia nada de su código. Corre el `pnpm verify` de Keelokit, lee
   su `state.toml` y usa sus niveles y su trailer `Story:`. Sin `.keelokit/`, Harbor imprime una
   línea y no hace nada.
-- Los hooks corren `bin/harbor.py sync --hook` desde el plugin y leen `.keelokit/state.toml` y
+- Los hooks corren `lib/harbor.py sync --hook` desde el plugin y leen `.keelokit/state.toml` y
   `.keelokit/local.toml` del proyecto. Una sesión arranca con un fetch nuevo (tope de 5 s), ve qué
   cambió en el logbook en cada prompt (como máximo cada 60 s) y después de las herramientas (cada
   2 min), y recibe los convoys abiertos antes de un push a `main`. Funcionan sin red y nunca

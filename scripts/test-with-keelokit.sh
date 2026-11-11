@@ -20,7 +20,7 @@ set -euo pipefail
 
 tag=${1:-v0.12.0}
 src=${KEELOKIT_SRC:-gh:leosimini/keelokit}
-harbor=$(cd "$(dirname "$0")/.." && pwd)/bin/harbor.py
+harbor=$(cd "$(dirname "$0")/.." && pwd)/lib/harbor.py
 work=$(mktemp -d)
 [ "${KEEP:-}" = 1 ] && echo "work folder: $work" || trap 'rm -rf "$work"' EXIT
 export GIT_AUTHOR_NAME=harbor-test GIT_AUTHOR_EMAIL=harbor-test@example.com
