@@ -55,7 +55,7 @@ Harbor depends on Keelokit and copies none of its code. It uses these as interfa
 | `--steps`, `--rerun-failed`, `--packages`, `--filter` | narrower runs. All of them are *partial*: Keelokit never seals them, and Harbor never gives them a `level` |
 | the local seal (`keelokit-verify.seal`) | per clone, never from `--since` or a partial run; the shared seal is what crosses machines |
 | `doctor.py --scope ID`, `--brief` | the vessel session's own check before it delivers; Harbor does not rerun it *(phase 2: record its exit in the seal)* |
-| `status.py`, `ci.py health` | the harbormaster's round: machine state, CI of `main` |
+| `status.py`, `ci.py health` | the harbormaster's round: machine state, CI of `main` (Keelokit's `main`, whatever `[harbor] trunk` says) |
 | tiers trivial / light / full | the first agent of a vessel and its model |
 | `touches`, `critical.toml` | an early hotspot warning, before any code *(phase 2)* |
 | the `Story:` trailer | which story a vessel carries, read from its commits |
@@ -76,6 +76,7 @@ shared_seals = "origin/harbor/log:harbor/seals/{head}.toml"
 
 [harbor]
 integrator = "any"                 # "any": a convoy's skipper integrates on its own machine; or a pilot account name
+trunk = "main"                     # the branch convoys are measured against, merge and sail to; "develop" where main is production
 vessel_verify = "pnpm verify --since {base} --keep-going"   # {base} = origin/main when the seal runs; also {head}, {branch}
 convoy_preflight = "pnpm verify --preflight"        # (2) before every convoy verify; "" turns it off
 convoy_verify = "pnpm verify --keep-going"          # (2) level "changed": scoped by the convoy's diff against main
@@ -108,6 +109,34 @@ paths = ["apps/*/prisma/migrations", "*/migrations", "db/migrations"]
 The example hotspots are JOUNA's measured bottlenecks (§2.12); a project declares its own.
 Harbor ships no default hotspot list: that §2.12's contention generalises is an **INDICIO** at best.
 
+**The trunk.** This document says `main` for the branch convoys land on. It is `[harbor] trunk`:
+`main` unless the project names another, as one does whose `main` is production and deploys on every
+push, and which integrates on `develop`. Harbor fetches the trunk, takes a convoy's base from it,
+measures hotspots and migrations against it, merges it into `convoy/<n>`, and `sail` pushes to it;
+the PreToolUse note goes to a push that moves it. With another trunk Harbor never pushes `main`.
+- The name is read from the session's working tree, like the rest of the block, once per command
+  (`keelokit()`), and every hook that acts on the trunk reads it the same way. Without a state file
+  or without the convoy policy it is `main`.
+- It must be a branch name (letters, digits, `. _ -` and `/`) and can't be `harbor/log`, `convoy/<n>`
+  or a name git can't keep beside them (`convoy`, `harbor`): `BAD_CONFIG`, exit 2. In a hook that is
+  one line at SessionStart and silence elsewhere, exit 0.
+- The logbook's schema keeps its names: `harbor/main.toml`, `main_before`, `main_after`, the event
+  `main-moved`, the codes `NO_MAIN`, `MAIN_MOVED`, `MAIN_RED`. They hold the trunk, and `schema`
+  stays 1. Messages and the generated views name the real branch (the logbook's `Main` heading
+  becomes `Trunk`, with the branch).
+- **Assumption:** every checkout reads the same `trunk`. The logbook doesn't record it, so a session
+  whose checkout has another value measures against, and would sail to, another branch. So it is
+  written in the commit that sets the policy: a checkout from before has no convoy policy and
+  Harbor does nothing there, and none has the policy without the trunk.
+- **Out of scope, Keelokit's side:** Keelokit's own tools still speak of `main`. `status.py`,
+  `ci.py health` and the agent brief say `main`, so with another trunk `ci_check` names a command
+  that looks at the trunk's CI. Its `--use-seal` compares a shared seal's base with `origin/main`,
+  and its `verify.sh` writes the base it measured against in the history line: Harbor gives a run a
+  `level` only when that base is the trunk's tip, so with another trunk Keelokit's verify has to
+  measure against that branch too, or its runs get no `level` here (safe: the pre-push runs its
+  verify, and a convoy doesn't sail on a run measured against something else). **Assumption:** not
+  checked against a Keelokit configured for another branch; the tests use a stand-in.
+
 Per clone, git-ignored, in `.keelokit/local.toml`:
 
 ```toml
@@ -134,7 +163,7 @@ harbor/workers/<account>/<host>/<session>.toml
 harbor/convoys/<n>.toml
 harbor/runs/<sha>.toml          Harbor's record of one verify of one exact commit: green, red or partial
 harbor/seals/<sha>.toml         the shared seal Keelokit's pre-push reads: only for a whole green run
-harbor/main.toml                (phase 2) the last main Harbor saw, and every move of it
+harbor/main.toml                (phase 2) the last main (the trunk) Harbor saw, and every move of it
 harbor/imported/BOARD.md        (once) the hand-kept board, verbatim
 harbor/imported/board.toml      (once) what the import took and left
 ```
@@ -358,9 +387,11 @@ the delivery is void by construction (R3).
 
 ### `harbor/main.toml` *(phase 2)*
 
+The file and its keys are named `main` whatever `[harbor] trunk` is: they record the trunk.
+
 ```toml
 schema = 1
-head = "60099ef60…"              # the last origin/main Harbor saw
+head = "60099ef60…"              # the last origin/main (origin/<trunk>) Harbor saw
 
 [[moves]]
 from = "a2becf56d…"
@@ -417,7 +448,7 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
 
 - **Before:** `.keelokit/` exists (else: `/keelokit:project-adopt` first, and stop); a remote `origin`.
 - **Does:** shows and, with the person's yes, writes `[landing] policy = "convoy"` and a `[harbor]`
-  block in `state.toml`, landed on `main` the current way (it is the last direct landing); writes
+  block in `state.toml`, landed on the trunk the current way (it is the last direct landing); writes
   `.keelokit/local.toml` (asks account and host) and adds it to `.gitignore`; `harbor.py init`;
   `harbor.py account set <account> --max-sessions N` with the number the person gives; proposes
   hotspots (critical areas, migration folders, shared packages, locales, generated files, and the
@@ -520,9 +551,9 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
 
 - **Before:** the integrator; `[ok]` present; a green convoy seal for the exact head at the ok's
   level or above; `origin/main` is the ok's base, so the push is a fast-forward.
-- **Does:** `git push origin <head>:main` from the machine that ran the verify, so Keelokit's
-  pre-push seal recognises the commit and doesn't repeat the run. Rejected: `MAIN_MOVED`, back to
-  assemble.
+- **Does:** `git push origin <head>:main` (`<head>:<trunk>`; no other branch is pushed) from the
+  machine that ran the verify, so Keelokit's pre-push seal recognises the commit and doesn't repeat
+  the run. Rejected: `MAIN_MOVED`, back to assemble.
 - **Logbook:** `[sail]`, state sailed, `main.toml`, event `sailed`; the next control records the CI.
 - **Errors:** `NO_OK`, `NEEDS_PERSON`, `NOT_SEALED`, `MAIN_MOVED`, `CONVOY_MOVED`, `NOT_INTEGRATOR`, `PUSH_FAILED`
   (the pre-push hook's own refusal included). If the push lands and the logbook write fails, the
@@ -602,7 +633,7 @@ session id). Every fetch has a 5 s cap and `GIT_TERMINAL_PROMPT=0`.
 | SessionStart | fetches, prints the `check` lines ("fetched now", or "offline: as of the last fetch, N min old") | 0 |
 | UserPromptSubmit | fetches when the last fetch is 60 s old or more; prints, to stdout, only what changed since the seen tip (at most 1000 characters); nothing if the tip is the same | up to 60 s |
 | PostToolUse | the same at 120 s, as `additionalContext` JSON; inside the window it reads only the seen file and starts no git process | up to 2 min in a long turn |
-| PreToolUse, Bash | `convoy approve` is denied as before. Before a `git push` to `main` or `convoy/*`, or `harbor.py convoy add\|sail\|verify`, it fetches without waiting and adds the open convoys' states; if one is `verifying` and the push goes to `main` not through `convoy sail`, it says so. It never denies for this | 0 |
+| PreToolUse, Bash | `convoy approve` is denied as before. Before a `git push` to `main` (the trunk) or `convoy/*`, or `harbor.py convoy add\|sail\|verify`, it fetches without waiting and adds the open convoys' states; if one is `verifying` and the push goes to `main` not through `convoy sail`, it says so. It never denies for this | 0 |
 
 The change is the TOML at the seen tip against the new tip: new convoy, state change, vessels added,
 the last 5 new events, a new watch holder or `last_control`, workers registered or ended. If the seen

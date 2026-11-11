@@ -7,7 +7,9 @@ description: Run a convoy — a batch of vessel branches from several sessions, 
 
 `H="${CLAUDE_PLUGIN_ROOT}/bin/harbor.py"`; pass `--session <id>` (the SessionStart line gives it).
 Design and the state table: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`. Keelokit's
-`.keelokit/harness/agent-brief.md` still applies to every session.
+`.keelokit/harness/agent-brief.md` still applies to every session. Where this says `main`, it is the
+trunk: `[harbor] trunk` in `.keelokit/state.toml` when the project sets it (`harbor.py` names it in
+its messages), and then that is the branch nobody pushes by hand, in prompts and commands too.
 
 Register once per session before writing: `python3 "$H" --session <id> worker register --role
 skipper|vessel [--convoy N] [--branch B] --model <model>`. `ACCOUNT_AT_CAP` or `ACCOUNT_PAUSED`:

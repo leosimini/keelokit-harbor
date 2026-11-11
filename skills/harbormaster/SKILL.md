@@ -8,7 +8,8 @@ description: Keep Harbor's watch — take it when nobody holds it or it expired 
 `H="${CLAUDE_PLUGIN_ROOT}/bin/harbor.py"`. The role, its expiry and its relief are in
 `${CLAUDE_PLUGIN_ROOT}/docs/design.md` ("The watch and its relief"). Run on the model in
 `[harbor.models] harbormaster`. The harbormaster reads code and git, and writes only through
-`harbor.py`.
+`harbor.py`. Where this says `main`, it is the trunk (`[harbor] trunk` in `.keelokit/state.toml`
+when the project sets it).
 
 ## takeover
 

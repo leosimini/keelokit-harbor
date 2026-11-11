@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — a trunk other than `main`
+
+### The trunk
+- **Convoys can land on a branch that isn't `main`.** `[harbor] trunk` in `.keelokit/state.toml` names the branch
+  convoys are measured against, merge and sail to (`main` by default). With `trunk = "develop"`, in a project whose
+  `main` is production, Harbor never pushes `main`, and its messages, its pages and the note before a push name
+  `develop`. The logbook's schema doesn't change: `harbor/main.toml` and its keys keep their names and hold the trunk.
+  `harbor/log` and `convoy/<n>` are refused as a trunk (`BAD_CONFIG`).
+
 ## 0.1.0 — 2026-11-07 — convoys for many sessions at once
 
 The first release. Harbor lands the work of many parallel Claude sessions on `main` in one convoy, instead of one

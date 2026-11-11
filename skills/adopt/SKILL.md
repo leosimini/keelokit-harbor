@@ -23,6 +23,7 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
 
    [harbor]
    integrator = "any"     # or a pilot account that integrates every convoy
+   # trunk = "develop"    # optional: the branch convoys land on, when it isn't main
 
    [harbor.models]
    skipper = "sonnet"
@@ -33,7 +34,11 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    another machine pushes it, as long as nobody can push to `harbor/log` who couldn't push to `main`.
    If `doctor.py` rejects `[landing]` or `[verify] shared_seals`, this Keelokit predates them: say
    which version is needed and stop.
-   Land this change on `main` the way the project lands today; it is the last direct landing.
+   Ask which branch convoys land on. It is `main` unless the project integrates elsewhere (`main`
+   is production, work lands on `develop`): then write `trunk` with that branch, in this same
+   change (a checkout with the policy and without the trunk would land on `main`), and Harbor never
+   pushes `main`.
+   Land this change on the trunk the way the project lands today; it is the last direct landing.
 3. **This clone.** Ask the account name (the Claude account these sessions run on) and a short
    host name. Write `.keelokit/local.toml` (`[harbor] account = …, host = …`) and add
    `.keelokit/local.toml` to `.gitignore` in the same change as step 2. Each clone has its own.
@@ -49,6 +54,6 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    holds in five lines and, with a yes, save it to a temporary file and run
    `python3 "$H" import-board <file>`. It runs once. Report the convoys imported, the rows left out
    and that the watch is not imported (the first `/harbor:harbormaster takeover` takes it).
-7. **Report** in ten lines: the policy commit's hash on `origin/main`, the logbook's tip
+7. **Report** in ten lines: the policy commit's hash on the trunk (`origin/main`), the logbook's tip
    (`git rev-parse origin/harbor/log`), the cap, the hotspots, the import. Then: start convoys with
    `/harbor:convoy new`.

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Harbor: convoys of branches from several sessions, accounts and machines, integrated in
-convoy/<n>, verified once and landed on main with one push. Stdlib only (Python 3.11+).
+convoy/<n>, verified once and landed on the trunk with one push. Stdlib only (Python 3.11+).
+The trunk is `main`, or the branch [harbor] trunk names in .keelokit/state.toml; where this file says
+main, it means that branch.
 
 The shared state is the logbook: the orphan branch harbor/log on the remote. Only this script
 writes it: fetch, one small commit, push; when the push is rejected because someone wrote first,
@@ -67,11 +69,16 @@ from pathlib import Path  # noqa: E402
 SCHEMA = 1
 LOG_BRANCH = "harbor/log"
 MAIN = "main"
+# The trunk: the branch convoys are measured against, merged from and sailed to ([harbor] trunk, `main`
+# by default). keelokit() sets it from the state file, and every command and every hook that acts on the
+# trunk goes through keelokit() first; where there is no state file or no convoy policy it stays `main`.
+TRUNK = MAIN
 STATES = ("assembling", "waiting", "ready", "verifying", "sailed", "aborted")
 OPEN = ("assembling", "waiting", "ready", "verifying")
 ROLES = ("vessel", "skipper", "harbormaster")
 TIERS = ("trivial", "light", "full")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*")
 # Attempts to land one logbook write when others keep writing first. An engineering bound, not a
 # number from the survey: each attempt is a fetch and a push, and five rejections in a row means
 # something is wrong with the remote, not with the timing.
@@ -102,8 +109,8 @@ DEFAULT_MODELS = {
     "control": "haiku",        # the round only reads the logbook, git and the CI, and reports (§3.3)
 }
 DEFAULT_MIGRATIONS = ["apps/*/prisma/migrations", "*/migrations", "db/migrations"]
-ENV_CODES = {"NO_KEELOKIT", "POLICY_NOT_CONVOY", "NO_IDENTITY", "NO_SESSION", "NOT_A_REPO", "USAGE", "FETCH_FAILED",
-             "PUSH_FAILED"}
+ENV_CODES = {"NO_KEELOKIT", "POLICY_NOT_CONVOY", "BAD_CONFIG", "NO_IDENTITY", "NO_SESSION", "NOT_A_REPO", "USAGE",
+             "FETCH_FAILED", "PUSH_FAILED"}
 
 ROOT = Path.cwd()
 REMOTE = "origin"
@@ -259,7 +266,9 @@ def fmt_ts(t: dt.datetime) -> str:
 
 
 def keelokit() -> dict:
-    """The project's .keelokit/state.toml, or a refusal: Harbor runs only on Keelokit with the convoy policy."""
+    """The project's .keelokit/state.toml, or a refusal: Harbor runs only on Keelokit with the convoy policy.
+    Also sets TRUNK from it, so nothing acts on a trunk the state file didn't name."""
+    global TRUNK
     if not (ROOT / ".keelokit").is_dir():
         raise HarborError("NO_KEELOKIT", "this repo has no .keelokit/: Harbor works on top of Keelokit "
                           "(/keelokit:project-adopt) and does nothing here")
@@ -273,7 +282,23 @@ def keelokit() -> dict:
     if policy != "convoy":
         raise HarborError("POLICY_NOT_CONVOY", f"[landing] policy is {json.dumps(policy) if policy else 'not set'} in "
                           ".keelokit/state.toml; Harbor runs only with policy = \"convoy\" (/harbor:adopt)")
+    TRUNK = trunk_of(state.get("harbor") if isinstance(state.get("harbor"), dict) else {})
     return state
+
+
+def trunk_of(harbor: dict) -> str:
+    """[harbor] trunk, checked: a branch name that can live on the remote beside the logbook and convoy/<n>."""
+    name = harbor.get("trunk", MAIN)
+    if not (isinstance(name, str) and BRANCH.fullmatch(name) and ".." not in name and not name.endswith(".lock")):
+        raise HarborError("BAD_CONFIG", f"[harbor] trunk = {name!r} in .keelokit/state.toml is not a branch name "
+                          "(letters, digits, . _ - and /)")
+    # Not the logbook, not a convoy branch, and no name git can't keep beside them (`convoy` and
+    # `convoy/1` can't both exist): a sail would push a convoy's head onto Harbor's own branches.
+    if name == "convoy" or name.startswith("convoy/") or f"{LOG_BRANCH}/".startswith(f"{name}/") \
+            or name.startswith(f"{LOG_BRANCH}/"):
+        raise HarborError("BAD_CONFIG", f"[harbor] trunk can't be {name}: {LOG_BRANCH} is the logbook and convoy/<n> are "
+                          "the convoys' own branches; the trunk is the branch they sail to")
+    return name
 
 
 def config(state: dict) -> dict:
@@ -447,7 +472,7 @@ def render_logbook(files: dict, cs: dict) -> str:
         out.append("No convoys yet.")
     mt = load(files, "harbor/main.toml")
     if mt:
-        out += ["", "## Main", "", f"Last seen at {short(mt.get('head'))}."]
+        out += ["", "## Main" if TRUNK == MAIN else f"## Trunk (`{TRUNK}`)", "", f"Last seen at {short(mt.get('head'))}."]
         loose = [m for m in mt.get("moves") or [] if m.get("cause") == "loose"]
         if loose:
             out += ["", "Moves no convoy explains (loose pushes):", ""]
@@ -522,7 +547,7 @@ def render_convoy(c: dict, files: dict) -> str:
             meta.append(("Person's yes", f"given by {person['by']} at {person['at']} for {short(person['head'])}" if person
                          else f"waiting ({ok['needs_person']})"))
     if sail := c.get("sail"):
-        meta.append(("Sailed", f"{sail.get('at')} by {sail.get('by')}: main {short(sail.get('main_before'))} → "
+        meta.append(("Sailed", f"{sail.get('at')} by {sail.get('by')}: {TRUNK} {short(sail.get('main_before'))} → "
                                f"{short(sail.get('main_after'))}"))
     if c.get("deferred"):
         meta.append(("Deferred", ", ".join(c["deferred"])))
@@ -780,9 +805,9 @@ def cmd_seal(args) -> int:
     if not branch:
         raise HarborError("DETACHED", "check out the vessel's branch: the seal records which branch it was")
     head = git("rev-parse", "HEAD")
-    base = fetch(MAIN)
+    base = fetch(TRUNK)
     if not base:
-        raise HarborError("NO_MAIN", f"{REMOTE} has no {MAIN}")
+        raise HarborError("NO_MAIN", f"{REMOTE} has no {TRUNK}")
     previous = None if args.rerun else keelokit_history(head)
     if previous and full_run(previous, head, base):
         # build-story already ran Keelokit's verify on this exact commit against today's main: record it
@@ -819,14 +844,14 @@ def cmd_seal(args) -> int:
         if rc == 0 and full_run(previous, head, base):
             seal["level"] = previous["level"]
 
-    main_now = fetch(MAIN)
+    main_now = fetch(TRUNK)
 
     def mutate(files, h):
         return save_run(files, seal, main_now)
 
     shared_ok = transact(f"seal {branch}@{short(head)} exit {rc}", me["id"], mutate)
     shared = (f"Keelokit's pre-push accepts it ({seal['level']})" if shared_ok else
-              f"not a shared seal: main moved to {short(main_now)} during the run" if seal.get("level") else
+              f"not a shared seal: {TRUNK} moved to {short(main_now)} during the run" if seal.get("level") else
               "not a shared seal: Keelokit's pre-push will run its verify")
     print(f"harbor: seal for {short(head)} recorded: {seal['result']} (exit {rc}, {seal['duration_seconds']} s); {shared}")
     return 0 if rc == 0 else 1
@@ -934,9 +959,9 @@ def cmd_convoy(args) -> int:
         return w
 
     if args.action == "new":
-        base = fetch(MAIN)
+        base = fetch(TRUNK)
         if not base:
-            raise HarborError("NO_MAIN", f"{REMOTE} has no {MAIN}")
+            raise HarborError("NO_MAIN", f"{REMOTE} has no {TRUNK}")
 
         project_title = keelokit_title()
 
@@ -974,12 +999,12 @@ def cmd_convoy(args) -> int:
     if args.head and rev(args.head) != tip:
         raise HarborError("HEAD_MISMATCH", f"{REMOTE}/{args.branch} is at {short(tip)}, not the delivered {args.head}: "
                           "a commit after the delivery voids it; seal the new tip and deliver that")
-    base = fetch(MAIN)
+    base = fetch(TRUNK)
     if not base:
-        raise HarborError("NO_MAIN", f"{REMOTE} has no {MAIN}: the hotspots are measured against it")
+        raise HarborError("NO_MAIN", f"{REMOTE} has no {TRUNK}: the hotspots are measured against it")
     mb = git("merge-base", base, tip, check=False)
     if not mb:
-        raise HarborError("UNRELATED_BRANCH", f"{args.branch} shares no history with {MAIN}")
+        raise HarborError("UNRELATED_BRANCH", f"{args.branch} shares no history with {TRUNK}")
     changed = [p for p in git("diff", "--name-only", mb, tip).splitlines() if p]
     story = args.story
     if not story:
@@ -1035,7 +1060,7 @@ def cmd_convoy(args) -> int:
 def convoy_status(args) -> int:
     head, files = snapshot()
     cs = convoys(files)
-    main_tip = fetch(MAIN)
+    main_tip = fetch(TRUNK)
     pick = {args.number: cs[args.number]} if args.number else {n: c for n, c in cs.items() if c.get("state") in OPEN}
     if args.number and args.number not in cs:
         raise HarborError("UNKNOWN_CONVOY", f"there is no convoy {args.number}")
@@ -1047,7 +1072,7 @@ def convoy_status(args) -> int:
         print(f"convoy {n} · {c.get('state')} · skipper {c.get('skipper') or c.get('imported_skipper') or '—'} · "
               f"{len(vs)} vessel(s) · base {short(c.get('base'))}")
         if c.get("state") in OPEN and c.get("base") and main_tip and c["base"] != main_tip:
-            print(f"  main moved: {short(c['base'])} → {short(main_tip)}")
+            print(f"  {TRUNK} moved: {short(c['base'])} → {short(main_tip)}")
         for v in vs:
             tip = fetch(v["branch"]) if c.get("state") in OPEN else v["head"]
             note = "" if tip == v["head"] else (" · branch gone from the remote" if tip is None
@@ -1238,7 +1263,7 @@ def check_migrations(main_tip: str, vessels: list[dict], patterns: list[str]) ->
             for name in sorted(names - known):
                 if last and name < last:
                     raise HarborError("MIGRATION_ORDER", f"{v['branch']} adds {root}/{name}, which sorts before '{last}' "
-                                      "on main: the vessel renames it to a later timestamp and is sealed again")
+                                      f"on {TRUNK}: the vessel renames it to a later timestamp and is sealed again")
                 m = re.match(r"\d+", name)
                 if not m:
                     continue
@@ -1256,9 +1281,9 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
     require_open(c)
     require_integrator(c, me)
     active_worker(files, me)
-    main_tip = fetch(MAIN)
+    main_tip = fetch(TRUNK)
     if not main_tip:
-        raise HarborError("NO_MAIN", f"{REMOTE} has no {MAIN}")
+        raise HarborError("NO_MAIN", f"{REMOTE} has no {TRUNK}")
     vessels = c.get("vessels") or []
     for v in vessels:
         if fetch(v["branch"]) != v["head"]:
@@ -1277,7 +1302,7 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
     before = git("rev-parse", "HEAD")
     notes = []
     if not ancestor(main_tip, "HEAD"):
-        merge(main_tip, f"convoy {c['number']}: merge {MAIN} {short(main_tip)}", cfg["generated"], branch)
+        merge(main_tip, f"convoy {c['number']}: merge {TRUNK} {short(main_tip)}", cfg["generated"], branch)
         notes.append(("main-moved", f"{short(c.get('base'))} → {short(main_tip)}"))
     merged = {}
     for v in vessels:
@@ -1326,7 +1351,7 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         deps = [d for d in c2.get("depends_on") or [] if (cs.get(d) or {}).get("state") != "sailed"]
         events = c2.setdefault("events", [])
         if changed and c2.pop("ok", None):
-            events.append(event(me["id"], "ok-cleared", "the head or main changed: the ok is void"))
+            events.append(event(me["id"], "ok-cleared", f"the head or {TRUNK} changed: the ok is void"))
         for what, detail in notes:
             events.append(event(me["id"], what, detail))
         if missing or deps:
@@ -1345,7 +1370,7 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         return c2["state"], waits
 
     state, waits = transact(f"convoy {args.number} assemble at {short(head)}", me["id"], mutate)
-    print(f"harbor: convoy {args.number} assembled at {short(head)} on main {short(main_tip)}: {state}"
+    print(f"harbor: convoy {args.number} assembled at {short(head)} on {TRUNK} {short(main_tip)}: {state}"
           + (f" (waiting for {' and '.join(waits)})" if waits else "") + ("" if head == before else f"; {branch} pushed")
           + (f"; its pre-push verify ({pre_seal['level']}) is recorded as the convoy's seal" if pre_seal else ""))
     return 0
@@ -1358,11 +1383,11 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
         raise HarborError("USAGE", "--ok needs --reason: the files that decided the level")
     _, files = snapshot()
     c = convoy_of(files, args.number)
-    main_tip = fetch(MAIN)
+    main_tip = fetch(TRUNK)
     tip = fetch(c["branch"])
     ci, line = ci_health(cfg)
     if ci == "red":
-        raise HarborError("MAIN_RED", f"{line}: main gets fixed before any convoy sails")
+        raise HarborError("MAIN_RED", f"{line}: {TRUNK} gets fixed before any convoy sails")
 
     def mutate(files, h):
         c2 = convoy_of(files, args.number)
@@ -1373,7 +1398,7 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
                               + "; the ok comes from the harbormaster holding an unexpired watch")
         require_open(c2, "ready")
         if c2.get("base") != main_tip:
-            raise HarborError("MAIN_MOVED", f"main is at {short(main_tip)}, the convoy at {short(c2.get('base'))}: assemble again")
+            raise HarborError("MAIN_MOVED", f"{TRUNK} is at {short(main_tip)}, the convoy at {short(c2.get('base'))}: assemble again")
         if not c2.get("head") or tip != c2["head"]:
             raise HarborError("CONVOY_MOVED", f"{c2['branch']} is at {short(tip)}, the logbook says {short(c2.get('head'))}: "
                               "assemble again")
@@ -1401,9 +1426,9 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
     require_integrator(c, me)
     active_worker(files, me)
     ok = c.get("ok") or {}
-    main_tip = fetch(MAIN)
+    main_tip = fetch(TRUNK)
     if main_tip != ok.get("base"):
-        raise HarborError("MAIN_MOVED", f"main moved to {short(main_tip)} after the ok: assemble again (the ok is void)")
+        raise HarborError("MAIN_MOVED", f"{TRUNK} moved to {short(main_tip)} after the ok: assemble again (the ok is void)")
     tip = fetch(c["branch"])
     if not tip or not ancestor(c["head"], tip):
         raise HarborError("CONVOY_REWRITTEN", f"{c['branch']} no longer contains {short(c['head'])}: history is never rewritten")
@@ -1450,7 +1475,7 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
             new["level"] = entry["level"]
     sealed = rc == 0 and covers(new.get("level"), level)
 
-    main_now = fetch(MAIN)
+    main_now = fetch(TRUNK)
 
     def finish(files, h):
         save_run(files, new, main_now)
@@ -1493,9 +1518,9 @@ def convoy_sail(args, cfg: dict, me: dict) -> int:
     ok = c.get("ok")
     if not ok:
         raise HarborError("NO_OK", f"convoy {args.number} has no ok")
-    main_tip = fetch(MAIN)
+    main_tip = fetch(TRUNK)
     if main_tip != ok["base"]:
-        raise HarborError("MAIN_MOVED", f"main moved to {short(main_tip)} after the ok: assemble again (the ok is void)")
+        raise HarborError("MAIN_MOVED", f"{TRUNK} moved to {short(main_tip)} after the ok: assemble again (the ok is void)")
     tip = fetch(c["branch"])
     if tip != c.get("head"):
         raise HarborError("CONVOY_MOVED", f"{c['branch']} is at {short(tip)}, its verify was for {short(c.get('head'))}: verify again")
@@ -1509,18 +1534,18 @@ def convoy_sail(args, cfg: dict, me: dict) -> int:
     if not (seal.get("exit") == 0 and covers(seal.get("level"), ok["level"]) and seal.get("base") == main_tip):
         raise HarborError("NOT_SEALED", f"{short(tip)} has no green {ok['level']} seal against {short(main_tip)}: convoy verify first")
     git("checkout", "--quiet", "-B", c["branch"], tip)
-    res = run("git", "push", REMOTE, f"{tip}:refs/heads/{MAIN}", check=False)
+    res = run("git", "push", REMOTE, f"{tip}:refs/heads/{TRUNK}", check=False)
     if res.returncode != 0:
         text = res.stdout + res.stderr
         if any(x in text for x in ("non-fast-forward", "fetch first", "[rejected]")):
-            raise HarborError("MAIN_MOVED", "main moved while pushing: assemble again (the ok is void)")
-        raise HarborError("PUSH_FAILED", f"git push to {MAIN}: {text.strip()[-400:]}")
+            raise HarborError("MAIN_MOVED", f"{TRUNK} moved while pushing: assemble again (the ok is void)")
+        raise HarborError("PUSH_FAILED", f"git push to {TRUNK}: {text.strip()[-400:]}")
 
     def mutate(files, h):
         c2 = convoy_of(files, args.number)
         c2["state"] = "sailed"
         c2["sail"] = {"by": me["id"], "at": now(), "main_before": main_tip, "main_after": tip}
-        c2.setdefault("events", []).append(event(me["id"], "sailed", f"main {short(main_tip)} → {short(tip)}"))
+        c2.setdefault("events", []).append(event(me["id"], "sailed", f"{TRUNK} {short(main_tip)} → {short(tip)}"))
         save_convoy(files, c2)
         record_main_move(files, main_tip, tip, me["id"], f"convoy {args.number}")
         touch(files, active_worker(files, me))
@@ -1528,9 +1553,9 @@ def convoy_sail(args, cfg: dict, me: dict) -> int:
     try:
         transact(f"convoy {args.number} sailed to {short(tip)}", me["id"], mutate)
     except HarborError as e:
-        raise HarborError(e.code, f"main has {short(tip)}, but the logbook write failed ({e.why}); "
+        raise HarborError(e.code, f"{TRUNK} has {short(tip)}, but the logbook write failed ({e.why}); "
                           "the next harbormaster control records the sail")
-    print(f"harbor: convoy {args.number} sailed: main {short(main_tip)} → {short(tip)}")
+    print(f"harbor: convoy {args.number} sailed: {TRUNK} {short(main_tip)} → {short(tip)}")
     return 0
 
 
@@ -1630,7 +1655,7 @@ def cmd_guard(args, raw: str | None = None) -> int:
 # --- fresh reads: `sync --hook` (docs/design.md, «Fresh reads») -----------------------------------
 # One entry for Claude Code's hooks. A session sees the logbook as fresh as the hooks make it: fetched
 # at SessionStart, again on a prompt (>= 60 s since the last), after a tool (>= 120 s), and before a push
-# to main, to convoy/* or a convoy add|sail|verify. Inside a window only the seen file is read: no git.
+# to main (the trunk), to convoy/* or a convoy add|sail|verify. Inside a window only the seen file is read: no git.
 # Every error is exit 0, one line at SessionStart and silence elsewhere. Nothing here denies, except the
 # `convoy approve` guard, which runs first and on any input. Logbook text goes into the model's context,
 # so it is framed as data and every field is one short line.
@@ -1970,7 +1995,7 @@ def branch_of(cwd: str | None, *refs: str) -> str | None:
 
 
 def push_targets(command: str) -> tuple[bool, bool]:
-    """(moves main, moves a convoy/* branch), from the refspecs. `HEAD` is the current branch; no refspec is
+    """(moves main — the trunk —, moves a convoy/* branch), from the refspecs. `HEAD` is the current branch; no refspec is
     where the branch pushes to (@{push}, @{upstream}, else its own name). A detached HEAD is unknown."""
     to_main = to_convoy = False
     for cwd, args in pushes(command):
@@ -1981,7 +2006,7 @@ def push_targets(command: str) -> tuple[bool, bool]:
             elif a in PUSH_OPTS_WITH_VALUE:
                 skip = True
             elif a in ("--all", "--mirror"):
-                to_main = True  # every branch, main among them
+                to_main = True  # every branch, the trunk among them
             elif not a.startswith("-"):
                 pos.append(a)
         dests = []
@@ -1992,7 +2017,7 @@ def push_targets(command: str) -> tuple[bool, bool]:
             dests = [d for d in dests if d != "HEAD"] + [branch_of(cwd, "HEAD") or ""]
         elif not dests:
             dests = [branch_of(cwd, "@{push}", "@{upstream}", "HEAD") or ""]
-        to_main = to_main or "main" in dests
+        to_main = to_main or TRUNK in dests
         to_convoy = to_convoy or any(d.startswith("convoy/") for d in dests)
     return to_main, to_convoy
 
@@ -2015,7 +2040,7 @@ def push_note(command: str, session: str | None) -> tuple[str, str | None]:
     head = [f"open convoys @{short(tip)}" + ("" if got == "ok" else f" (offline, {fetch_age(session)})")]
     lines = open_lines(files) or ["no open convoys"]
     if to_main and not via == "sail":
-        lines += [f"Convoy {n} is verifying: a push to main now moves main under its verify. "
+        lines += [f"Convoy {n} is verifying: a push to {TRUNK} now moves {TRUNK} under its verify. "
                   "Wait for it or land through `convoy sail`." for n, c in convoys(files).items() if c.get("state") == "verifying"]
     text = block(head, lines, [])
     if "\n" in changed:  # the change, without a second data frame
@@ -2111,7 +2136,7 @@ def cmd_harbormaster(args) -> int:
 
     # control
     _, files = snapshot()
-    main_tip = fetch(MAIN)
+    main_tip = fetch(TRUNK)
     tips = {}
     for c in convoys(files).values():
         if c.get("state") in OPEN:
@@ -2126,7 +2151,7 @@ def cmd_harbormaster(args) -> int:
         w = active_worker(files, me)
         hm.update(last_control=now(), expires=fmt_ts(parse_ts(now()) + expiry(cfg)))
         save(files, "harbor/harbormaster.toml", hm)
-        lines = [f"watch: {me['id']} until {hm['expires']}", f"main: {short(main_tip)} · {ci_line}"]
+        lines = [f"watch: {me['id']} until {hm['expires']}", f"{TRUNK}: {short(main_tip)} · {ci_line}"]
         mt = load(files, "harbor/main.toml") or {}
         cs = convoys(files)
         cause = ""
@@ -2137,12 +2162,12 @@ def cmd_harbormaster(args) -> int:
                     if c.get("state") == "verifying" and c.get("head") == main_tip:
                         c["state"] = "sailed"
                         c["sail"] = {"by": me["id"], "at": now(), "main_before": mt["head"], "main_after": main_tip}
-                        c.setdefault("events", []).append(event(me["id"], "sailed", "recorded by control: main already had it"))
+                        c.setdefault("events", []).append(event(me["id"], "sailed", f"recorded by control: {TRUNK} already had it"))
                         save_convoy(files, c)
                         cause = f"convoy {n}"
             cause = cause or "loose"
             if cause == "loose":
-                lines.append(f"main moved {short(mt['head'])} → {short(main_tip)} with no convoy: a loose push, recorded")
+                lines.append(f"{TRUNK} moved {short(mt['head'])} → {short(main_tip)} with no convoy: a loose push, recorded")
         if main_tip:
             record_main_move(files, mt.get("head"), main_tip, me["id"], cause)
         limit = parse_ts(now()) - expiry(cfg)
@@ -2167,7 +2192,7 @@ def cmd_harbormaster(args) -> int:
                 continue
             flags = []
             if c.get("base") and main_tip and c["base"] != main_tip:
-                flags.append("main moved: assemble again")
+                flags.append(f"{TRUNK} moved: assemble again")
             flags += [f"{v['branch']} moved after delivery" for v in c.get("vessels") or []
                       if v["branch"] in tips and tips[v["branch"]] != v["head"]]
             sk = ws.get(c.get("skipper") or "")
