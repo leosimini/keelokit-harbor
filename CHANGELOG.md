@@ -5,6 +5,11 @@
 - **`[harbor] person_ok = "areas"`.** A convoy waits for the person's yes only when a vessel touches an area of
   `.keelokit/critical.toml`. A full-tier story outside those areas sails on the harbormaster's ok and a green verify.
   `"critical"` (the default), `"always"` and `"never"` are unchanged.
+- **A sail says it is pushing, and an abort during the push is refused.** `convoy sail` pushes the trunk through the
+  project's pre-push hook, which can take minutes. An abort accepted in that window was overwritten when the push
+  ended: the convoy sailed after the harbormaster had aborted it. Now the sail writes `sailing` to the logbook before
+  the push, checking the convoy's state and ok again in that write, and `convoy abort` answers `SAILING` while the
+  push runs (for at most 30 minutes, in case the sail died). A push that fails withdraws the announcement.
 
 ## 0.2.1 — 2026-11-11 — a zip claude.ai accepts
 

@@ -105,4 +105,5 @@ hook is approving in their name. Report the hash on
 
 ## abort
 
-`convoy abort <n> --reason "<why>"` (skipper or harbormaster): its vessels and hotspots are free.
+`convoy abort <n> --reason "<why>"` (skipper or harbormaster): its vessels and hotspots are free. While a sail is pushing the convoy
+to the trunk the abort answers `SAILING`: wait for the sail to end and look at the trunk before deciding what to do.

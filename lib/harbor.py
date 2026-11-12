@@ -120,6 +120,7 @@ REMOTE = "origin"
 # Called once, between building a logbook commit and its first push. Tests use it to make another
 # clone write first; nothing else sets it.
 BEFORE_PUSH = None
+SAILING_MINUTES = 30  # a sail that announced itself and never ended (a crash) stops blocking an abort after this
 
 
 class HarborError(Exception):
@@ -1557,15 +1558,39 @@ def convoy_sail(args, cfg: dict, me: dict) -> int:
     if not (seal.get("exit") == 0 and covers(seal.get("level"), ok["level"]) and seal.get("base") == main_tip):
         raise HarborError("NOT_SEALED", f"{short(tip)} has no green {ok['level']} seal against {short(main_tip)}: convoy verify first")
     git("checkout", "--quiet", "-B", c["branch"], tip)
+
+    # The push runs the project's pre-push hook, which can take minutes. The sail says so in the
+    # logbook first: an abort that arrives meanwhile is refused (SAILING) instead of being
+    # overwritten when the push ends. The preconditions are checked again inside the write, so an
+    # abort or a new ok that landed since the snapshot above stops the sail before anything is pushed.
+    def announce(files, h):
+        c2 = convoy_of(files, args.number)
+        require_open(c2, "verifying")
+        ok2 = c2.get("ok")
+        if not ok2 or ok2.get("base") != main_tip or c2.get("head") != tip:
+            raise HarborError("NO_OK", f"convoy {args.number} lost its ok or moved since this sail started: look at the logbook")
+        c2["sailing"] = {"by": me["id"], "at": now(), "head": tip}
+        c2.setdefault("events", []).append(event(me["id"], "sailing", f"pushing {short(tip)} to {TRUNK}"))
+        save_convoy(files, c2)
+
+    def withdraw(files, h):
+        c2 = convoy_of(files, args.number)
+        if c2.pop("sailing", None) is not None:
+            c2.setdefault("events", []).append(event(me["id"], "sail-stopped", f"the push of {short(tip)} to {TRUNK} did not go through"))
+            save_convoy(files, c2)
+
+    transact(f"convoy {args.number} sailing", me["id"], announce)
     res = run("git", "push", REMOTE, f"{tip}:refs/heads/{TRUNK}", check=False)
     if res.returncode != 0:
         text = res.stdout + res.stderr
+        transact(f"convoy {args.number} sail stopped", me["id"], withdraw)
         if any(x in text for x in ("non-fast-forward", "fetch first", "[rejected]")):
             raise HarborError("MAIN_MOVED", f"{TRUNK} moved while pushing: assemble again (the ok is void)")
         raise HarborError("PUSH_FAILED", f"git push to {TRUNK}: {text.strip()[-400:]}")
 
     def mutate(files, h):
         c2 = convoy_of(files, args.number)
+        c2.pop("sailing", None)
         c2["state"] = "sailed"
         c2["sail"] = {"by": me["id"], "at": now(), "main_before": main_tip, "main_after": tip}
         c2.setdefault("events", []).append(event(me["id"], "sailed", f"{TRUNK} {short(main_tip)} → {short(tip)}"))
@@ -1591,6 +1616,12 @@ def convoy_abort(args, cfg: dict, me: dict) -> int:
         require_open(c)
         if c.get("skipper") != me["id"] and not holds_watch(files, me):
             raise HarborError("NOT_SKIPPER", "only the convoy's skipper or the harbormaster aborts it")
+        sailing = c.get("sailing")
+        if sailing and parse_ts(now()) - parse_ts(sailing.get("at") or now()) < dt.timedelta(minutes=SAILING_MINUTES):
+            raise HarborError("SAILING", f"convoy {args.number} is being pushed to {TRUNK} by {sailing.get('by')} since "
+                              f"{sailing.get('at')}: an abort now would be lost. Wait for the sail to end and look at "
+                              f"{TRUNK}: if it has {short(sailing.get('head'))}, fix forward")
+        c.pop("sailing", None)
         c["state"] = "aborted"
         c.pop("ok", None)
         c.setdefault("events", []).append(event(me["id"], "aborted", args.reason.strip()))
@@ -2183,6 +2214,7 @@ def cmd_harbormaster(args) -> int:
             if not cause:
                 for n, c in cs.items():
                     if c.get("state") == "verifying" and c.get("head") == main_tip:
+                        c.pop("sailing", None)
                         c["state"] = "sailed"
                         c["sail"] = {"by": me["id"], "at": now(), "main_before": mt["head"], "main_after": main_tip}
                         c.setdefault("events", []).append(event(me["id"], "sailed", f"recorded by control: {TRUNK} already had it"))

@@ -3,9 +3,10 @@ assemble, the ok, the one verify, the sail; abort and defer. A stand-in for Keel
 history line verify.sh writes, so seals get their level the way they would in a real project.
 Run: python3 -m unittest discover -s tests"""
 import json
+import sys
 import unittest
 
-from test_harbor import NOW, Base, harbor, ok, sh, vessel
+from test_harbor import HARBOR, NOW, Base, harbor, ok, sh, vessel
 
 FAKE = """\
 # Keelokit's verify.sh, as far as Harbor sees it: one history line per run. $1 head, $2 level, $3 a tag.
@@ -487,6 +488,61 @@ class TestSail(Phase2):
         c = self.convoy()
         self.assertEqual((c["state"], c["sail"]["main_after"]), ("sailed", head))
         self.assertEqual(self.repo.log_toml("harbor/main.toml")["moves"][-1]["cause"], "convoy 1")
+
+
+class TestSailAnnouncesItself(Phase2):
+    """The push to the trunk runs the project's pre-push hook, which can take minutes. An abort that
+    arrives during it used to be accepted and then overwritten by the sail (a convoy sailed a minute
+    after the harbormaster aborted it). The sail says it is pushing first; the abort is refused."""
+
+    def hook(self, body: str) -> None:
+        hook = self.a / ".git/test-hooks/pre-push"  # inside .git: the sail needs a clean tree
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text("#!/bin/sh\nrefs=$(cat | awk '{print $3}' | sort -u)\n"
+                        "[ \"$refs\" = refs/heads/main ] || exit 0\n" + body)
+        hook.chmod(0o755)
+        sh(self.a, "git", "config", "core.hooksPath", str(hook.parent))
+
+    def verified(self) -> None:
+        self.two_vessels_ready()
+        ok(self.ok_changed())
+        ok(harbor(self.a, "convoy", "verify", "1"))
+
+    def test_an_abort_during_the_push_is_refused_and_the_convoy_sails(self):
+        self.verified()
+        abort = f'"{sys.executable}" "{HARBOR}" --session s1 convoy abort 1 --reason "late abort"'
+        self.hook(f"{abort} > .git/abort.out 2>&1\necho $? > .git/abort.rc\nexit 0\n")
+        ok(harbor(self.a, "convoy", "sail", "1"))
+        self.assertNotEqual((self.a / ".git/abort.rc").read_text().strip(), "0")
+        self.assertIn("SAILING", (self.a / ".git/abort.out").read_text())
+        c = self.convoy()
+        self.assertEqual(c["state"], "sailed")
+        self.assertNotIn("sailing", c)
+        self.assertEqual(self.repo.main_sha(), c["head"])
+        self.assertNotIn("aborted", self.events())
+        self.assertLess(self.events().index("sailing"), self.events().index("sailed"))
+
+    def test_a_push_that_fails_withdraws_the_announcement_and_the_abort_goes_through(self):
+        self.verified()
+        main = self.repo.main_sha()
+        self.hook("echo 'the gate is red' >&2\nexit 1\n")
+        res = harbor(self.a, "convoy", "sail", "1")
+        self.assertIn("PUSH_FAILED", res.stderr)
+        c = self.convoy()
+        self.assertEqual(c["state"], "verifying")
+        self.assertNotIn("sailing", c)
+        self.assertIn("sail-stopped", self.events())
+        self.assertEqual(self.repo.main_sha(), main)
+        ok(harbor(self.a, "convoy", "abort", "1", "--reason", "the gate is red"))
+        self.assertEqual(self.convoy()["state"], "aborted")
+
+    def test_an_aborted_convoy_does_not_sail(self):
+        self.verified()
+        main = self.repo.main_sha()
+        ok(harbor(self.a, "convoy", "abort", "1", "--reason", "a defect found after the ok"))
+        res = harbor(self.a, "convoy", "sail", "1")
+        self.assertIn("CONVOY_CLOSED", res.stderr)
+        self.assertEqual((self.convoy()["state"], self.repo.main_sha()), ("aborted", main))
 
 
 class TestPrePushSeal(Phase2):

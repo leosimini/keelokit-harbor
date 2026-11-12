@@ -512,7 +512,8 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
 - **Logbook:** the vessel row (or replaces it: a redelivery after a fix), event `add` or
   `redelivered`, the skipper's `last_seen`.
 - **Errors:** `BRANCH_NOT_PUSHED`, `HEAD_MISMATCH`, `NO_SEAL`, `SEAL_RED`, `HOTSPOT_HELD`,
-  `VESSEL_TAKEN`, `NOT_SKIPPER`, `CONVOY_CLOSED`, `UNKNOWN_CONVOY`.
+  `VESSEL_TAKEN`, `NOT_SKIPPER`, `CONVOY_CLOSED`, `UNKNOWN_CONVOY`, `SAILING` (an abort while the
+  sail is pushing the trunk).
 - `convoy status [N]` (read-only) shows, for open convoys, when `main` moved past the base and when
   a vessel's branch moved after delivery ("the delivery is void").
 
