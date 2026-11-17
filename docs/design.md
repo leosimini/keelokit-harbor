@@ -1055,24 +1055,56 @@ untaken (the replay rule of the watch), so two accounts never start the same sto
 dispatcher sends is built by Harbor from the request (story, convoy, title, brief), never copied from free
 text: a request can only start what the repo already describes, with a model from the tables.
 
-### Wakes without a schedule
+### Wakes, and what happens when one fails
 
-The hourly task is the fallback, not the clock. Two wakes come first:
+Measured in JOUNA on 2026-11-17, from a dispatcher session of one account (`3-Tasks/process/buzones.md`):
 
-- **A mailbox PR per account.** A draft PR that is never merged (`harbor/mailbox/<account>` against the
-  trunk, one commit with a README), and the account's dispatcher subscribed to it. Anyone who must reach
-  that account writes the message in the logbook and then comments `inbox` on the PR; the comment wakes
-  the dispatcher at once, which reads the logbook (the comment carries no content; the logbook does). A PR
-  runs no CI where CI runs only on pushes to the trunk. Costs: GitHub notifications on the repo, and one
-  subscriber per PR; the dispatcher re-subscribes on every wake.
-- **A fire URL per account.** A scheduled task with no schedule whose prompt is "you are the dispatcher
-  of <account>": its fire URL starts a fresh dispatcher. It is the way in when the account has no
-  session awake (a new day, a dispatcher that died). The token is a secret: kept as a CI secret or a
-  network secret, never in the logbook. Optional: a workflow on the logbook branch, filtered to
-  `harbor/inbox/**` and `harbor/wanted/**`, fires the URL of the addressed account (seconds of CI per
-  message, only when there is one).
-- **The schedule.** Every 6 to 12 hours, a fired dispatcher re-subscribes the mailbox, delivers what is
-  queued and marks lost sessions. Not hourly: nothing waits on it.
+| Wake | Result |
+|---|---|
+| a comment by a person on a subscribed PR | woke the session in seconds |
+| a comment by a bot (Vercel) | woke it |
+| a comment posted by a Claude session, of the same or of another account | **never delivered** (3 tries, 2 with the subscription live): Claude's own comments are dropped as the session's own |
+| a note in the logbook, seen by a background watcher in the dispatcher | woke it 13 s after another account wrote it |
+
+So a PR comment is how a **person** wakes a session, not how sessions wake each other. Between sessions
+the wake is the logbook itself, read by a watcher. Nothing guarantees that a cloud container stays alive
+while its session is idle, so every layer below assumes the one above it can be dead.
+
+**1. The watcher (seconds, no cost).** The dispatcher keeps one background command running
+(`harbor.py msg watch --to <account>`): plain shell, no model, a `git fetch` of the logbook every 30 s. It
+exits when a new message or request for its account appears, and the exit wakes the session. A
+background command is capped (2 hours in Claude Code), so the dispatcher wakes at least that often while
+its container lives, and re-arms. On every arm it writes `watching_since` in its worker file: once per arm,
+not per poll.
+
+**2. Every message waits for an ack (the sender's check).** A message is `queued` until the dispatcher of
+its account marks it `delivered`. The dispatcher drains **every** queued message of its account on every
+wake, whatever woke it, so a message is never lost with a dead container: it waits in the logbook.
+`harbor.py msg status` shows a message as **late** when it has been queued longer than
+`[harbor] ack_minutes` (default 15), or when the account's `watching_since` is older than the watcher cap,
+which means no watcher is alive there.
+
+**3. A heartbeat per account (hours, small cost).** A scheduled task of the account, bound to the
+dispatcher's own session, every `[harbor] heartbeat_hours` (default 3). It resumes the session, which gets
+a container again, drains the queue, re-arms the watcher and checks its workers. It costs one short turn per
+period; it is the floor of the delivery time when everything above has failed. If the dispatcher session
+itself is gone (archived, failed), the heartbeat is a task that starts a fresh dispatcher instead.
+
+**4. The person (minutes, when it matters).** A late message of `kind = "question"`, or any late message
+older than `[harbor] escalate_minutes` (default 30), goes on the person's list in the logbook views, and
+the harbormaster sends the person a push notification once. The person has two ways in that always work:
+a comment on the account's mailbox PR (a draft PR that is never merged, which the dispatcher keeps
+subscribed: a person's comment wakes it), or opening the session in the app.
+
+**5. Optional: a fire URL per account.** A scheduled task with no schedule whose prompt starts a fresh
+dispatcher; its URL and bearer token let anything start it in seconds, from any account. It replaces
+waiting for the heartbeat when the dispatcher session is gone. The token is a secret, kept outside the
+logbook; whoever holds it can make that account start a session, so its prompt accepts nothing from the
+request text but "drain your queue". Not needed for the rest to work.
+
+Worst cases: with the watcher alive, 30 s; with the container dead, the heartbeat period; with the
+dispatcher session gone and no fire URL, the heartbeat period, and the person has been told after
+`escalate_minutes`.
 
 ### Session state without polling
 
@@ -1102,10 +1134,10 @@ tool list has no Write or Edit; fire tokens never live in the logbook.
 
 ### Order
 
-1. `inbox` and the mailbox PR: removes carrying messages by hand. Smallest change.
+1. `inbox`, the watcher, acks and the heartbeat: removes carrying messages by hand. Smallest change.
 2. `wanted` and the dispatcher's `create_session`: the harbormaster starts work in any account.
 3. State hooks and `get_session` checks.
-4. Fire URLs, `verify_host`, `doctor --cloud`.
+4. The mailbox PR for the person, fire URLs, `verify_host`, `doctor --cloud`.
 
 ## Proposals from JOUNA's process (2026-11-02, not built)
 
