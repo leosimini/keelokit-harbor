@@ -1,7 +1,7 @@
 {
   "name": "harbor",
   "version": "0.2.1",
-  "description": "Convoys for Keelokit: branches from several sessions, accounts and machines, integrated in one branch, verified once and landed on main with one push. The shared state is a git branch only Harbor writes.",
+  "description": "Convoys for Keelokit, and orchestration from the cloud: branches from several sessions, accounts and machines, integrated in one branch, verified once and landed on main with one push; messages and session requests between accounts through a git logbook, with one dispatcher per account and a human gatekeeper.",
   "author": {
     "name": "Leopoldo Simini",
     "url": "https://leopoldosimini.com"

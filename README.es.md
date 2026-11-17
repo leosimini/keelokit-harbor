@@ -44,11 +44,48 @@ controles, no dejadas a la memoria:
 | `/harbor:convoy abort\|defer` | Abandona un convoy, o saca una historia atrasada para que el resto no espere |
 | `/harbor:log` | El logbook: guardia, convoys, workers, cuentas |
 | `/harbor:harbormaster takeover\|control` | Toma la guardia; la ronda que la renueva, registra cada movimiento de `main` y dice qué espera cada convoy |
+| `/harbor:dispatch` | Corre el despachante de una cuenta: entrega sus mensajes, lanza las sesiones que le pidieron y mantiene armado el vigía |
+| `harbor.py msg send\|list\|ack\|done\|status\|watch` | Mensajes entre sesiones de cualquier cuenta, y al gatekeeper; acuses, atrasados y escalados; el vigía |
+| `harbor.py wanted add\|take\|prompt\|started\|drop\|list` | Pedidos de sesiones nuevas, que hace el harbormaster y toma un despachante con lugar |
 
 Sus hooks mantienen al día lo que cada sesión ve del logbook, para que no decida con un estado
 viejo. Una sesión arranca con un fetch, ve qué cambió en el logbook en cada prompt y después de las
 herramientas, y recibe los convoys abiertos antes de subir a `main`. Los detalles están en
 [`docs/design.md`](docs/design.md#fresh-reads).
+
+## Orquestación desde la nube
+
+Las sesiones de una misma cuenta de Claude pueden lanzarse y mandarse mensajes entre sí; las de cuentas
+distintas, no. Harbor 0.3 cierra ese hueco sin un servidor: el logbook lleva los mensajes y los pedidos de
+sesiones nuevas, y cada cuenta corre una sesión **despachante** (`/harbor:dispatch`) que convierte lo que el
+logbook tiene para su cuenta en acciones dentro de esa cuenta.
+
+- **Mensajes entre cualquier sesión, de cualquier cuenta.** `harbor.py msg send --to <destino> TEXTO`, donde
+  el destino es una cuenta, un worker, el `harbormaster`, el `skipper:<n>` de un convoy o el `gatekeeper`.
+  Un mensaje queda en cola hasta que la cuenta que lo recibe lo acusa, así que un contenedor muerto nunca
+  pierde uno.
+- **Sesiones a pedido.** El harbormaster pide un vessel, un skipper o un despachante con
+  `harbor.py wanted add`; el despachante de una cuenta con lugar lo toma (gana el primer commit) y lo lanza
+  con un prompt que arma Harbor a partir del pedido, nunca de texto libre.
+- **Un despertar que no cuesta nada.** El despachante deja corriendo `harbor.py msg watch` en segundo plano:
+  shell, sin modelo, un fetch del logbook cada 30 s. Termina cuando hay trabajo, y al terminar despierta a
+  la sesión. Medido: 13 s desde el mensaje de otra cuenta hasta que el despachante actúa.
+- **Capas para cuando eso falla.** Nada garantiza que el contenedor de una sesión quieta siga vivo. Un
+  mensaje está *atrasado* a los 15 minutos sin acuse o cuando su cuenta no tiene un vigía vivo; un latido
+  programado por cuenta retoma al despachante cada pocas horas; las preguntas atrasadas, y cualquier
+  mensaje con 30 minutos de atraso, van a la lista del gatekeeper. Detalle:
+  [`docs/design.md`](docs/design.md#wakes-and-what-happens-when-one-fails).
+
+Para armarlo, corré `/harbor:dispatch` una vez en una sesión de cada cuenta que deba recibir trabajo, y
+seguí lo que dice sobre el latido.
+
+## El gatekeeper
+
+Harbor lo operan personas, y en cada proyecto una tiene la última palabra: el **gatekeeper**, el humano que
+opera la flota. Harbor lo conoce solo como un rol y nunca supone quién es. El gatekeeper da el sí que espera
+un convoy (`convoy approve`, en su propia terminal; `[harbor] gatekeeper_ok` dice cuándo), responde las
+preguntas que las sesiones mandan a `gatekeeper`, y se entera cuando un mensaje está tan atrasado que hace
+falta una persona. Los agentes deciden dentro de lo que el gatekeeper ya decidió, y preguntan el resto.
 
 ## Probarlo
 
@@ -80,10 +117,10 @@ diseñado y no escrito está al principio de [`docs/design.md`](docs/design.md).
   bloquean una sesión.
 - `harbor.py seal` corre el comando de `[harbor] vessel_verify` del `state.toml` del proyecto. Es
   código del proyecto, igual que sus tests.
-- Un convoy con una historia de nivel full o que toca un área crítica también espera tu sí antes
-  de zarpar: corrés `convoy approve <n>` en tu propia terminal. Un hook PreToolUse impide que lo
+- Un convoy con una historia de nivel full o que toca un área crítica también espera el sí del gatekeeper antes
+  de zarpar: el gatekeeper corre `convoy approve <n>` en su propia terminal. Un hook PreToolUse impide que lo
   corra un agente; como el guard de Keelokit, es un freno, no un sandbox
-  (`[harbor] person_ok` = `critical`, `areas`, `always` o `never`; `areas` espera solo por un área crítica,
+  (`[harbor] gatekeeper_ok`, antes `person_ok`, = `critical`, `areas`, `always` o `never`; `areas` espera solo por un área crítica,
   no por el nivel full).
 - Harbor empuja a `harbor/log` y a `convoy/<n>`, y a `main` solo en `convoy sail`: un fast-forward a
   una cabeza con sello verde y el ok del harbormaster. Nunca con `--force`.

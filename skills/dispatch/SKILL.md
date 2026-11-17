@@ -34,7 +34,9 @@ gatekeeper (`/harbor:adopt` sets it). `ACCOUNT_AT_CAP`: the account is full; ask
    `send_message` its text to the session it names (a worker id is a session id's last part; for
    `harbormaster` and `skipper:<n>` the target is the session of that role in this account; for the
    dispatcher itself, act on it), then `msg ack <id>`. A message that needs no more work, `msg done <id>`.
-   If the target session can't be reached, leave it queued and say why in a message to `harbormaster`.
+   If the target session can't be reached (ended, gone, another account's), still `msg ack <id>`, and tell its
+   sender with `msg send --to <its from> "<id>: <target> can't be reached: <why>"`. Never leave a message
+   queued on purpose: the watcher exits at once while one is queued, and you would wake in a loop.
 2. **Requests.** `python3 "$H" --session <id> wanted list`. For each open one this account has room for,
    `wanted take <id>`; then `wanted prompt <id>` and pass its output, unchanged, as the prompt of
    `create_session`, naming the model it states; then `wanted started <id> --session <the new session's id>`.

@@ -1,8 +1,54 @@
 # Changelog
 
-## Unreleased
+## Unreleased — orchestration from the cloud
 
-- **`[harbor] person_ok = "areas"`.** A convoy waits for the person's yes only when a vessel touches an area of
+Sessions of different Claude accounts can't start or message each other. Harbor now carries that work in the
+logbook, and each account runs one dispatcher session that acts on it inside the account. No server, no paid
+CI: the wake is a background watcher that costs no tokens while it waits.
+
+### Messages
+- **`harbor.py msg send --to TARGET TEXT`** queues a message in the logbook (`harbor/inbox/`) for an account,
+  a worker, the `harbormaster`, a convoy's `skipper:<n>` or the `gatekeeper`. Targets resolve when read, so a
+  message to `skipper:28` reaches whoever carries convoy 28 then. Kinds `message`, `question` and `answer`
+  (`--re`). Text is one line and is framed as data everywhere it is shown.
+- **Acks.** A message stays queued until a worker of its account runs `msg ack`, and `msg done` closes it. A
+  dead container loses no message: it waits in the logbook.
+- **Late and escalated.** `msg status` lists messages queued longer than `[harbor] ack_minutes` (15) or whose
+  account's watcher stopped renewing, and escalates questions, messages to the gatekeeper and anything late
+  for `[harbor] escalate_minutes` (30). It exits 1 when something is late.
+- **The hooks** name new messages and requests in the change summary each session already gets.
+
+### The watcher and the dispatcher
+- **`harbor.py msg watch --account A`**: plain shell, no model. It records `watching_since` once, fetches the
+  logbook every `[harbor] watch_poll_seconds` (30) and exits 0 as soon as the account has something to do,
+  or 75 after `[harbor] watch_cap_minutes` (110) so it is re-armed. Run as a background command, its exit
+  wakes the session. Measured on a real fleet: 13 s from another account's message to the dispatcher, and
+  46 s after 40 minutes idle.
+- **Role `dispatcher`**, `/harbor:dispatch` and `agents/dispatcher.md` (Haiku by default, no Write or Edit):
+  one per account; delivers messages with `send_message`, starts requested sessions with `create_session`,
+  checks silent workers, keeps the watcher armed, and sets up a scheduled heartbeat every
+  `[harbor] heartbeat_hours` (3) for when its container dies (`account set A --heartbeat-hours N` records it).
+
+### Sessions on request
+- **`harbor.py wanted add|take|prompt|started|drop|list`** (`harbor/wanted/`). The harbormaster asks for a
+  vessel, a skipper or a dispatcher; a dispatcher of an account that isn't paused and is under its cap takes
+  it, and the first commit wins (`WANTED_TAKEN`). `wanted prompt` builds the new session's prompt from the
+  request's fields only, never from free text, with the `worker register --spawned-by` line it must run
+  first. Models must be in `[harbor] allowed_models` (`haiku`, `sonnet`, `opus`).
+
+### The gatekeeper
+- **The human operating the fleet is a role, the gatekeeper**, never a name. `[harbor] gatekeeper_ok` is the
+  new name of `person_ok` (still read). Messages, views and skills say "the gatekeeper" where they said "the
+  person". `harbor/LOGBOOK.md` gets "For the gatekeeper": escalated messages and unanswered questions, and
+  `harbormaster control` prints them, with accounts that have no watcher or no heartbeat.
+- Sample accounts in tests and docs are generic (`acct1`, `acct2`).
+
+### Learned and documented
+- A pull request comment posted by a Claude session never wakes another Claude session, of any account; a
+  person's or a bot's does. A draft PR per account still works as a mailbox for the gatekeeper.
+
+### Convoys
+- **`[harbor] gatekeeper_ok = "areas"`.** A convoy waits for the gatekeeper's yes only when a vessel touches an area of
   `.keelokit/critical.toml`. A full-tier story outside those areas sails on the harbormaster's ok and a green verify.
   `"critical"` (the default), `"always"` and `"never"` are unchanged.
 - **A sail says it is pushing, and an abort during the push is refused.** `convoy sail` pushes the trunk through the
