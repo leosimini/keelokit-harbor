@@ -102,9 +102,9 @@ class TestWatch(Phase2):
     def test_takeover_records_the_watch_and_its_expiry(self):
         hm = self.repo.log_toml("harbor/harbormaster.toml")
         self.assertEqual((hm["worker"], hm["since"], hm["last_control"], hm["expires"]),
-                         ("leo/mbp/s1", NOW, NOW, "2026-11-01T19:00:00Z"))
-        self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/s1.toml")["role"], "harbormaster")
-        self.assertIn("leo/mbp/s1, since", self.repo.log_files()["harbor/LOGBOOK.md"])
+                         ("acct1/mbp/s1", NOW, NOW, "2026-11-01T19:00:00Z"))
+        self.assertEqual(self.repo.log_toml("harbor/workers/acct1/mbp/s1.toml")["role"], "harbormaster")
+        self.assertIn("acct1/mbp/s1, since", self.repo.log_files()["harbor/LOGBOOK.md"])
 
     def test_a_held_watch_is_refused_until_it_expires(self):
         ok(harbor(self.a, "worker", "register", "--role", "skipper", session="s2"))
@@ -115,21 +115,21 @@ class TestWatch(Phase2):
         ok(harbor(self.a, "worker", "register", "--role", "skipper", session="s2", env=later))
         ok(harbor(self.a, "harbormaster", "takeover", session="s2", env=later))
         hm = self.repo.log_toml("harbor/harbormaster.toml")
-        self.assertEqual(hm["worker"], "leo/mbp/s2")
-        self.assertEqual(hm["history"][0], {"worker": "leo/mbp/s1", "since": NOW, "until": "2026-11-01T19:00:01Z",
+        self.assertEqual(hm["worker"], "acct1/mbp/s2")
+        self.assertEqual(hm["history"][0], {"worker": "acct1/mbp/s1", "since": NOW, "until": "2026-11-01T19:00:01Z",
                                             "reason": "expired"})
 
     def test_the_owner_can_relieve_a_live_watch(self):
         ok(harbor(self.a, "worker", "register", "--role", "skipper", session="s2"))
-        ok(harbor(self.a, "harbormaster", "takeover", "--relieve", "Leo moved the watch", session="s2"))
+        ok(harbor(self.a, "harbormaster", "takeover", "--relieve", "the owner moved the watch", session="s2"))
         hm = self.repo.log_toml("harbor/harbormaster.toml")
-        self.assertEqual(hm["worker"], "leo/mbp/s2")
-        self.assertEqual(hm["history"][0]["reason"], "relieved by the owner: Leo moved the watch")
+        self.assertEqual(hm["worker"], "acct1/mbp/s2")
+        self.assertEqual(hm["history"][0]["reason"], "relieved by the owner: the owner moved the watch")
 
     def test_control_renews_the_heartbeat_and_only_the_holder_runs_it(self):
         later = {"HARBOR_NOW": "2026-11-01T17:30:00Z"}
         out = ok(harbor(self.a, "harbormaster", "control", env=later))
-        self.assertIn("watch: leo/mbp/s1 until 2026-11-01T20:30:00Z", out)
+        self.assertIn("watch: acct1/mbp/s1 until 2026-11-01T20:30:00Z", out)
         self.assertEqual(self.repo.log_toml("harbor/harbormaster.toml")["last_control"], "2026-11-01T17:30:00Z")
         ok(harbor(self.a, "worker", "register", "--role", "skipper", session="s2"))
         res = harbor(self.a, "harbormaster", "control", session="s2")
@@ -145,10 +145,10 @@ class TestWatch(Phase2):
         sh(self.a, "git", "push", "--quiet", "origin", "main")
         out = ok(harbor(self.a, "harbormaster", "control", env={"HARBOR_NOW": "2026-11-01T19:30:00Z"}))
         self.assertIn("a loose push, recorded", out)
-        self.assertIn("lost: leo/mbp/s2", out)
+        self.assertIn("lost: acct1/mbp/s2", out)
         moves = self.repo.log_toml("harbor/main.toml")["moves"]
         self.assertEqual((moves[-1]["cause"], moves[-1]["to"]), ("loose", self.repo.main_sha()))
-        self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/s2.toml")["state"], "lost")
+        self.assertEqual(self.repo.log_toml("harbor/workers/acct1/mbp/s2.toml")["state"], "lost")
         self.assertIn("Moves no convoy explains", self.repo.log_files()["harbor/LOGBOOK.md"])
 
 
@@ -156,36 +156,36 @@ class TestOwners(Phase2):
     """Whoever spawns a session owns its result: the logbook knows who, and control names the orphans."""
 
     def test_a_spawned_session_names_its_owner(self):
-        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/s1", session="s2"))
-        self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/s2.toml")["spawned_by"], "leo/mbp/s1")
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "acct1/mbp/s1", session="s2"))
+        self.assertEqual(self.repo.log_toml("harbor/workers/acct1/mbp/s2.toml")["spawned_by"], "acct1/mbp/s1")
         ok(harbor(self.a, "worker", "register", "--role", "vessel", "--branch", "claude/x", session="s2"))
-        self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/s2.toml")["spawned_by"], "leo/mbp/s1",
+        self.assertEqual(self.repo.log_toml("harbor/workers/acct1/mbp/s2.toml")["spawned_by"], "acct1/mbp/s1",
                          "registering again keeps the owner")
-        self.assertIn("| ↳ leo/mbp/s2 | leo/mbp/s2 | vessel |", self.repo.log_files()["harbor/LOGBOOK.md"])
+        self.assertIn("| ↳ acct1/mbp/s2 | acct1/mbp/s2 | vessel |", self.repo.log_files()["harbor/LOGBOOK.md"])
 
     def test_the_owner_must_be_an_active_worker(self):
-        res = harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/nobody", session="s2")
+        res = harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "acct1/mbp/nobody", session="s2")
         self.assertIn("SPAWNER_UNKNOWN", res.stderr)
-        res = harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/s2", session="s2")
+        res = harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "acct1/mbp/s2", session="s2")
         self.assertIn("doesn't spawn itself", res.stderr)
 
     def test_ending_with_children_says_so_and_control_names_the_orphans(self):
         ok(harbor(self.a, "worker", "register", "--role", "skipper", session="boss"))
-        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/boss", session="kid"))
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "acct1/mbp/boss", session="kid"))
         out = ok(harbor(self.a, "worker", "end", session="boss"))
-        self.assertIn("still running, launched by this session: leo/mbp/kid", out)
-        self.assertEqual(self.repo.log_toml("harbor/workers/leo/mbp/boss.toml")["children_at_end"], ["leo/mbp/kid"])
+        self.assertIn("still running, launched by this session: acct1/mbp/kid", out)
+        self.assertEqual(self.repo.log_toml("harbor/workers/acct1/mbp/boss.toml")["children_at_end"], ["acct1/mbp/kid"])
         out = ok(harbor(self.a, "harbormaster", "control"))
-        self.assertIn("orphan: leo/mbp/kid, spawned by leo/mbp/boss, which is ended", out)
+        self.assertIn("orphan: acct1/mbp/kid, spawned by acct1/mbp/boss, which is ended", out)
 
     def test_an_owner_lost_in_the_round_leaves_an_orphan(self):
         ok(harbor(self.a, "worker", "register", "--role", "skipper", session="boss"))
         later = {"HARBOR_NOW": "2026-11-01T18:00:00Z"}
-        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "leo/mbp/boss", session="kid", env=later))
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "acct1/mbp/boss", session="kid", env=later))
         ok(harbor(self.a, "harbormaster", "takeover", env=later))
         out = ok(harbor(self.a, "harbormaster", "control", env={"HARBOR_NOW": "2026-11-01T19:30:00Z"}))
-        self.assertIn("lost: leo/mbp/boss", out)
-        self.assertIn("orphan: leo/mbp/kid, spawned by leo/mbp/boss, which is lost", out)
+        self.assertIn("lost: acct1/mbp/boss", out)
+        self.assertIn("orphan: acct1/mbp/kid, spawned by acct1/mbp/boss, which is lost", out)
 
 
 STATUS = """\
@@ -219,13 +219,13 @@ class TestTitles(Phase2):
         out = ok(harbor(self.a, "convoy", "new", session="sk"))
         self.assertIn("session title: Demo · C1 · skipper", out)
         out = ok(harbor(self.a, "worker", "register", "--role", "vessel", "--convoy", "1", "--story", "QA-1",
-                        "--spawned-by", "leo/mbp/sk", "--branch", "claude/keen-x", session="v1"))
+                        "--spawned-by", "acct1/mbp/sk", "--branch", "claude/keen-x", session="v1"))
         self.assertIn("session title: Demo · C1 · wave 2 · QA-1", out)
-        w = self.repo.log_toml("harbor/workers/leo/mbp/v1.toml")
+        w = self.repo.log_toml("harbor/workers/acct1/mbp/v1.toml")
         self.assertEqual((w["title"], w["story"], w["canonical_branch"]), ("Demo · C1 · wave 2 · QA-1", "QA-1", "qa-1"))
         view = self.repo.log_files()["harbor/LOGBOOK.md"]
-        self.assertIn("| Demo · C1 · skipper | leo/mbp/sk |", view)
-        self.assertIn("| ↳ Demo · C1 · wave 2 · QA-1 | leo/mbp/v1 | vessel | claude/keen-x (qa-1) |", view)
+        self.assertIn("| Demo · C1 · skipper | acct1/mbp/sk |", view)
+        self.assertIn("| ↳ Demo · C1 · wave 2 · QA-1 | acct1/mbp/v1 | vessel | claude/keen-x (qa-1) |", view)
 
     def test_the_title_before_the_session_exists(self):
         self.assertEqual(ok(harbor(self.a, "title", "--role", "vessel", "--convoy", "3", "--story", "QA-3")).strip(),
@@ -331,8 +331,8 @@ class TestAssemble(Phase2):
 
     def test_a_pilot_account_integrates_and_others_dont(self):
         state = self.a / ".keelokit/state.toml"
-        state.write_text(state.read_text().replace("[harbor]\n", '[harbor]\nintegrator = "leo"\n', 1))
-        sh(self.a, "git", "commit", "--quiet", "-am", "pilot leo")
+        state.write_text(state.read_text().replace("[harbor]\n", '[harbor]\nintegrator = "acct1"\n', 1))
+        sh(self.a, "git", "commit", "--quiet", "-am", "pilot acct1")
         sh(self.a, "git", "push", "--quiet", "origin", "main")
         ok(harbor(self.a, "convoy", "new"))
         self.deliver(1, "claude/qa-1", "apps/web/a.ts", "QA-1")
@@ -342,7 +342,7 @@ class TestAssemble(Phase2):
         res = harbor(ana, "convoy", "assemble", "1", session="z1")
         self.assertIn("NOT_INTEGRATOR", res.stderr)
         ok(harbor(self.a, "convoy", "assemble", "1"))
-        self.assertEqual(self.convoy()["integrator"], "leo/mbp/s1")
+        self.assertEqual(self.convoy()["integrator"], "acct1/mbp/s1")
 
 
 class TestSail(Phase2):
@@ -596,18 +596,18 @@ class TestPersonOk(Phase2):
     def test_a_full_tier_convoy_waits_for_the_person(self):
         self.full_convoy()
         out = ok(self.ok_changed())
-        self.assertIn("needs the person's yes before it sails (full-tier vessels claude/pay)", out)
+        self.assertIn("needs the gatekeeper's yes before it sails (full-tier vessels claude/pay)", out)
         ok(harbor(self.a, "convoy", "verify", "1"))
         res = harbor(self.a, "convoy", "sail", "1")
         self.assertEqual(res.returncode, 1)
         self.assertIn("NEEDS_PERSON", res.stderr)
-        self.assertIn("waiting for the person's yes", ok(harbor(self.a, "harbormaster", "control")))
+        self.assertIn("waiting for the gatekeeper's yes", ok(harbor(self.a, "harbormaster", "control")))
         out = ok(harbor(self.a, "convoy", "approve", "1", "--note", "read the diff", session=None,
                         env={"HARBOR_SESSION": "", "CLAUDE_SESSION_ID": ""}))
         self.assertIn("approved", out)
         person = self.convoy()["ok"]["person"]
-        self.assertEqual((person["by"], person["head"], person["note"]), ("leo/mbp/-", self.convoy()["head"], "read the diff"))
-        self.assertIn("Person's yes: given by leo/mbp/-", self.repo.log_files()["harbor/convoys/1.md"])
+        self.assertEqual((person["by"], person["head"], person["note"]), ("acct1/mbp/-", self.convoy()["head"], "read the diff"))
+        self.assertIn("Gatekeeper's yes: given by acct1/mbp/-", self.repo.log_files()["harbor/convoys/1.md"])
         ok(harbor(self.a, "convoy", "sail", "1"))
         self.assertEqual(self.repo.main_sha(), self.convoy()["head"])
 

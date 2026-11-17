@@ -67,7 +67,7 @@ git -C "$seed" push -q origin main
 clone() { # clone NAME HOST: one machine
   local dir=$work/$1
   git clone -q "$work/remote.git" "$dir"
-  printf '[harbor]\naccount = "leo"\nhost = "%s"\n' "$2" >"$dir/.keelokit/local.toml"
+  printf '[harbor]\naccount = "acct1"\nhost = "%s"\n' "$2" >"$dir/.keelokit/local.toml"
   git -C "$dir" config core.hooksPath .githooks
   (cd "$dir" && pnpm install --silent --frozen-lockfile)
   echo "$dir"
@@ -78,7 +78,7 @@ b=$(clone b linux | tail -1)
 step "The logbook, the account, a skipper who holds the watch"
 cd "$a"
 H s1 init
-H s1 account set leo --max-sessions 4
+H s1 account set acct1 --max-sessions 4
 H s1 worker register --role skipper --model sonnet
 H s1 harbormaster takeover
 

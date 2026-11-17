@@ -25,7 +25,7 @@ def at(seconds: int) -> str:
 class SyncBase(Base):
     def setUp(self):
         super().setUp()
-        self.b = self.repo.clone("b", account="leo", host="linux")
+        self.b = self.repo.clone("b", account="acct1", host="linux")
         self.ready(self.a, session="s1")
         self.ready(self.b, session="s2")
         self.shim = self.tmp / "shim"
@@ -143,7 +143,7 @@ class TestSessionStart(SyncBase):
 
     def test_check_hook_still_works(self):
         res = harbor(self.a, "check", "--hook", stdin='{"session_id": "s42"}')
-        self.assertIn("this session is leo/mbp/s42", res.stdout)
+        self.assertIn("this session is acct1/mbp/s42", res.stdout)
         self.assertIn("fetched now", res.stdout)
 
 
@@ -167,7 +167,7 @@ class TestUserPromptSubmit(SyncBase):
         self.assertIn("convoy 1: assembling -> aborted", res.stdout)
         self.assertIn("new events:", res.stdout)
         self.assertIn("aborted", res.stdout)
-        self.assertIn("leo/linux/s2", res.stdout)
+        self.assertIn("acct1/linux/s2", res.stdout)
         self.assertNotEqual(self.seen()["tip"], before)
         self.assertEqual(self.seen()["tip"], self.log_tip())
 
@@ -177,11 +177,11 @@ class TestUserPromptSubmit(SyncBase):
         ok(harbor(self.b, "worker", "register", "--role", "vessel", "--convoy", "1", session="s3"))
         ok(harbor(self.b, "harbormaster", "takeover", session="s2"))
         res = self.hook("UserPromptSubmit", secs=61)
-        self.assertIn("worker registered: leo/linux/s3 (vessel, convoy 1)", res.stdout)
-        self.assertIn("watch: nobody -> leo/linux/s2", res.stdout)
+        self.assertIn("worker registered: acct1/linux/s3 (vessel, convoy 1)", res.stdout)
+        self.assertIn("watch: nobody -> acct1/linux/s2", res.stdout)
         ok(harbor(self.b, "worker", "end", session="s3"))
         res = self.hook("UserPromptSubmit", secs=130)
-        self.assertIn("worker ended: leo/linux/s3", res.stdout)
+        self.assertIn("worker ended: acct1/linux/s3", res.stdout)
 
     def test_new_vessel_is_listed(self):
         self.new_convoy()
@@ -302,7 +302,7 @@ class TestPreToolUse(SyncBase):
     def test_approve_is_still_denied(self):
         res = self.bash("python3 lib/harbor.py convoy approve 3")
         self.assertEqual(res.returncode, 2)
-        self.assertIn("only the person approves", res.stderr)
+        self.assertIn("only the gatekeeper approves", res.stderr)
 
     def test_approve_is_denied_even_outside_a_repo(self):
         other = self.tmp / "plain"

@@ -145,12 +145,12 @@ Per clone, git-ignored, in `.keelokit/local.toml`:
 
 ```toml
 [harbor]
-account = "leo"    # the Claude account this clone's sessions run on
+account = "acct1"    # the Claude account this clone's sessions run on
 host = "mbp"       # this machine
 ```
 
 The session id comes from `--session`, `$HARBOR_SESSION` or `$CLAUDE_SESSION_ID`; the SessionStart
-hook prints it (`this session is leo/mbp/<id>`), read from the hook's JSON.
+hook prints it (`this session is acct1/mbp/<id>`), read from the hook's JSON.
 
 ## The logbook
 
@@ -207,7 +207,7 @@ written empty. A field marked *(2)* is written from phase 2.
 
 ```toml
 schema = 1
-worker = "leo/mbp/session_01KwSx"
+worker = "acct1/mbp/session_01KwSx"
 since = "2026-11-01T09:42:00Z"
 last_control = "2026-11-01T15:21:00Z"
 expires = "2026-11-01T18:21:00Z"        # last_control + watch_expiry_minutes
@@ -225,12 +225,12 @@ Phase 1 writes `schema` only: nobody holds the watch until `/harbor:harbormaster
 
 ```toml
 schema = 1
-account = "leo"
+account = "acct1"
 max_sessions = 2                 # active workers of this account at once; chosen by the person, no default
 paused_until = "2026-11-02T03:00:00Z"
 reason = "weekly limit"
 updated = "2026-11-01T16:00:00Z"
-updated_by = "leo/mbp/-"
+updated_by = "acct1/mbp/-"
 ```
 
 Only a clone of that account changes it. `worker register` refuses beyond `max_sessions` and while
@@ -241,8 +241,8 @@ data (§3.16), so the cap is the person's estimate of the budget, not a measurem
 
 ```toml
 schema = 1
-id = "leo/mbp/session_01Abc"
-account = "leo"
+id = "acct1/mbp/session_01Abc"
+account = "acct1"
 host = "mbp"
 session = "session_01Abc"
 role = "vessel"                  # vessel | skipper | harbormaster
@@ -253,10 +253,10 @@ registered = "2026-11-01T10:40:00Z"
 last_seen = "2026-11-01T15:02:00Z"   # every write by this worker
 state = "ended"                  # active | ended | lost (2: set by the harbormaster's control)
 ended = "2026-11-01T16:48:00Z"
-spawned_by = "leo/mbp/session_01Sk"   # the session that launched this one, and owns its result
+spawned_by = "acct1/mbp/session_01Sk"   # the session that launched this one, and owns its result
 title = "jouna · C8 · ola 1 · CARGA-001"   # (3) the canonical session title (see "Names")
 canonical_branch = "carga-001"   # (3) the story id in lower case; `branch` is the one the session really uses
-children_at_end = ["leo/mbp/session_01Ve"]   # sessions it launched that were still running when it ended
+children_at_end = ["acct1/mbp/session_01Ve"]   # sessions it launched that were still running when it ended
 
 [handover]                       # on a budget cut or any early end (R22)
 branch = "claude/carga-001"
@@ -275,8 +275,8 @@ number = 8
 title = "CARGA wave 1"
 state = "verifying"              # assembling | waiting | ready | verifying | sailed | aborted
 branch = "convoy/8"
-skipper = "leo/mbp/session_01Abc"
-integrator = "leo/mbp/session_01Abc"   # the skipper when integrator = "any"; "account:<pilot>" until a pilot session takes it
+skipper = "acct1/mbp/session_01Abc"
+integrator = "acct1/mbp/session_01Abc"   # the skipper when integrator = "any"; "account:<pilot>" until a pilot session takes it
 base = "a2becf56d…"              # origin/main at new; (2) the main last merged into convoy/<n>
 head = "60099ef60…"              # (2) tip of convoy/<n> after the last assembly or fix
 created = "2026-10-31T19:51:00Z"
@@ -293,13 +293,13 @@ head = "60099ef60…"              # the convoy head the ok covers
 needs_person = "full-tier vessels claude/carga-001"   # why a person's yes is also needed; absent when it isn't
 
 [ok.person]                      # (2) that yes, from the person's own terminal
-by = "leo/mbp/-"
+by = "acct1/mbp/-"
 at = "2026-11-01T13:20:00Z"
 head = "60099ef60…"              # bound to this head: a later commit needs another yes
 note = "read the diff"
 
 [sail]                           # (2)
-by = "leo/mbp/session_01Abc"
+by = "acct1/mbp/session_01Abc"
 at = "2026-11-01T14:30:00Z"
 main_before = "a2becf56d…"
 main_after = "60099ef60…"
@@ -313,12 +313,12 @@ tier = "full"                    # as the vessel session chose it (Keelokit's ti
 hotspots = ["schema"]            # computed from its diff against main and [harbor.hotspots]
 seal_base = "a2becf56d…"         # the main its vessel verify ran against
 added = "2026-11-01T11:10:00Z"
-added_by = "leo/mbp/session_01Abc"
+added_by = "acct1/mbp/session_01Abc"
 merged = "9c1e…"                 # (2) its merge commit on convoy/<n>
 
 [[events]]                       # every step, with time and worker (R23)
 at = "2026-11-01T11:10:00Z"
-by = "leo/mbp/session_01Abc"
+by = "acct1/mbp/session_01Abc"
 what = "add"                     # new add redelivered assembled main-moved ok verify-start verify-pass
 detail = "claude/carga-001@4d44fdd8"   # verify-fail fix sailed aborted skipper-changed imported
 ```
@@ -353,7 +353,7 @@ result = "pass"                  # pass | fail
 started = "2026-11-01T10:52:00Z"
 finished = "2026-11-01T11:06:00Z"
 duration_seconds = 840
-by = "leo/mbp/session_01Abc"
+by = "acct1/mbp/session_01Abc"
 level = "changed"                # only for a whole green verify (below): what Keelokit's pre-push reads
 level_source = "harbor"          # only when Harbor gave the level itself (own_verify): such a run has no seals/ file
 reused = true                    # recorded from Keelokit's own run of this commit instead of running again
