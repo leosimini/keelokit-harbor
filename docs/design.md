@@ -1,14 +1,15 @@
 # How Harbor is built
 
-This is the design. **Phases 1 and 2 are implemented** in `lib/harbor.py`.
+This is the design. **Phases 1, 2 and 3 are implemented** in `lib/harbor.py`.
 - *Phase 1* (`tests/test_harbor.py`): logbook init, accounts, workers, seals, `convoy new|add|status`,
   the generated views, the one-time `BOARD.md` import.
 - *Phase 2* (`tests/test_phase2.py`): `convoy assemble|verify|sail|abort|defer`, the ok,
   `harbormaster takeover|control`, `harbor/main.toml`.
+- *Phase 3* (`tests/test_phase3.py`): messages, session requests, the watcher, the gatekeeper's list and the
+  dispatcher ("Phase 3: orchestration from the cloud").
 Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigning a skipper
 (`convoy skipper N WORKER`), the early hotspot warning from stories' `touches`, the warning for
-vessels that share commits, everything marked *(3)*, and orchestration from the cloud
-(["Phase 3"](#phase-3-proposed-not-built-orchestration-from-the-cloud)). The evidence is the survey of a week of convoys run by hand in JOUNA
+vessels that share commits, everything marked *(3)*, and phase 3's "Designed, not built". The evidence is the survey of a week of convoys run by hand in JOUNA
 (`multi-train-orchestration.md`; its finding ids, `n.m`, are cited as `§n.m`, its candidate
 rules as `R1`…`R26`). For how to use Harbor, see the [README](../README.md).
 
@@ -971,173 +972,217 @@ model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tok
 | R25 the CI trigger as a project policy (`landing: train \| direct`) | Keelokit's `[landing] policy`; Harbor runs only under `convoy` | 1 (read) |
 | R26 trains that change the API declare the consuming app version and who deploys | without a decision (see above) | — |
 
-## Phase 3 (proposed, not built): orchestration from the cloud
+## Phase 3: orchestration from the cloud *(0.3.0)*
 
-*(Proposed 2026-11-17, accepted by the owner as a direction; nothing below is written yet.)* Harbor keeps
-sessions from deciding on stale state, but a person still opens every session, carries every message from
-one account to another, and notices when a cloud session died. JOUNA ran 150+ sessions on several accounts
-that way. Phase 3 takes that hand work away without adding a server: the logbook stays the only shared
-state, and every account runs one session that turns the logbook into actions inside that account.
+Harbor keeps sessions from deciding on stale state, but someone still opened every session, carried every
+message from one account to another, and noticed when a cloud session died. Phase 3 takes that hand work
+away without adding a server: the logbook stays the only shared state, and each account runs one session,
+the **dispatcher**, that turns what the logbook holds for its account into actions inside that account.
 
-### What the platform allows, and what it does not
+**Built in 0.3.0:** messages (`msg`), session requests (`wanted`), the watcher (`msg watch`), acks, late and
+escalated messages, the gatekeeper's list, the `dispatcher` role and its skill and agent. **Designed, not
+built:** session state written by hooks, `verify_host` and `doctor --cloud` (below, at the end).
 
-Checked against Claude Code's tools and `code.claude.com/docs/en/routines` on 2026-11-17:
+### The gatekeeper
+
+Harbor is run by people, and in every project one of them has the last word: the **gatekeeper**, the human
+operating the fleet. Harbor never names them and never assumes who they are; it knows them only as a role.
+The gatekeeper:
+
+- gives the yes a convoy waits for (`convoy approve`, typed in their own terminal; `[harbor] gatekeeper_ok`,
+  formerly `person_ok`, says when);
+- answers the questions sessions can't settle (`msg send --to gatekeeper --kind question`);
+- is told when a message is late enough that a person should step in (below);
+- can always wake a session by hand (a comment on a PR the session watches, or opening it in the app).
+
+Everything an agent decides, it decides within what the gatekeeper already decided. What belongs to the
+gatekeeper (money, production, third-party accounts, anything the project marks critical) is asked, not
+assumed. One project can have several people; the logbook doesn't model them. Whoever answers as the
+gatekeeper is the gatekeeper for that answer.
+
+### What the platform allows
+
+Checked against Claude Code's tools and `code.claude.com/docs/en/routines` on 2026-11-17, and measured on
+a real fleet the same day:
 
 | Need | Available | Reach |
 |---|---|---|
 | Start a session | `create_session` | only in the caller's own account |
 | Message a session | `send_message` | only in the caller's own account |
-| Wake an existing session from anywhere | `subscribe_pr_activity`: a comment, review or CI result on that PR becomes a turn | any account or person that can comment on the repo; one subscribed session per PR |
-| Start a session from anywhere | a scheduled task's fire URL: `POST /v1/claude_code/routines/<trig>/fire` with its bearer token and a free `text` | whoever holds the token; beta header `experimental-cc-routine-2026-04-01`; 100 fires/hour per account, 30/hour per task |
 | A schedule | scheduled tasks, at most hourly | the account that owns them |
-| A session's state (idle, failed, ended) | `get_session`, `list_sessions` | only the caller's own account; no webhook or notice exists |
+| A session's state | `get_session`, `list_sessions` | only the caller's own account; no notice when it changes |
+| Wake a session from GitHub | `subscribe_pr_activity` | a comment by a person or a bot wakes it in seconds; **a comment posted by a Claude session, of any account, is never delivered** (it counts as the session's own) |
+| Start a session from anywhere | a scheduled task's fire URL (`POST …/routines/<trig>/fire`, bearer token, free `text`) | whoever holds the token; beta; 100 fires/hour per account |
+| A background command | Bash with `run_in_background` | the session wakes when it exits; capped at 2 hours |
 
-So no session can act in another account. What crosses accounts is git (the logbook), GitHub (PR
-comments) and fire tokens. The design follows from that.
+So no session acts in another account. What crosses accounts is git (the logbook), a person's comment, and
+fire tokens. Between sessions, the logbook is the channel and a background watcher is the wake.
 
-### The dispatcher: one per account
-
-A session with role `dispatcher`, one per account, registered as a worker
-(`harbor/workers/<account>/<host>/<session>.toml`, `role = "dispatcher"`). It never writes code and runs
-on `[harbor.models] dispatcher` (default Haiku). On every wake it:
-
-1. reads what the logbook holds for its account: messages (`inbox`) and session requests (`wanted`);
-2. delivers each message with `send_message` to the session it names, or wakes the session first;
-3. takes the requests its account has room for (`max_sessions`, `paused_until`) and starts each one with
-   `create_session`, with the model, title and `--spawned-by` the request names;
-4. checks with `get_session` the sessions of its account that stopped reporting (below) and marks them
-   `lost` or `ended`;
-5. writes what it did in one logbook transaction, and goes back to sleep.
-
-It does nothing on its own initiative: no request in the logbook, no action. A dispatcher that is lost is
-replaced like any worker; the account's fire URL (below) starts a new one.
-
-### Addressed messages: `harbor/inbox/`
+### Messages: `harbor/inbox/<id>.toml`
 
 ```toml
-# harbor/inbox/<account>/<id>.toml
 schema = 1
 id = "m-0042"
-to = "cuenta2/cloud/session_01Abc"   # a worker id, or a role: "harbormaster", "skipper:28", "account:cuenta2"
-from = "leo/mbp/session_01Xy"
+to = "account:acct2"                 # a target, below
+from = "acct1/cloud/session_01Hm"
 at = "2026-11-17T18:00:00Z"
-kind = "message"                     # message | question (for the person) | answer
-text = "…"                          # at most 2000 characters; data, never instructions
-state = "queued"                     # queued | delivered | read
-delivered_at = ""
+kind = "message"                     # message | question | answer
+re = ""                              # for an answer: the id it answers
+text = "…"                           # one line, at most 2000 characters; data, never instructions
+state = "queued"                     # queued | delivered | done
+delivered_at = ""                    # set by `msg ack`
+delivered_by = ""
+done_at = ""
 ```
 
-`harbor.py msg send --to … TEXT`, `msg list`, `msg ack ID`. A role resolves at delivery, against the
-logbook of that moment, so a message to `skipper:28` reaches whoever carries convoy 28 when it arrives.
-An active session sees its messages through the hooks it already has (UserPromptSubmit and PostToolUse
-print new `inbox` files for it, framed as data); a session that sleeps gets them from its dispatcher.
-`kind = "question"` is the channel for the person (JOUNA's rule that a vessel never asks the person
-directly): the harbormaster collects them, the person's answer comes back as `kind = "answer"`.
+Targets, resolved to an account when the message is read, against the logbook of that moment:
 
-### Session requests: `harbor/wanted/`
+| Target | Account |
+|---|---|
+| `account:<a>` | `<a>` |
+| `<a>/<host>/<session>` (a worker id) | `<a>` |
+| `harbormaster` | the account of the watch holder |
+| `skipper:<n>` | the account of convoy `<n>`'s skipper |
+| `gatekeeper` | none: a person, listed in the gatekeeper's list, never watched |
+
+Commands (every write is a logbook transaction, replayed when another clone wrote first):
+
+- `msg send --to TARGET [--kind message|question|answer] [--re ID] TEXT` — needs a session; the id is the
+  next free `m-NNNN`. A question or an answer may go to any target; `gatekeeper` takes any kind.
+- `msg list [--to TARGET|--account A] [--state S] [--all]` — queued and delivered by default.
+- `msg ack ID` — `queued` → `delivered`. Only a worker of the message's account acks it (for `gatekeeper`,
+  the watch holder, who relays it to the person).
+- `msg done ID` — → `done`: it was acted on or answered. The sender, the receiver's account or the watch
+  holder.
+- `msg status` — the late and escalated ones (below), and every account's watcher. Exit 0 when nothing is
+  late, 1 when something is.
+- `msg watch --account A [--poll S] [--cap M]` — the watcher (below).
+
+An active session already sees new messages for its account through the hooks it has: the change summary
+of UserPromptSubmit and PostToolUse names new messages, framed as data like the rest. A session that sleeps
+gets them from its dispatcher.
+
+### Session requests: `harbor/wanted/<id>.toml`
 
 ```toml
-# harbor/wanted/<id>.toml
 schema = 1
 id = "w-0017"
 role = "vessel"                      # vessel | skipper | dispatcher
-story = "CARGA-001"                  # vessels: the story in the repo, checked to exist
-convoy = 28
-model = "sonnet"                     # must be in [harbor.models] or Keelokit's table for the tier
+story = "CARGA-001"                  # vessels: must be a story the project knows (Keelokit's title lookup)
+convoy = 28                          # optional
+model = "sonnet"                     # one of the allowed models
 account = "any"                      # or one account
-requested_by = "cuenta2/cloud/session_01Hm"
-taken_by = ""                        # the dispatcher's worker id, first commit wins
-session = ""                         # filled when started
+note = ""                            # optional, one line, shown to the gatekeeper; never put in the prompt
+requested_by = "acct1/cloud/session_01Hm"
+at = "2026-11-17T18:00:00Z"
+state = "open"                       # open | taken | started | dropped
+taken_by = ""                        # the dispatcher's worker id; the first commit wins
+taken_at = ""
+session = ""                         # the session it started
+started_at = ""
 ```
 
-The harbormaster writes requests; a dispatcher takes one with a logbook write that checks it is still
-untaken (the replay rule of the watch), so two accounts never start the same story. The prompt the
-dispatcher sends is built by Harbor from the request (story, convoy, title, brief), never copied from free
-text: a request can only start what the repo already describes, with a model from the tables.
+- `wanted add --role R [--story ID] [--convoy N] [--model M] [--account A] [--note TEXT]` — only the watch
+  holder (the harbormaster) asks for sessions. `model` defaults to `[harbor.models]` for Harbor's roles and
+  must be in `[harbor] allowed_models` (default `haiku`, `sonnet`, `opus`).
+- `wanted take ID` — a `dispatcher` worker of an eligible account takes an open request, if the account is
+  not paused and its active workers are under `max_sessions`. Two dispatchers can race: the replay checks
+  the request is still open, so only one wins (`WANTED_TAKEN`).
+- `wanted prompt ID` — prints the prompt the dispatcher sends to `create_session`. Harbor builds it from
+  the request's fields only (role, story, convoy, title, model, the dispatcher's worker id for
+  `--spawned-by`), never from free text: a request can only start what the project already describes.
+- `wanted started ID --session S` — the taker records the session it started.
+- `wanted drop ID` — the requester or the watch holder gives it up.
+- `wanted list [--all]` — open and taken by default.
+
+### The dispatcher: one per account
+
+A worker with `role = "dispatcher"`, one per account, on `[harbor.models] dispatcher` (default Haiku). It
+writes no code. On every wake, whatever woke it:
+
+1. `msg list --account <its account>`: delivers each queued message to the session it names with
+   `send_message` (or acts on it, if it is for the dispatcher), then `msg ack`;
+2. `wanted list`: takes what its account has room for (`wanted take`), starts each with `create_session`
+   and the text of `wanted prompt`, records it (`wanted started`);
+3. checks with `get_session` the workers of its account that have been silent longer than
+   `[harbor] silent_minutes` and ends or marks them as it finds them;
+4. re-arms the watcher, and goes back to sleep.
+
+It does nothing on its own initiative: no message or request in the logbook, no action. The skill
+`/harbor:dispatch` holds the loop; `agents/dispatcher.md` is its brief.
 
 ### Wakes, and what happens when one fails
 
-Measured in JOUNA on 2026-11-17, from a dispatcher session of one account (`3-Tasks/process/buzones.md`):
+Nothing guarantees that a cloud container stays alive while its session is idle, so every layer assumes
+the one above it can be dead.
 
-| Wake | Result |
-|---|---|
-| a comment by a person on a subscribed PR | woke the session in seconds |
-| a comment by a bot (Vercel) | woke it |
-| a comment posted by a Claude session, of the same or of another account | **never delivered** (3 tries, 2 with the subscription live): Claude's own comments are dropped as the session's own |
-| a note in the logbook, seen by a background watcher in the dispatcher | woke it 13 s after another account wrote it |
+**1. The watcher (seconds, no cost).** `msg watch --account A` is the dispatcher's background command:
+plain shell work, no model. On start it writes `watching_since` and `watcher` in `harbor/accounts/A.toml`
+(once per arm, not per poll). Then it fetches the logbook every `--poll` seconds (default
+`[harbor] watch_poll_seconds`, 30) and exits 0, printing one line per item, as soon as the account has a
+queued message or an open request it could take. If there is one already when it starts, it exits at once:
+the dispatcher drains first. After `--cap` minutes (default `[harbor] watch_cap_minutes`, 110, under Claude
+Code's 2-hour cap) it exits 75 ("re-arm"). A failed fetch is retried at the next poll. Measured: a message
+written by another account woke the dispatcher in 13 s, and in 46 s after 40 minutes idle.
 
-So a PR comment is how a **person** wakes a session, not how sessions wake each other. Between sessions
-the wake is the logbook itself, read by a watcher. Nothing guarantees that a cloud container stays alive
-while its session is idle, so every layer below assumes the one above it can be dead.
+**2. Acks (no message is lost).** A message stays `queued` until the dispatcher of its account acks it,
+and the dispatcher drains every queued message on every wake. A message is **late** when it has been queued
+longer than `[harbor] ack_minutes` (default 15), or when its account's `watching_since` is older than the
+watch cap plus `ack_minutes` (no watcher alive there).
 
-**1. The watcher (seconds, no cost).** The dispatcher keeps one background command running
-(`harbor.py msg watch --to <account>`): plain shell, no model, a `git fetch` of the logbook every 30 s. It
-exits when a new message or request for its account appears, and the exit wakes the session. A
-background command is capped (2 hours in Claude Code), so the dispatcher wakes at least that often while
-its container lives, and re-arms. On every arm it writes `watching_since` in its worker file: once per arm,
-not per poll.
+**3. The heartbeat (hours, small cost).** A scheduled task of the account bound to the dispatcher's own
+session, every `[harbor] heartbeat_hours` (default 3). It resumes the session, which gets a container
+again, and runs the loop. If the dispatcher session is gone, the task starts a fresh dispatcher instead.
+Harbor can't create it (it is the account's setting); the skill says how, and the logbook records it
+(`harbor.py account set A --heartbeat-hours N`) so the views can tell an account with no heartbeat.
 
-**2. Every message waits for an ack (the sender's check).** A message is `queued` until the dispatcher of
-its account marks it `delivered`. The dispatcher drains **every** queued message of its account on every
-wake, whatever woke it, so a message is never lost with a dead container: it waits in the logbook.
-`harbor.py msg status` shows a message as **late** when it has been queued longer than
-`[harbor] ack_minutes` (default 15), or when the account's `watching_since` is older than the watcher cap,
-which means no watcher is alive there.
-
-**3. A heartbeat per account (hours, small cost).** A scheduled task of the account, bound to the
-dispatcher's own session, every `[harbor] heartbeat_hours` (default 3). It resumes the session, which gets
-a container again, drains the queue, re-arms the watcher and checks its workers. It costs one short turn per
-period; it is the floor of the delivery time when everything above has failed. If the dispatcher session
-itself is gone (archived, failed), the heartbeat is a task that starts a fresh dispatcher instead.
-
-**4. The person (minutes, when it matters).** A late message of `kind = "question"`, or any late message
-older than `[harbor] escalate_minutes` (default 30), goes on the person's list in the logbook views, and
-the harbormaster sends the person a push notification once. The person has two ways in that always work:
-a comment on the account's mailbox PR (a draft PR that is never merged, which the dispatcher keeps
-subscribed: a person's comment wakes it), or opening the session in the app.
+**4. The gatekeeper (minutes, when it matters).** A late message is **escalated** when it is a question,
+when it is to `gatekeeper`, or when it has been queued longer than `[harbor] escalate_minutes` (default 30).
+Escalated messages go on the gatekeeper's list (the logbook view and `msg status`), and the harbormaster's
+control tells the person once (a push notification where the harbormaster has one). The person can wake a
+dispatcher by hand: a comment on a PR it watches (a draft PR per account that is never merged works as a
+mailbox) or opening the session.
 
 **5. Optional: a fire URL per account.** A scheduled task with no schedule whose prompt starts a fresh
-dispatcher; its URL and bearer token let anything start it in seconds, from any account. It replaces
-waiting for the heartbeat when the dispatcher session is gone. The token is a secret, kept outside the
-logbook; whoever holds it can make that account start a session, so its prompt accepts nothing from the
-request text but "drain your queue". Not needed for the rest to work.
+dispatcher. Its token is a secret, kept outside the logbook; its prompt accepts nothing from the request
+text. It replaces waiting for the heartbeat when the dispatcher session is gone.
 
-Worst cases: with the watcher alive, 30 s; with the container dead, the heartbeat period; with the
-dispatcher session gone and no fire URL, the heartbeat period, and the person has been told after
-`escalate_minutes`.
+Worst cases: watcher alive, `--poll` seconds; container dead, the heartbeat period; and the gatekeeper is
+told after `escalate_minutes`.
 
-### Session state without polling
+### Configuration added
 
-There is no notice when a cloud session goes idle or fails, so each session reports itself:
+```toml
+[harbor]
+gatekeeper_ok = "critical"         # was person_ok (still read); "critical", "areas", "always", "never"
+ack_minutes = 15
+escalate_minutes = 30
+heartbeat_hours = 3
+watch_poll_seconds = 30
+watch_cap_minutes = 110
+silent_minutes = 120
+allowed_models = ["haiku", "sonnet", "opus"]
 
-- the `Stop` hook writes `state = "idle"` and `last_turn_end`; the first hook of the next turn writes
-  `state = "working"`. Only a change is written, and at most once every 5 minutes per session, so 150
-  sessions do not flood the logbook;
-- what a hook cannot see (a container that was reclaimed, a turn that crashed) the dispatcher checks
-  with `get_session` for the workers of its account that have been silent longer than
-  `[harbor] silent_minutes` (default 120).
-
-### The heavy verify
-
-A whole verify of an hour or more is fragile in a cloud container (no Docker daemon, background commands
-cut at 30 minutes, the container reclaimed when the session idles). Harbor already has
-`integrator = "<pilot account>"`; phase 3 adds `[harbor] verify_host`, the machine that runs convoy
-verifies (a person's computer reached by Remote Control, or a runner), and `harbor.py doctor --cloud`,
-which says what a cloud environment lacks for vessel verifies (tools, services, the setup script).
+[harbor.models]
+dispatcher = "haiku"
+```
 
 ### Trust
 
-Today whoever can push to the logbook can forge a seal. With phase 3 they can also make every account
-start sessions. Limits that hold even then: a request starts only a story that exists in the repo, with
-a model from the tables, within the account's cap; messages are data framed as such; the dispatcher's
-tool list has no Write or Edit; fire tokens never live in the logbook.
+Whoever can push to the logbook could already forge a seal; now they can also queue messages and ask for
+sessions. What still holds: a request starts only a role and story the project knows, with an allowed model,
+within the account's cap, from a prompt Harbor builds; messages are framed as data at every reader; the
+dispatcher's tools have no Write or Edit; fire tokens never live in the logbook; the gatekeeper's yes is
+still typed by a person.
 
-### Order
+### Designed, not built
 
-1. `inbox`, the watcher, acks and the heartbeat: removes carrying messages by hand. Smallest change.
-2. `wanted` and the dispatcher's `create_session`: the harbormaster starts work in any account.
-3. State hooks and `get_session` checks.
-4. The mailbox PR for the person, fire URLs, `verify_host`, `doctor --cloud`.
+- **Session state from hooks.** The `Stop` hook writes `state = "idle"` and `last_turn_end`, the next
+  turn's first hook writes `working`; only a change, at most every 5 minutes per session.
+- **The heavy verify.** A whole verify of an hour or more is fragile in a cloud container (no Docker
+  daemon, background commands capped, the container reclaimed when idle). `[harbor] verify_host` would name
+  the machine that runs convoy verifies, and `harbor.py doctor --cloud` would say what a cloud environment
+  lacks for vessel verifies.
 
 ## Proposals from JOUNA's process (2026-11-02, not built)
 
