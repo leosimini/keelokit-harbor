@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — orchestration from the cloud
+## 0.3.0 — 2026-11-17 — orchestration from the cloud
 
 Sessions of different Claude accounts can't start or message each other. Harbor now carries that work in the
 logbook, and each account runs one dispatcher session that acts on it inside the account. No server, no paid
