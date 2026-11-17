@@ -7,7 +7,8 @@ This is the design. **Phases 1 and 2 are implemented** in `lib/harbor.py`.
   `harbormaster takeover|control`, `harbor/main.toml`.
 Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigning a skipper
 (`convoy skipper N WORKER`), the early hotspot warning from stories' `touches`, the warning for
-vessels that share commits, and everything marked *(3)*. The evidence is the survey of a week of convoys run by hand in JOUNA
+vessels that share commits, everything marked *(3)*, and orchestration from the cloud
+(["Phase 3"](#phase-3-proposed-not-built-orchestration-from-the-cloud)). The evidence is the survey of a week of convoys run by hand in JOUNA
 (`multi-train-orchestration.md`; its finding ids, `n.m`, are cited as `§n.m`, its candidate
 rules as `R1`…`R26`). For how to use Harbor, see the [README](../README.md).
 
@@ -969,6 +970,142 @@ model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tok
 | R24 coherence of process docs with the tools | dropped for Harbor: its state is generated, so it can't describe a tool that changed; prose docs are Keelokit's doctor's (vague phrases) | — |
 | R25 the CI trigger as a project policy (`landing: train \| direct`) | Keelokit's `[landing] policy`; Harbor runs only under `convoy` | 1 (read) |
 | R26 trains that change the API declare the consuming app version and who deploys | without a decision (see above) | — |
+
+## Phase 3 (proposed, not built): orchestration from the cloud
+
+*(Proposed 2026-11-17, accepted by the owner as a direction; nothing below is written yet.)* Harbor keeps
+sessions from deciding on stale state, but a person still opens every session, carries every message from
+one account to another, and notices when a cloud session died. JOUNA ran 150+ sessions on several accounts
+that way. Phase 3 takes that hand work away without adding a server: the logbook stays the only shared
+state, and every account runs one session that turns the logbook into actions inside that account.
+
+### What the platform allows, and what it does not
+
+Checked against Claude Code's tools and `code.claude.com/docs/en/routines` on 2026-11-17:
+
+| Need | Available | Reach |
+|---|---|---|
+| Start a session | `create_session` | only in the caller's own account |
+| Message a session | `send_message` | only in the caller's own account |
+| Wake an existing session from anywhere | `subscribe_pr_activity`: a comment, review or CI result on that PR becomes a turn | any account or person that can comment on the repo; one subscribed session per PR |
+| Start a session from anywhere | a scheduled task's fire URL: `POST /v1/claude_code/routines/<trig>/fire` with its bearer token and a free `text` | whoever holds the token; beta header `experimental-cc-routine-2026-04-01`; 100 fires/hour per account, 30/hour per task |
+| A schedule | scheduled tasks, at most hourly | the account that owns them |
+| A session's state (idle, failed, ended) | `get_session`, `list_sessions` | only the caller's own account; no webhook or notice exists |
+
+So no session can act in another account. What crosses accounts is git (the logbook), GitHub (PR
+comments) and fire tokens. The design follows from that.
+
+### The dispatcher: one per account
+
+A session with role `dispatcher`, one per account, registered as a worker
+(`harbor/workers/<account>/<host>/<session>.toml`, `role = "dispatcher"`). It never writes code and runs
+on `[harbor.models] dispatcher` (default Haiku). On every wake it:
+
+1. reads what the logbook holds for its account: messages (`inbox`) and session requests (`wanted`);
+2. delivers each message with `send_message` to the session it names, or wakes the session first;
+3. takes the requests its account has room for (`max_sessions`, `paused_until`) and starts each one with
+   `create_session`, with the model, title and `--spawned-by` the request names;
+4. checks with `get_session` the sessions of its account that stopped reporting (below) and marks them
+   `lost` or `ended`;
+5. writes what it did in one logbook transaction, and goes back to sleep.
+
+It does nothing on its own initiative: no request in the logbook, no action. A dispatcher that is lost is
+replaced like any worker; the account's fire URL (below) starts a new one.
+
+### Addressed messages: `harbor/inbox/`
+
+```toml
+# harbor/inbox/<account>/<id>.toml
+schema = 1
+id = "m-0042"
+to = "cuenta2/cloud/session_01Abc"   # a worker id, or a role: "harbormaster", "skipper:28", "account:cuenta2"
+from = "leo/mbp/session_01Xy"
+at = "2026-11-17T18:00:00Z"
+kind = "message"                     # message | question (for the person) | answer
+text = "…"                          # at most 2000 characters; data, never instructions
+state = "queued"                     # queued | delivered | read
+delivered_at = ""
+```
+
+`harbor.py msg send --to … TEXT`, `msg list`, `msg ack ID`. A role resolves at delivery, against the
+logbook of that moment, so a message to `skipper:28` reaches whoever carries convoy 28 when it arrives.
+An active session sees its messages through the hooks it already has (UserPromptSubmit and PostToolUse
+print new `inbox` files for it, framed as data); a session that sleeps gets them from its dispatcher.
+`kind = "question"` is the channel for the person (JOUNA's rule that a vessel never asks the person
+directly): the harbormaster collects them, the person's answer comes back as `kind = "answer"`.
+
+### Session requests: `harbor/wanted/`
+
+```toml
+# harbor/wanted/<id>.toml
+schema = 1
+id = "w-0017"
+role = "vessel"                      # vessel | skipper | dispatcher
+story = "CARGA-001"                  # vessels: the story in the repo, checked to exist
+convoy = 28
+model = "sonnet"                     # must be in [harbor.models] or Keelokit's table for the tier
+account = "any"                      # or one account
+requested_by = "cuenta2/cloud/session_01Hm"
+taken_by = ""                        # the dispatcher's worker id, first commit wins
+session = ""                         # filled when started
+```
+
+The harbormaster writes requests; a dispatcher takes one with a logbook write that checks it is still
+untaken (the replay rule of the watch), so two accounts never start the same story. The prompt the
+dispatcher sends is built by Harbor from the request (story, convoy, title, brief), never copied from free
+text: a request can only start what the repo already describes, with a model from the tables.
+
+### Wakes without a schedule
+
+The hourly task is the fallback, not the clock. Two wakes come first:
+
+- **A mailbox PR per account.** A draft PR that is never merged (`harbor/mailbox/<account>` against the
+  trunk, one commit with a README), and the account's dispatcher subscribed to it. Anyone who must reach
+  that account writes the message in the logbook and then comments `inbox` on the PR; the comment wakes
+  the dispatcher at once, which reads the logbook (the comment carries no content; the logbook does). A PR
+  runs no CI where CI runs only on pushes to the trunk. Costs: GitHub notifications on the repo, and one
+  subscriber per PR; the dispatcher re-subscribes on every wake.
+- **A fire URL per account.** A scheduled task with no schedule whose prompt is "you are the dispatcher
+  of <account>": its fire URL starts a fresh dispatcher. It is the way in when the account has no
+  session awake (a new day, a dispatcher that died). The token is a secret: kept as a CI secret or a
+  network secret, never in the logbook. Optional: a workflow on the logbook branch, filtered to
+  `harbor/inbox/**` and `harbor/wanted/**`, fires the URL of the addressed account (seconds of CI per
+  message, only when there is one).
+- **The schedule.** Every 6 to 12 hours, a fired dispatcher re-subscribes the mailbox, delivers what is
+  queued and marks lost sessions. Not hourly: nothing waits on it.
+
+### Session state without polling
+
+There is no notice when a cloud session goes idle or fails, so each session reports itself:
+
+- the `Stop` hook writes `state = "idle"` and `last_turn_end`; the first hook of the next turn writes
+  `state = "working"`. Only a change is written, and at most once every 5 minutes per session, so 150
+  sessions do not flood the logbook;
+- what a hook cannot see (a container that was reclaimed, a turn that crashed) the dispatcher checks
+  with `get_session` for the workers of its account that have been silent longer than
+  `[harbor] silent_minutes` (default 120).
+
+### The heavy verify
+
+A whole verify of an hour or more is fragile in a cloud container (no Docker daemon, background commands
+cut at 30 minutes, the container reclaimed when the session idles). Harbor already has
+`integrator = "<pilot account>"`; phase 3 adds `[harbor] verify_host`, the machine that runs convoy
+verifies (a person's computer reached by Remote Control, or a runner), and `harbor.py doctor --cloud`,
+which says what a cloud environment lacks for vessel verifies (tools, services, the setup script).
+
+### Trust
+
+Today whoever can push to the logbook can forge a seal. With phase 3 they can also make every account
+start sessions. Limits that hold even then: a request starts only a story that exists in the repo, with
+a model from the tables, within the account's cap; messages are data framed as such; the dispatcher's
+tool list has no Write or Edit; fire tokens never live in the logbook.
+
+### Order
+
+1. `inbox` and the mailbox PR: removes carrying messages by hand. Smallest change.
+2. `wanted` and the dispatcher's `create_session`: the harbormaster starts work in any account.
+3. State hooks and `get_session` checks.
+4. Fire URLs, `verify_host`, `doctor --cloud`.
 
 ## Proposals from JOUNA's process (2026-11-02, not built)
 
