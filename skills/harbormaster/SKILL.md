@@ -16,7 +16,7 @@ when the project sets it).
 `python3 "$H" --session <id> harbormaster takeover`; set this session's title to the one it prints.
 Refused with `WATCH_HELD` while another
 session's watch hasn't expired; `--relieve "<reason>"` only when the person says so in this
-conversation. Then schedule this session's own control every `[harbor] control_every_minutes`
+conversation (the gatekeeper's word). Then schedule this session's own control every `[harbor] control_every_minutes`
 (a task another session scheduled doesn't reach this one): one scheduled message to itself that
 runs `/harbor:harbormaster control` and schedules the next.
 
@@ -32,14 +32,29 @@ The ok, and anything else that needs judgment, stays in this session, on `harbor
 `harbormaster control` renews the heartbeat, records any move of `main`
 (a convoy's sail, or a loose push), marks workers not seen within the expiry as lost, and prints one
 line per open convoy with what it waits for. Act on each line:
-- `waiting for the person's yes`: remind the person once, with what to review; don't approve.
+- `waiting for the gatekeeper's yes`: remind the gatekeeper once, with what to review; don't approve.
 - `waiting for the ok`: read the convoy (`git show origin/harbor/log:harbor/convoys/<n>.md`, its diff
   against main) and give the ok with its level and reason (`/harbor:convoy`, "The ok"), or say why not.
 - `main moved`: tell the convoy's integrator to assemble again.
-- `skipper … is lost/ended`: tell the person; reassigning is theirs to approve.
+- `skipper … is lost/ended`: tell the gatekeeper; reassigning is theirs to approve.
 - `verify started … with no result`: the run was cut on that machine; the integrator runs it again.
-- a loose push: tell the person what landed outside a convoy.
-- `orphan: …`: a session still running whose owner ended, got lost or is paused. Tell the person;
+- a loose push: tell the gatekeeper what landed outside a convoy.
+- `orphan: …`: a session still running whose owner ended, got lost or is paused. Tell the gatekeeper;
   its result is either taken over by its owner's replacement or ended.
 
-Report in ten lines at most, as control prints them, plus what needs the person.
+After those lines, control prints what is late: `escalated: …` (a late question, a message for the gatekeeper, or one
+queued past `escalate_minutes`), `late: …`, `account A: no watcher` and `account A: no heartbeat recorded`. Tell the
+gatekeeper about each escalated one, once (a push notification, if this session has one), and wake an account's
+dispatcher when its watcher is down. Relay an answer with `msg send --to <the asker> --kind answer --re <id>`, then
+`msg done <id>`. `python3 "$H" msg status` lists every late message and every watcher (exit 1 when something is late):
+run it in each control.
+
+## Asking for sessions
+
+The harbormaster is the one that asks for sessions: `python3 "$H" --session <id> wanted add --role vessel --story <ID>
+[--convoy N] [--model M] [--account A]` (`--role skipper` or `dispatcher` too). A dispatcher takes it, starts the
+session and records it; `wanted list` shows where each request is, `wanted drop <id>` gives one up. A request starts
+only a role and story the project knows, on an allowed model, within the account's cap. `/harbor:dispatch` is the
+other side.
+
+Report in ten lines at most, as control prints them, plus what needs the gatekeeper.

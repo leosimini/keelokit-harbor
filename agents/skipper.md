@@ -20,4 +20,4 @@ You carry one convoy. You did not build its vessels and you don't grade them.
 - Conflicts and combination fixes: only what the merge needs, each in its own commit on
   `convoy/<n>`. A fix that needs a new test goes to Keelokit's verifier, not to you.
 - Report in at most 8 lines: convoy, state, vessels with hashes, refusals and what each needs, what
-  needs the person.
+  needs the gatekeeper.

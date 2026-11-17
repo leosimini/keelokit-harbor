@@ -82,8 +82,8 @@ a void delivery.
 `changed` unless the convoy touches what Keelokit's routing can't bound (verify tooling, test config,
 CI, `.keelokit/`, `scripts/`, root manifests, the lockfile): then `all`. Money, permissions and
 migrations don't force `all`. It refuses if main is red, moved, or the convoy isn't `ready`. When the convoy is critical (a
-full-tier vessel or a critical area, per `[harbor] person_ok`; with `"areas"`, only a critical area), the ok says it also needs the
-person's yes: the verify runs meanwhile, and only the sail waits.
+full-tier vessel or a critical area, per `[harbor] gatekeeper_ok` (formerly `person_ok`); with `"areas"`, only a critical area), the ok says it also needs the
+gatekeeper's yes: the verify runs meanwhile, and only the sail waits.
 
 ## verify (integrator)
 
@@ -97,7 +97,7 @@ that completes the plan. Don't run vessel seals on this machine while it verifie
 
 `python3 "$H" --session <id> convoy sail <n>`, from the machine that verified. It pushes the sealed
 head to `main` as a fast-forward; `MAIN_MOVED` means assemble again and a new ok. `NEEDS_PERSON`:
-tell the person what to review (`git show origin/harbor/log:harbor/convoys/<n>.md`, `git diff
+tell the gatekeeper what to review (`git show origin/harbor/log:harbor/convoys/<n>.md`, `git diff
 origin/main...origin/convoy/<n>`) and that they approve by running `python3 <harbor.py> convoy approve
 <n>` in their own terminal. Never run it yourself: Harbor's hook blocks it, and getting around the
 hook is approving in their name. Report the hash on

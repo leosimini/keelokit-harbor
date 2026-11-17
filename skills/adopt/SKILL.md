@@ -48,7 +48,7 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    host name. Write `.keelokit/local.toml` (`[harbor] account = …, host = …`) and add
    `.keelokit/local.toml` to `.gitignore` in the same change as step 2. Each clone has its own.
 4. **The logbook.** `python3 "$H" init`. Then ask how many sessions this account may run at once
-   (no default: it's the person's budget) and `python3 "$H" account set <account> --max-sessions N`.
+   (no default: it's the gatekeeper's budget) and `python3 "$H" account set <account> --max-sessions N`.
 5. **Hotspots.** Propose `[harbor.hotspots]` from evidence, each with its reason: the areas in
    `.keelokit/critical.toml`, migration folders, shared packages, locale files, generated files,
    and the paths with most commits lately (`git log --since=30.days --name-only --format= | sort |
@@ -59,6 +59,9 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    holds in five lines and, with a yes, save it to a temporary file and run
    `python3 "$H" import-board <file>`. It runs once. Report the convoys imported, the rows left out
    and that the watch is not imported (the first `/harbor:harbormaster takeover` takes it).
-7. **Report** in ten lines: the policy commit's hash on the trunk (`origin/main`), the logbook's tip
+7. **Dispatchers.** Each account that should receive work (messages from other accounts, sessions started for
+   it) runs one dispatcher: a session that runs `/harbor:dispatch`. Say so, and that the gatekeeper (for this
+   project) is the person who gives the yes for critical convoys and answers what sessions can't settle.
+8. **Report** in ten lines: the policy commit's hash on the trunk (`origin/main`), the logbook's tip
    (`git rev-parse origin/harbor/log`), the cap, the hotspots, the import. Then: start convoys with
    `/harbor:convoy new`.
