@@ -40,6 +40,13 @@
   after the logbook, best-effort, on its own cap; SessionStart and the PreToolUse push note fetch the logbook
   only; no submodules, no background `gc`. A hook stays under its 10 s timeout, and a stale lock on the trunk
   ref is cleared like the logbook's.
+- **A hook fetch leaves `FETCH_HEAD` alone** (`--no-write-fetch-head`): a session's `git fetch origin feature`
+  then `git merge FETCH_HEAD` took the trunk instead. A retry after a stale lock fetches the logbook only.
+- **The note about what the trunk changed is said again after the session merged the trunk** and the same kind of
+  thing changes once more (the dedup now looks at the base too).
+- **`doctor`**: a host that settles nothing by its deadline, and a plugin absent from the local list when the
+  organisation's synced plugins live elsewhere, are "can't check", not "missing"; an unexpected error exits 2.
+- The fallback title takes the project from the main checkout, not a worktree's directory.
 - **A takeover leaves the previous holder with the role `ex-harbormaster`** (the view showed two
   harbormasters); a Keelokit without `status.py title` still titles a session `role · account · project`;
   `account set --mailbox-pr 0` forgets the mailbox; an empty word in `[harbor.import]` is refused.

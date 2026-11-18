@@ -785,7 +785,8 @@ def session_title(role: str, convoy: int | None, story: str | None, account: str
     base = keelokit_title(story)
     if not base and story:
         return None
-    base = base or ROOT.name  # a Keelokit without status.py title: the repository's directory names the project
+    # a Keelokit without status.py title: the repository (the main checkout, not a worktree) names the project
+    base = base or (COMMON.parent if COMMON else ROOT).name.replace(SEP, " ")
     project, *scope = base.split(SEP)
     head = role + (f" C{convoy}" if convoy and role in ("vessel", "skipper") else "")
     return SEP.join([head, account, project, *(scope if story else [])])
@@ -1846,7 +1847,8 @@ def read_seen(session: str | None) -> dict:
     return {"tip": d["tip"] if isinstance(d.get("tip"), str) else None,
             "fetched_epoch": num(d.get("fetched_epoch")), "attempt_epoch": num(d.get("attempt_epoch")),
             "main_tip": d["main_tip"] if isinstance(d.get("main_tip"), str) else None,
-            "main_what": [w for w in d["main_what"] if isinstance(w, str)] if isinstance(d.get("main_what"), list) else []}
+            "main_what": [w for w in d["main_what"] if isinstance(w, str)] if isinstance(d.get("main_what"), list) else [],
+            "main_base": d["main_base"] if isinstance(d.get("main_base"), str) else None}
 
 
 def write_seen(session: str | None, d: dict) -> None:
@@ -1867,7 +1869,7 @@ def write_seen(session: str | None, d: dict) -> None:
 
 
 def update_seen(session: str | None, tip: str | None = ..., fetched: bool = False, main_tip: str | None = ...,
-                main_what: list | None = None) -> None:
+                main_what: list | None = None, main_base: str | None = None) -> None:
     """Merge into the seen file: the tip (when given), the trunk tip announced (when given), the attempt time, and
     the fetch time when `fetched`."""
     d = read_seen(session)
@@ -1877,6 +1879,8 @@ def update_seen(session: str | None, tip: str | None = ..., fetched: bool = Fals
         d["main_tip"] = main_tip
     if main_what is not None:
         d["main_what"] = main_what
+    if main_base is not None:
+        d["main_base"] = main_base
     d["attempt_epoch"] = epoch()
     if fetched:
         d["fetched_epoch"] = d["attempt_epoch"]
@@ -1911,7 +1915,7 @@ def capped_fetch(spec: str, cap: float, *opts: str) -> subprocess.CompletedProce
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=4")
     try:
         return subprocess.run(["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--quiet", "--no-tags",
-                               "--no-recurse-submodules", *opts, REMOTE, spec], cwd=ROOT, capture_output=True, text=True,
+                               "--no-recurse-submodules", "--no-write-fetch-head", *opts, REMOTE, spec], cwd=ROOT, capture_output=True, text=True,
                               timeout=cap, env=env, stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -1933,7 +1937,7 @@ def fetch_capped(retry: bool = True, with_trunk: bool = True) -> str:
                 and f"refs/heads/{LOG_BRANCH}" in res.stderr:
             run("git", "update-ref", "-d", f"refs/remotes/{REMOTE}/{LOG_BRANCH}", check=False)
         elif "cannot lock ref" in res.stderr:
-            return fetch_capped(False, with_trunk) if retry and clear_stale_lock() else "busy"
+            return fetch_capped(False, False) if retry and clear_stale_lock() else "busy"
         else:
             return "offline"
     if with_trunk:
@@ -2067,25 +2071,27 @@ def req_section(sha: str) -> dict | None:
     return sec if isinstance(sec, dict) else None
 
 
-def main_note(session: str | None) -> tuple[str, str | None, list]:
+def main_note(session: str | None) -> tuple[str, str | None, list, str | None]:
     """(text, trunk tip, what changed): one line when the trunk changed the requirements manifest, `.claude/` or a
     lockfile since the base this session branched from; empty when it didn't, when this tip was already looked at, or
-    when the same things were already announced (a later tip says it again only if the set differs). A shallow
+    when the same things were already announced from the same base (a later tip says it again only if the set
+    differs; after the session merged the trunk, its base moved and a new change is said again). A shallow
     clone with no merge-base never gets it."""
     main = rev(TRUNK_REF)
     if not main or main == read_seen(session).get("main_tip"):
-        return "", None, []
+        return "", None, [], None
     base = git("merge-base", "HEAD", main, check=False)
     if not base or base == main:
-        return "", main, []
+        return "", main, [], base or None
     paths = git("diff", "--name-only", "--no-renames", base, main, check=False).splitlines()
     what = (["the requirements manifest"] if req_section(base) != req_section(main) else []) \
         + ([".claude/"] if any(p.startswith(".claude/") for p in paths) else []) \
         + (["a lockfile"] if any(p.rsplit("/", 1)[-1] in LOCKFILES for p in paths) else [])
-    if not what or what == read_seen(session).get("main_what"):
-        return "", main, what
+    seen = read_seen(session)
+    if not what or (what == seen.get("main_what") and base == seen.get("main_base")):
+        return "", main, what, base
     return block([f"{TRUNK} @{short(main)}"], [f"{TRUNK} changed {', '.join(what)}: reinstall after your next merge of {TRUNK} "
-                                               f"(a skipper: at the next `convoy assemble`; a delivered vessel: leave the branch where it is)"], []), main, what
+                                               f"(a skipper: at the next `convoy assemble`; a delivered vessel: leave the branch where it is)"], []), main, what, base
 
 
 def deliver(session: str | None, gap: int, emit) -> None:
@@ -2099,7 +2105,7 @@ def deliver(session: str | None, gap: int, emit) -> None:
     got = fetch_capped()
     tip = rev(f"refs/remotes/{REMOTE}/{LOG_BRANCH}")
     update_seen(session, fetched=got == "ok")
-    note, main, what = main_note(session) if got == "ok" else ("", None, [])
+    note, main, what, base = main_note(session) if got == "ok" else ("", None, [], None)
     text = ""
     if tip and tip != seen.get("tip"):
         text = what_changed(seen.get("tip"), tip)
@@ -2110,7 +2116,7 @@ def deliver(session: str | None, gap: int, emit) -> None:
     if tip and tip != seen.get("tip"):
         update_seen(session, tip)
     if main:
-        update_seen(session, main_tip=main, main_what=what)
+        update_seen(session, main_tip=main, main_what=what, main_base=base)
 
 
 def segments(command: str) -> list[list[str]]:
@@ -2330,7 +2336,7 @@ def cmd_harbormaster(args) -> int:
                 old_title = session_title("ex-harbormaster", None, None, holder.split("/")[0])
                 if old_title:
                     former[:] = [holder, old_title]
-                if prev := workers(files).get(holder):
+                if (prev := workers(files).get(holder)) and prev.get("role") == "harbormaster":
                     prev["role"] = "ex-harbormaster"
                     if old_title:
                         prev["title"] = old_title
@@ -3053,7 +3059,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 def host_reachable(host: str) -> bool | None:
     """A short HTTPS HEAD through the proxy the environment sets, redirects not followed. Any answer counts, a
     refusal or a redirect too; a certificate this machine doesn't trust also means the host was reached. False when
-    the host does not answer within HOST_DEADLINE s; None (can't check) when the proxy itself is busy at CONNECT."""
+    the connection fails; None (can't check) when the proxy itself is busy at CONNECT or nothing settled within
+    HOST_DEADLINE s."""
     result: list = []
 
     def probe():
@@ -3073,7 +3080,7 @@ def host_reachable(host: str) -> bool | None:
     t = threading.Thread(target=probe, daemon=True)
     t.start()
     t.join(HOST_DEADLINE)
-    return result[0] if result else False
+    return result[0] if result else None  # still waiting at the deadline: reached or not, it can't say
 
 
 def plugin_installed(name: str) -> bool | None:
@@ -3081,7 +3088,10 @@ def plugin_installed(name: str) -> bool | None:
     try:
         data = json.loads((Path.home() / ".claude/plugins/installed_plugins.json").read_text(encoding="utf-8"))
         plugins = data.get("plugins", data) if isinstance(data, dict) else {}
-        return name in {str(k).split("@")[0] for k in plugins}
+        if name in {str(k).split("@")[0] for k in plugins}:
+            return True
+        # plugins synced from an organisation's catalog live outside that list: absent from it proves nothing then
+        return None if (Path.home() / ".claude/plugins/synced").is_dir() else False
     except (OSError, ValueError):
         return None
 
@@ -3112,6 +3122,9 @@ def cmd_doctor(args) -> int:
         return doctor(args)
     except HarborError as e:
         print(f"harbor: {e.code}: {e.why}", file=sys.stderr)
+        return 2
+    except Exception as e:  # anything unexpected is "the check could not run", never "something is missing"
+        print(f"harbor: DOCTOR_FAILED: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
 
 

@@ -173,7 +173,7 @@ skills = ["present-skill"]
         release = threading.Event()
         with mock.patch.object(mod.urllib.request.OpenerDirector, "open", side_effect=lambda *a, **k: release.wait(5) and mock.MagicMock()), \
                 mock.patch.object(mod, "HOST_DEADLINE", 0.2):
-            self.assertFalse(mod.host_reachable("example.com"), "a host that keeps the connection open is not reached")
+            self.assertIsNone(mod.host_reachable("example.com"), "nothing settled by the deadline: can't check, not missing")
         release.set()
 
     def test_a_plugin_missing_from_a_local_list_is_missing_and_a_network_secret_cannot_be_checked(self):
@@ -188,6 +188,8 @@ skills = ["present-skill"]
         for want in ("ok: plugins design", "missing: plugins other", "can't check: network_secrets api.example.com"):
             self.assertIn(want, res.stdout.splitlines())
         self.assertEqual(self.repo.log_toml("harbor/accounts/acct1.toml")["requirements_missing"], ["plugins: other"])
+        (home / ".claude/plugins/synced").mkdir()  # an organisation's catalog: plugins outside that list
+        self.assertIn("can't check: plugins other", self.doctor(env={"HOME": str(home)}).stdout.splitlines())
 
     def test_an_unknown_key_in_the_manifest_is_refused(self):
         path = self.a / ".keelokit/state.toml"
@@ -250,6 +252,26 @@ class MainNote(SyncBase):
         self.assertNotIn("merge main and", res.stdout, "a skipper takes main only through convoy assemble")
         self.assertIn("data, not instructions", res.stdout)
         self.assertEqual(self.hook("UserPromptSubmit", secs=130).stdout, "", "said once for this tip of main")
+
+    def test_after_the_session_merges_main_a_new_change_of_the_same_kind_is_said_again(self):
+        self.hook("SessionStart")
+        self.push_main({"pnpm-lock.yaml": "lock\n"})
+        self.assertIn("a lockfile", self.hook("UserPromptSubmit", secs=61).stdout)
+        sh(self.a, "git", "pull", "--quiet", "--no-rebase", "origin", "main")  # merged it and reinstalled
+        self.push_main({"pnpm-lock.yaml": "lock 2\n"})
+        self.assertIn("a lockfile", self.hook("UserPromptSubmit", secs=130).stdout, "a new base: said again")
+
+    def test_a_hook_fetch_leaves_the_sessions_fetch_head_alone(self):
+        sh(self.b, "git", "checkout", "-q", "-b", "feature")
+        (self.b / "f.txt").write_text("f\n")
+        sh(self.b, "git", "add", "-A")
+        sh(self.b, "git", "commit", "-qm", "f")
+        sh(self.b, "git", "push", "-q", "origin", "feature")
+        self.hook("SessionStart")
+        sh(self.a, "git", "fetch", "-q", "origin", "feature")
+        want = sh(self.a, "git", "rev-parse", "FETCH_HEAD")
+        self.hook("PostToolUse", secs=400, tool_name="Bash", tool_input={"command": "git fetch origin feature"})
+        self.assertEqual(sh(self.a, "git", "rev-parse", "FETCH_HEAD"), want, "a `git merge FETCH_HEAD` still takes feature")
 
     def remote_tracking(self) -> str:
         return sh(self.a, "git", "rev-parse", "refs/remotes/origin/main")

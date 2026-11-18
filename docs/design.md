@@ -679,7 +679,13 @@ cap that is never started later than 7.5 s into the hook, so a hook ends well un
 slow trunk can never cost the logbook. The trunk goes to Harbor's own ref `refs/harbor/trunk`, never to
 `refs/remotes/<remote>/<trunk>` (`--refmap=` keeps git from updating it on the side): a hook that moved the
 session's own `origin/main` would make `git push --force-with-lease` trust a main the session never saw, and
-wipe another clone's commit. SessionStart and PreToolUse fetch the logbook only.
+wipe another clone's commit. SessionStart and PreToolUse fetch the logbook only. A hook fetch writes no `FETCH_HEAD`
+(`--no-write-fetch-head`), so a session's `git fetch origin feature` followed by `git merge FETCH_HEAD` still
+takes `feature`; a retry after a stale lock fetches the logbook only. `refs/harbor/trunk` shows in `git log
+--all` and `for-each-ref`, and a `git push --mirror` would publish it: harmless, but worth knowing. The convoy
+commands and the harbormaster's control round do fetch the trunk into `origin/<trunk>`, as any deliberate
+`git fetch` does; worktrees of one clone share that ref, so push to the trunk with `--force-if-includes`
+alongside `--force-with-lease` when a push must force.
 
 | Hook | What it does | Delay |
 | --- | --- | --- |
