@@ -255,7 +255,8 @@ class TestAccountsAndWorkers(Base):
         w = self.repo.log_toml("harbor/workers/acct1/mbp/s1.toml")
         self.assertEqual((w["id"], w["role"], w["state"], w["model"], w["last_seen"]),
                          ("acct1/mbp/s1", "vessel", "active", "sonnet", NOW))
-        self.assertIn("| acct1/mbp/s1 | acct1/mbp/s1 | vessel |", self.repo.log_files()["harbor/LOGBOOK.md"])
+        # no status.py title: the session column falls back to role · account · project
+        self.assertIn(f"| vessel · acct1 · {self.a.name} | acct1/mbp/s1 | vessel |", self.repo.log_files()["harbor/LOGBOOK.md"])
 
     def test_register_respects_the_cap_and_ending_frees_a_place(self):
         self.ready(cap=1)

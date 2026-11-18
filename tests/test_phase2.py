@@ -161,7 +161,7 @@ class TestOwners(Phase2):
         ok(harbor(self.a, "worker", "register", "--role", "vessel", "--branch", "claude/x", session="s2"))
         self.assertEqual(self.repo.log_toml("harbor/workers/acct1/mbp/s2.toml")["spawned_by"], "acct1/mbp/s1",
                          "registering again keeps the owner")
-        self.assertIn("| ↳ acct1/mbp/s2 | acct1/mbp/s2 | vessel |", self.repo.log_files()["harbor/LOGBOOK.md"])
+        self.assertIn(f"| ↳ vessel · acct1 · {self.a.name} | acct1/mbp/s2 | vessel |", self.repo.log_files()["harbor/LOGBOOK.md"])
 
     def test_the_owner_must_be_an_active_worker(self):
         res = harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "acct1/mbp/nobody", session="s2")
