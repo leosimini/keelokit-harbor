@@ -36,7 +36,7 @@ written as checks, not left to memory:
 
 | Command | What happens |
 |---|---|
-| `/harbor:adopt` | Sets the convoy policy, this clone's account and host, the logbook, the account's cap and the hotspots. Imports a `BOARD.md` once if there is one |
+| `/harbor:adopt` | Sets the convoy policy, this clone's account and host, the logbook, the account's cap and the hotspots. Imports a hand-kept board once if there is one |
 | `/harbor:convoy new\|add\|status` | Opens a convoy, adds a sealed vessel, shows what moved |
 | `/harbor:convoy assemble\|verify\|sail` | Merges `main` and the vessels into `convoy/<n>`; the ok and its level; one verify on the exact head; one push to `main` |
 | `/harbor:convoy abort\|defer` | Gives a convoy up, or takes a late story out so the rest don't wait |
@@ -45,6 +45,9 @@ written as checks, not left to memory:
 | `/harbor:dispatch` | Runs an account's dispatcher: delivers the account's messages, starts the sessions it was asked for, keeps the watcher armed |
 | `harbor.py msg send\|list\|ack\|done\|status\|watch` | Messages between sessions of any account, and to the gatekeeper; acks, late and escalated ones; the watcher |
 | `harbor.py wanted add\|take\|prompt\|started\|drop\|list` | Requests for new sessions, asked by the harbormaster and taken by a dispatcher with room |
+| `harbor.py title --role R [--convoy N] [--story ID] [--account A]` | The title a session carries: role, account, project and scope |
+| `harbor.py account set A --mailbox-pr N` | Records the account's mailbox, the draft pull request `harbor/mailbox/A` |
+| `harbor.py doctor [--account A]` | Checks this machine against the project's `[harbor.requirements]`: one line per item, exit 1 if one is missing |
 
 Its hooks keep a session's view of the logbook fresh, so it doesn't decide on stale state. A
 session starts with a fetch, sees what changed in the logbook at each prompt and after tools, and
@@ -74,6 +77,37 @@ logbook holds for its account into actions inside that account.
 
 To set it up, run `/harbor:dispatch` once in one session of each account that should receive work, and
 follow what it says about the heartbeat.
+
+## Session titles
+
+An account can hold many sessions, and a list of them has to say which is which. Every session Harbor knows
+has a title from `harbor.py title`, never typed by hand, and it reads role first, then account, then project
+and scope: `harbormaster · acme-a · Acme`, `dispatcher · acme-a · Acme`, `skipper C8 · acme-a · Acme`,
+`vessel C8 · acme-a · Acme · wave 1 · CARGA-001`, `worker · acme-a · Acme`. When the watch changes hands, the
+previous holder is told to carry `ex-harbormaster · …` until it ends. The logbook lists the sessions account
+by account, with their titles.
+
+## What an account needs to work here
+
+What the repository carries (`.claude/`, lockfiles) reaches every account through `main`. What belongs to an
+account (its cloud environment, connectors, plugins, secret names) never travels through git. A project
+declares what its work needs:
+
+```toml
+[harbor.requirements]
+tools = ["docker", "pnpm"]
+hosts = ["registry.example.com"]
+secrets = ["EXAMPLE_API_TOKEN"]       # names only, never values
+plugins = ["design"]
+skills = ["feature-delivery"]
+note = "one line for the gatekeeper"
+```
+
+`harbor.py doctor` checks the machine against it and records the result per account; each dispatcher runs it
+when it arms and whenever the list changes, and sends what is missing to the gatekeeper, who decides what to
+configure. A running session is told, in the hook's summary, when `main` changed the list, `.claude/` or a
+lockfile: merge `main` and reinstall before going on. The account's mailbox, a draft pull request named
+`harbor/mailbox/<account>` that its dispatcher subscribes to, is recorded with `account set --mailbox-pr`.
 
 ## The gatekeeper
 

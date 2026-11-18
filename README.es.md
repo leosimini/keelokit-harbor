@@ -38,7 +38,7 @@ controles, no dejadas a la memoria:
 
 | Comando | Qué pasa |
 |---|---|
-| `/harbor:adopt` | Configura la política de convoys, la cuenta y la máquina de este clon, el logbook, el tope de la cuenta y los hotspots. Importa una vez un `BOARD.md` si lo hay |
+| `/harbor:adopt` | Configura la política de convoys, la cuenta y la máquina de este clon, el logbook, el tope de la cuenta y los hotspots. Importa una vez un tablero llevado a mano si lo hay |
 | `/harbor:convoy new\|add\|status` | Abre un convoy, suma un vessel sellado, muestra qué se movió |
 | `/harbor:convoy assemble\|verify\|sail` | Une `main` y los vessels en `convoy/<n>`; el ok y su nivel; un verify sobre la cabeza exacta; un push a `main` |
 | `/harbor:convoy abort\|defer` | Abandona un convoy, o saca una historia atrasada para que el resto no espere |
@@ -47,6 +47,9 @@ controles, no dejadas a la memoria:
 | `/harbor:dispatch` | Corre el despachante de una cuenta: entrega sus mensajes, lanza las sesiones que le pidieron y mantiene armado el vigía |
 | `harbor.py msg send\|list\|ack\|done\|status\|watch` | Mensajes entre sesiones de cualquier cuenta, y al gatekeeper; acuses, atrasados y escalados; el vigía |
 | `harbor.py wanted add\|take\|prompt\|started\|drop\|list` | Pedidos de sesiones nuevas, que hace el harbormaster y toma un despachante con lugar |
+| `harbor.py title --role R [--convoy N] [--story ID] [--account A]` | El título que lleva una sesión: rol, cuenta, proyecto y alcance |
+| `harbor.py account set A --mailbox-pr N` | Registra el buzón de la cuenta, el pull request borrador `harbor/mailbox/A` |
+| `harbor.py doctor [--account A]` | Revisa esta máquina contra los `[harbor.requirements]` del proyecto: una línea por ítem, sale con 1 si falta alguno |
 
 Sus hooks mantienen al día lo que cada sesión ve del logbook, para que no decida con un estado
 viejo. Una sesión arranca con un fetch, ve qué cambió en el logbook en cada prompt y después de las
@@ -78,6 +81,37 @@ logbook tiene para su cuenta en acciones dentro de esa cuenta.
 
 Para armarlo, corré `/harbor:dispatch` una vez en una sesión de cada cuenta que deba recibir trabajo, y
 seguí lo que dice sobre el latido.
+
+## Títulos de sesión
+
+Una cuenta puede tener muchas sesiones, y una lista de ellas tiene que decir cuál es cuál. Toda sesión que
+Harbor conoce tiene un título que sale de `harbor.py title`, nunca escrito a mano, y se lee primero el rol,
+después la cuenta y después el proyecto y el alcance: `harbormaster · acme-a · Acme`, `dispatcher · acme-a ·
+Acme`, `skipper C8 · acme-a · Acme`, `vessel C8 · acme-a · Acme · wave 1 · CARGA-001`, `worker · acme-a ·
+Acme`. Cuando la guardia cambia de manos, al titular anterior se le indica que lleve `ex-harbormaster · …`
+hasta que termine. El logbook lista las sesiones cuenta por cuenta, con sus títulos.
+
+## Qué necesita una cuenta para trabajar acá
+
+Lo que lleva el repositorio (`.claude/`, los lockfiles) llega a todas las cuentas por `main`. Lo que es de
+una cuenta (su entorno en la nube, conectores, plugins, nombres de secretos) nunca viaja por git. Un proyecto
+declara lo que su trabajo necesita:
+
+```toml
+[harbor.requirements]
+tools = ["docker", "pnpm"]
+hosts = ["registry.example.com"]
+secrets = ["EXAMPLE_API_TOKEN"]       # solo nombres, nunca valores
+plugins = ["design"]
+skills = ["feature-delivery"]
+note = "una línea para el gatekeeper"
+```
+
+`harbor.py doctor` revisa la máquina contra eso y guarda el resultado por cuenta; cada despachante lo corre al
+armarse y cada vez que la lista cambia, y manda lo que falte al gatekeeper, que decide qué configurar. Una
+sesión en curso se entera, en el resumen del hook, cuando `main` cambió la lista, `.claude/` o un lockfile:
+traer `main` y reinstalar antes de seguir. El buzón de la cuenta, un pull request borrador llamado
+`harbor/mailbox/<cuenta>` al que se suscribe su despachante, se registra con `account set --mailbox-pr`.
 
 ## El gatekeeper
 

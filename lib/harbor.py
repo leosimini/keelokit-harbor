@@ -3100,7 +3100,7 @@ COLS = {"number": ("convoy", "#", "n", "number"), "skipper": ("skipper", "chief"
         "state": ("state",), "handoff": ("handoff", "link")}
 # A project adds the words its board uses in state.toml; the defaults are English only:
 #   [harbor.import]
-#   columns = { number = ["train"], skipper = ["lead"] }      # header names, per column above
+#   columns = { number = ["batch"], skipper = ["lead"] }      # header names, per column above
 #   states = { sailed = ["landed"] }                            # words of the state column, per state
 #   coordinator = ["coordinates"]                               # the word before the coordinator line
 

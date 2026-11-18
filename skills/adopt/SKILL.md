@@ -54,14 +54,19 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    and the paths with most commits lately (`git log --since=30.days --name-only --format= | sort |
    uniq -c | sort -rn | head -20`). Write only what the person confirms. Generated files go in
    `[harbor.generated]` with the command that rebuilds them.
-6. **A hand-kept board.** Look for one: `git ls-remote origin coord/board` and then
-   `git show origin/coord/board:BOARD.md`, or a `BOARD.md` in the tree. If found, show what it
-   holds in five lines and, with a yes, save it to a temporary file and run
-   `python3 "$H" import-board <file>`. It runs once. Report the convoys imported, the rows left out
-   and that the watch is not imported (the first `/harbor:harbormaster takeover` takes it).
+6. **A hand-kept board.** Ask whether the project keeps one (a markdown file with a table of convoys, in
+   the tree or on a branch) and where. If so, show what it holds in five lines and, with a yes, save it to a
+   temporary file and run `python3 "$H" import-board <file>`. The import knows English column and state
+   words only: if the board uses others, add them first in `state.toml` (`[harbor.import] columns = {
+   number = ["…"] }`, `states`, `coordinator`; `docs/design.md`, `harbor/imported/board.toml`). It runs once.
+   Report the convoys imported, the rows left out and that the watch is not imported (the first
+   `/harbor:harbormaster takeover` takes it).
 7. **Dispatchers.** Each account that should receive work (messages from other accounts, sessions started for
    it) runs one dispatcher: a session that runs `/harbor:dispatch`. Say so, and that the gatekeeper (for this
    project) is the person who gives the yes for critical convoys and answers what sessions can't settle.
+   **Requirements.** Offer to write `[harbor.requirements]` (tools, hosts, secret names, plugins, skills the
+   work needs; see `docs/design.md`, "Phase 4") from what the repository already shows: its lockfiles,
+   `.claude/skills`, its verify's tools. Only what the person confirms. `harbor.py doctor` checks it.
 8. **Report** in ten lines: the policy commit's hash on the trunk (`origin/main`), the logbook's tip
    (`git rev-parse origin/harbor/log`), the cap, the hotspots, the import. Then: start convoys with
    `/harbor:convoy new`.

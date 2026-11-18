@@ -28,6 +28,13 @@ work between accounts.
 session's title to the one it prints (`set_session_title`, right away). If it says `ACCOUNT_UNKNOWN`, the account has no cap yet: tell the
 gatekeeper (`/harbor:adopt` sets it). `ACCOUNT_AT_CAP`: the account is full; ask the gatekeeper and stop.
 
+## Requirements
+
+On arming, and on any wake after `main` changed the project's `[harbor.requirements]`, run `git pull --ff-only`
+and `python3 "$H" --session <id> doctor --if-changed`. It prints one line per item; for each `missing` one send
+`msg send --to gatekeeper --kind question "account <a>: <what> is missing"` (one message for the whole list is
+fine). Configuring an account is a person's decision: never install, set or change anything yourself.
+
 ## The loop (on every wake, whatever woke it)
 
 1. **Messages.** `python3 "$H" --session <id> msg list --account <this account>`. For each queued one,

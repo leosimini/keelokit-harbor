@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Names and vocabulary
+- **Session titles read role first, then account, then project and scope**: `harbormaster · acme-a · Acme`,
+  `skipper C8 · acme-a · Acme`, `vessel C8 · acme-a · Acme · wave 1 · CARGA-001`, `dispatcher · …`,
+  `worker · …`. `harbor.py title` gains `--account` and the roles `worker` and `ex-harbormaster`. On a
+  takeover the previous holder is told the `ex-harbormaster · …` title it must carry, and the skills set every
+  title right away. The logbook lists sessions by account.
+- **No project vocabulary inside Harbor.** `import-board` knows English words only; a project adds its own in
+  `[harbor.import]` (`columns`, `states`, `coordinator`). The design document speaks of convoys, and the fleet
+  Harbor was learned on is named once, in an appendix.
+
+### The account's mailbox
+- **A fixed name**: branch and file `harbor/mailbox/<account>`, pull request `Harbor mailbox: <account>`,
+  a draft, never merged. `harbor.py account set A --mailbox-pr N` records it, the views show it, and the
+  dispatcher subscribes again on every wake.
+
+### Requirements
+- **`[harbor.requirements]`** in `state.toml` declares the tools, hosts, secret names, plugins and skills a
+  project's work needs. **`harbor.py doctor`** checks this machine against it, records the result per
+  account (once per change), and replaces the never-built `doctor --cloud`. The dispatcher runs it on arm and
+  when the list changes and sends what is missing to the gatekeeper.
+- **Running sessions are told** when `main` changed the list, `.claude/` or a lockfile since their base: merge
+  `main` and reinstall before going on.
+
 ## 0.3.1 — 2026-11-18
 
 ### Watcher
