@@ -2334,6 +2334,11 @@ def cmd_harbormaster(args) -> int:
 # harbor/inbox/<id>.toml and harbor/wanted/<id>.toml; docs/design.md, "Phase 3". The logbook stays the
 # only shared state: every write is a transaction, and its preconditions are checked again on a replay.
 
+# Claude Code kills a background command at 2 hours, and a killed command may not be started again: the account is
+# then left with no watcher until its heartbeat. The watcher must exit on its own first, with room for its last fetch.
+WATCH_CAP_MAX = 115
+
+
 def num_cfg(cfg: dict, key: str) -> float:
     v = cfg.get(key)
     if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
@@ -2685,6 +2690,10 @@ def msg_watch(args, cfg: dict, me: dict) -> int:
     cap = args.cap if args.cap is not None else num_cfg(cfg, "watch_cap_minutes")
     if poll <= 0 or cap <= 0:
         raise HarborError("USAGE", "--poll and --cap are above 0")
+    if cap > WATCH_CAP_MAX:
+        raise HarborError("CAP_TOO_LONG", f"a watch cap of {cap:g} min reaches Claude Code's 2-hour limit for a background "
+                          f"command, which kills the watcher instead of letting it exit 75; the most is {WATCH_CAP_MAX} "
+                          "(set [harbor] watch_cap_minutes or --cap lower)")
     path = f"harbor/accounts/{args.account}.toml"
 
     def arm(files, head):

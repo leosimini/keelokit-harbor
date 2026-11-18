@@ -346,6 +346,17 @@ class TestWatch(Phase3):
         self.assertEqual(res.returncode, 1)
         self.assertIn("ACCOUNT_UNKNOWN", res.stderr)
 
+    def test_a_cap_that_reaches_the_2_hour_limit_is_refused(self):
+        before = self.commits()
+        res = self.watch("--cap", "116")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("CAP_TOO_LONG", res.stderr)
+        self.assertEqual(self.commits(), before, "refused before arming")
+        state = self.b / ".keelokit/state.toml"
+        state.write_text(state.read_text().replace("[harbor]\n", "[harbor]\nwatch_cap_minutes = 120\n", 1))
+        self.assertIn("CAP_TOO_LONG", self.watch().stderr, "the setting is checked too, not only --cap")
+        self.assertEqual(self.watch("--poll", "0.2", "--cap", "0.03").returncode, 75, "--cap still wins over the setting")
+
     def test_a_failed_fetch_is_retried_not_fatal(self):
         sh(self.b, "git", "remote", "set-url", "origin", str(self.tmp / "gone.git"))
         mod = load_module()

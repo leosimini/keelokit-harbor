@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Watcher
+- **`msg watch` refuses a cap above 115 minutes** (`CAP_TOO_LONG`), from `--cap` or from `[harbor]
+  watch_cap_minutes`. Claude Code kills a background command at 2 hours, and a killed command can't be started
+  again from that turn: the account was left with no watcher until its heartbeat. Found on a fleet whose
+  hand-made watcher had no cap of its own and was killed three times in one night.
+- **`/harbor:dispatch`** says why the cap matters, and what to do when the watcher is killed anyway.
+
 ## 0.3.0 — 2026-11-17 — orchestration from the cloud
 
 Sessions of different Claude accounts can't start or message each other. Harbor now carries that work in the

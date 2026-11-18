@@ -57,6 +57,11 @@ Run it with Bash `run_in_background: true` and `timeout: 7200000`. The session w
 run the loop, then arm it again. On exit 75, arm it again at once. If it exits any other way, read its
 output, fix what it says, and arm it again; if it can't be armed, send the gatekeeper a question.
 
+Never wrap it in a command of your own without its cap, and never raise `[harbor] watch_cap_minutes` above 115
+(`msg watch` refuses it with `CAP_TOO_LONG`): a background command that reaches the 2-hour limit is killed, and
+a killed command can't be started again from that turn. If it is killed anyway, say so, run the loop once by
+hand, and leave the next arm to the heartbeat.
+
 ## The heartbeat
 
 A container can die while the session sleeps, and then no watcher runs. Set up a scheduled task of this

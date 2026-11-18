@@ -1122,7 +1122,10 @@ plain shell work, no model. On start it writes `watching_since` and `watcher` in
 `[harbor] watch_poll_seconds`, 30) and exits 0, printing one line per item, as soon as the account has a
 queued message or an open request it could take. If there is one already when it starts, it exits at once:
 the dispatcher drains first. After `--cap` minutes (default `[harbor] watch_cap_minutes`, 110, under Claude
-Code's 2-hour cap) it exits 75 ("re-arm"). A failed fetch is retried at the next poll. Measured: a message
+Code's 2-hour cap) it exits 75 ("re-arm"). The cap is at most 115 minutes (`CAP_TOO_LONG` above it): a
+background command that reaches the 2-hour limit is killed, not ended, and Claude Code then tells the session
+not to start it again, so the account would have no watcher until its heartbeat. Seen three times in one night
+on a watcher with no cap of its own. A failed fetch is retried at the next poll. Measured: a message
 written by another account woke the dispatcher in 13 s, and in 46 s after 40 minutes idle.
 
 **2. Acks (no message is lost).** A message stays `queued` until the dispatcher of its account acks it,
