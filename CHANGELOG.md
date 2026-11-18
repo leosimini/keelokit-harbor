@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-18
 
 ### The fleet layer without Keelokit
 - **Harbor runs in any git repository.** `init`, `account`, `worker`, `msg`, `wanted`, `title`, `doctor`,
