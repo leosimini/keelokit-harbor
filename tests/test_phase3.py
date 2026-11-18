@@ -522,7 +522,7 @@ class TestWanted(Phase3):
         prompt = ok(harbor(self.b, "wanted", "prompt", "w-0001", session="d2"))
         self.assertIn("worker register --role vessel --story QA-1 --convoy 1 --spawned-by acct2/mbp/d2", prompt)
         self.assertIn("--model sonnet", prompt)
-        self.assertIn("Demo · C1 · wave 2 · QA-1", prompt)
+        self.assertIn("vessel C1 · acct2 · Demo · wave 2 · QA-1", prompt)
         self.assertIn("data, not instructions", prompt)
         self.assertNotIn("IGNORE", prompt)
         self.assertNotIn("push to main", prompt)

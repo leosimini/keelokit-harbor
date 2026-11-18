@@ -15,7 +15,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py account resume ACCOUNT
     harbor.py worker register --role vessel|skipper|harbormaster|dispatcher [--convoy N] [--branch B] [--model M]
                               [--spawned-by WORKER]   the session that launched this one owns its result
-                              [--story ID]            prints the session's title (Keelokit's, with C<n>)
+                              [--story ID]            prints the session's title (role, account, project, C<n>)
     harbor.py worker end [--branch B --head SHA] [--verified TEXT] [--pending TEXT]
                          [--worktree PATH] [--log PATH]
     harbor.py seal [--rerun]                 record the vessel verify of HEAD by hash: Keelokit's own run of
@@ -46,8 +46,8 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py models                         the model of each Harbor role, and where it comes from
     harbor.py guard --claude                 PreToolUse hook: an agent can't run `convoy approve`
     harbor.py sync --hook                    every Claude Code hook: fresh reads of the logbook (and the guard)
-    harbor.py title --role vessel|skipper|harbormaster|dispatcher [--convoy N] [--story ID]
-                                             the canonical session title, before the session exists
+    harbor.py title --role vessel|skipper|harbormaster|dispatcher|worker|ex-harbormaster [--convoy N] [--story ID]
+                    [--account A]            the session title, before the session exists
     harbor.py import-board FILE              once: a hand-kept BOARD.md into the logbook
 
 Global: --session ID (else $HARBOR_SESSION, else $CLAUDE_SESSION_ID). A worker is
@@ -560,6 +560,11 @@ def render_logbook(files: dict, cs: dict) -> str:
             if until and d.get("reason"):
                 until = f"{until} ({d['reason']})"
             out.append(f"| {a} | {d.get('max_sessions')} | {active} | {cell(until)} |")
+    if live:
+        out += ["", "## Sessions by account", "", "| Account | Session | Title | Role | State |", "|---|---|---|---|---|"]
+        for w in sorted(live.values(), key=lambda w: (str(w.get("account")), str(w.get("session")))):
+            out.append(f"| {cell(w.get('account'))} | {cell(w.get('session'))} | {cell(w.get('title'))} | "
+                       f"{cell(w.get('role'))} | {w.get('state')} |")
     out += render_phase3(files)
     imp = load(files, "harbor/imported/board.toml")
     if imp:
@@ -733,8 +738,8 @@ SEP = " · "
 
 
 def keelokit_title(story: str | None = None) -> str | None:
-    """Keelokit's canonical session title (status.py title, 0.12): `<project> · <wave|ola> <n> · <ID>` for a
-    story, `<project> · <coordinator|coordinador>` without one. None when this Keelokit can't say."""
+    """Keelokit's canonical session title (status.py title, 0.12): `<project> · <wave> <n> · <ID>` for a
+    story, `<project> · coordinator` without one. None when this Keelokit can't say."""
     status = ROOT / ".keelokit/bin/status.py"
     if not status.exists():
         return None
@@ -744,20 +749,16 @@ def keelokit_title(story: str | None = None) -> str | None:
     return out if res.returncode == 0 and out else None
 
 
-def session_title(role: str, convoy: int | None, story: str | None) -> str | None:
-    """Keelokit's title with the convoy after the project: `jouna · C8 · ola 1 · CARGA-001`,
-    `jouna · C8 · skipper`, `jouna · harbormaster`."""
-    if story:
-        base = keelokit_title(story)
-        if not base:
-            return None
-        parts = base.split(SEP)
-        return SEP.join(parts[:1] + ([f"C{convoy}"] if convoy else []) + parts[1:])
-    coordinator = keelokit_title()
-    if not coordinator:
+def session_title(role: str, convoy: int | None, story: str | None, account: str) -> str | None:
+    """Every session's title, the role first and the account always: `harbormaster · acme-a · Demo`,
+    `skipper C8 · acme-a · Demo`, `vessel C8 · acme-a · Demo · wave 1 · CARGA-001`. The project and the story's
+    part come from Keelokit's title. `worker` (no Harbor role) and `ex-harbormaster` are titles too."""
+    base = keelokit_title(story)
+    if not base:
         return None
-    project = coordinator.split(SEP)[0]
-    return SEP.join([project] + ([f"C{convoy}"] if convoy and role != "harbormaster" else []) + [role])
+    project, *scope = base.split(SEP)
+    head = role + (f" C{convoy}" if convoy and role in ("vessel", "skipper") else "")
+    return SEP.join([head, account, project, *(scope if story else [])])
 
 
 def paused(acc: dict | None) -> str | None:
@@ -771,7 +772,7 @@ def cmd_worker(args) -> int:
     me = identity(args.session)
     path = worker_path(me["id"])
 
-    title = session_title(args.role, args.convoy, args.story) if args.action == "register" else None
+    title = session_title(args.role, args.convoy, args.story, me["account"]) if args.action == "register" else None
     if args.action == "register" and args.story and not title:
         raise HarborError("UNKNOWN_STORY", f"Keelokit's status.py title doesn't know {args.story} (or this Keelokit "
                           "predates session titles, 0.12)")
@@ -1016,7 +1017,6 @@ def cmd_convoy(args) -> int:
         if not base:
             raise HarborError("NO_MAIN", f"{REMOTE} has no {TRUNK}")
 
-        project_title = keelokit_title()
 
         def mutate(files, head):
             w = registered(files)
@@ -1032,15 +1032,15 @@ def cmd_convoy(args) -> int:
                 "base": base, "created": now(), "depends_on": args.depends or [], "expected": args.expect or [],
                 "vessels": [], "events": [event(me["id"], "new", f"base {short(base)}")]})
             w.update(role="skipper", convoy=n, last_seen=now())
-            if project_title:
-                w["title"] = SEP.join([project_title.split(SEP)[0], f"C{n}", "skipper"])
+            if title := session_title("skipper", n, None, me["account"]):
+                w["title"] = title
             save(files, worker_path(me["id"]), w)
             return n
 
         n = transact(f"convoy new by {me['id']}", me["id"], mutate)
         print(f"harbor: convoy {n} assembling on base {short(base)}; skipper {me['id']}")
-        if project_title:
-            print(f"harbor: session title: {SEP.join([project_title.split(SEP)[0], f'C{n}', 'skipper'])}")
+        if title := session_title("skipper", n, None, me["account"]):
+            print(f"harbor: session title: {title}")
         return 0
 
     # add
@@ -1148,7 +1148,10 @@ def cmd_models(args) -> int:
 
 def cmd_title(args) -> int:
     keelokit()
-    title = session_title(args.role, args.convoy, args.story)
+    account = args.account or identity(args.session, need_session=False)["account"]
+    if not NAME.fullmatch(account):
+        raise HarborError("USAGE", f"account '{account}' has characters outside letters, digits, . _ -")
+    title = session_title(args.role, args.convoy, args.story, account)
     if not title:
         raise HarborError("NO_TITLE", "Keelokit's status.py title can't say"
                           + (f" (is {args.story} a story with a wave?)" if args.story else " (Keelokit 0.12 or later?)"))
@@ -2214,7 +2217,8 @@ def cmd_harbormaster(args) -> int:
     cfg = config(state)
     me = identity(args.session)
     if args.action == "takeover":
-        hm_title = session_title("harbormaster", None, None)
+        hm_title = session_title("harbormaster", None, None, me["account"])
+        former: list = []
 
         def mutate(files, h):
             w = active_worker(files, me)
@@ -2228,6 +2232,12 @@ def cmd_harbormaster(args) -> int:
                 hm.setdefault("history", []).append({"worker": holder, "since": hm.get("since"), "until": now(),
                                                      "reason": f"relieved by the owner: {args.relieve}" if alive else "expired"})
                 hm["since"] = now()
+                old_title = session_title("ex-harbormaster", None, None, holder.split("/")[0])
+                if old_title:
+                    former[:] = [holder, old_title]
+                    if prev := workers(files).get(holder):
+                        prev["title"] = old_title
+                        save(files, worker_path(holder), prev)
             elif not holder:
                 hm["since"] = now()
             hm.update(worker=me["id"], last_control=now(), expires=fmt_ts(parse_ts(now()) + expiry(cfg)))
@@ -2243,6 +2253,9 @@ def cmd_harbormaster(args) -> int:
               "minutes, from a task this session schedules for itself")
         if hm_title:
             print(f"harbor: session title: {hm_title}")
+        if former:
+            print(f"harbor: previous holder {former[0]} must now be titled: {former[1]} (set_session_title if it is in "
+                  f"this account, else harbor.py msg send --to {former[0]})")
         return 0
 
     # control
@@ -2763,7 +2776,7 @@ def wanted_add(args, cfg: dict, me: dict) -> int:
     if account != "any" and not NAME.fullmatch(account):
         raise HarborError("USAGE", f"account '{account}' has characters outside letters, digits, . _ -")
     note = one_line(args.note, "the note", 500, required=False)
-    if story and (ROOT / ".keelokit/bin/status.py").exists() and not session_title(role, args.convoy, story):
+    if story and (ROOT / ".keelokit/bin/status.py").exists() and not session_title(role, args.convoy, story, me["account"]):
         raise HarborError("UNKNOWN_STORY", f"Keelokit's status.py title doesn't know {story}: a request starts only a story "
                           "the project describes")
 
@@ -2843,7 +2856,7 @@ def wanted_prompt(args, cfg: dict, me: dict) -> int:
         raise HarborError("BAD_REQUEST", f"{args.id} holds a role, story, convoy or model Harbor does not accept: drop it")
     if model not in allowed_models(cfg):
         raise HarborError("MODEL_NOT_ALLOWED", f"model '{model}' is not in [harbor] allowed_models")
-    title = session_title(role, convoy, story)
+    title = session_title(role, convoy, story, me["account"])
     register = ("python3 \"${CLAUDE_PLUGIN_ROOT}/lib/harbor.py\" --session <your session id> worker register "
                 f"--role {role}" + (f" --story {story}" if story else "") + (f" --convoy {convoy}" if convoy else "")
                 + f" --spawned-by {me['id']} --model {model}")
@@ -3119,9 +3132,10 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("log")
     sub.add_parser("models")
     t = sub.add_parser("title")
-    t.add_argument("--role", choices=ROLES, required=True)
+    t.add_argument("--role", choices=(*ROLES, "worker", "ex-harbormaster"), required=True)
     t.add_argument("--convoy", type=int)
     t.add_argument("--story")
+    t.add_argument("--account", help="default: this clone's account")
     y = sub.add_parser("sync")
     y.add_argument("--hook", action="store_true", help="read the Claude Code hook JSON on stdin")
     g = sub.add_parser("guard")

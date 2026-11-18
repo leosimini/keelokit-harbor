@@ -214,24 +214,42 @@ class TestTitles(Phase2):
 
     def test_each_role_gets_keelokits_title_with_the_convoy(self):
         out = ok(harbor(self.a, "harbormaster", "takeover"))
-        self.assertIn("session title: Demo · harbormaster", out)
+        self.assertIn("session title: harbormaster · acct1 · Demo", out)
         ok(harbor(self.a, "worker", "register", "--role", "skipper", session="sk"))
         out = ok(harbor(self.a, "convoy", "new", session="sk"))
-        self.assertIn("session title: Demo · C1 · skipper", out)
+        self.assertIn("session title: skipper C1 · acct1 · Demo", out)
         out = ok(harbor(self.a, "worker", "register", "--role", "vessel", "--convoy", "1", "--story", "QA-1",
                         "--spawned-by", "acct1/mbp/sk", "--branch", "claude/keen-x", session="v1"))
-        self.assertIn("session title: Demo · C1 · wave 2 · QA-1", out)
+        self.assertIn("session title: vessel C1 · acct1 · Demo · wave 2 · QA-1", out)
         w = self.repo.log_toml("harbor/workers/acct1/mbp/v1.toml")
-        self.assertEqual((w["title"], w["story"], w["canonical_branch"]), ("Demo · C1 · wave 2 · QA-1", "QA-1", "qa-1"))
+        self.assertEqual((w["title"], w["story"], w["canonical_branch"]), ("vessel C1 · acct1 · Demo · wave 2 · QA-1", "QA-1", "qa-1"))
         view = self.repo.log_files()["harbor/LOGBOOK.md"]
-        self.assertIn("| Demo · C1 · skipper | acct1/mbp/sk |", view)
-        self.assertIn("| ↳ Demo · C1 · wave 2 · QA-1 | acct1/mbp/v1 | vessel | claude/keen-x (qa-1) |", view)
+        self.assertIn("| skipper C1 · acct1 · Demo | acct1/mbp/sk |", view)
+        self.assertIn("| ↳ vessel C1 · acct1 · Demo · wave 2 · QA-1 | acct1/mbp/v1 | vessel | claude/keen-x (qa-1) |", view)
 
     def test_the_title_before_the_session_exists(self):
         self.assertEqual(ok(harbor(self.a, "title", "--role", "vessel", "--convoy", "3", "--story", "QA-3")).strip(),
-                         "Demo · C3 · wave 2 · QA-3")
-        self.assertEqual(ok(harbor(self.a, "title", "--role", "harbormaster")).strip(), "Demo · harbormaster")
+                         "vessel C3 · acct1 · Demo · wave 2 · QA-3")
+        self.assertEqual(ok(harbor(self.a, "title", "--role", "harbormaster")).strip(), "harbormaster · acct1 · Demo")
         self.assertIn("NO_TITLE", harbor(self.a, "title", "--role", "vessel", "--story", "NOPE-1").stderr)
+
+    def test_the_role_comes_first_and_the_account_always(self):
+        t = lambda *a: ok(harbor(self.a, "title", *a)).strip()  # noqa: E731
+        self.assertEqual(t("--role", "dispatcher"), "dispatcher · acct1 · Demo")
+        self.assertEqual(t("--role", "worker", "--account", "acct9"), "worker · acct9 · Demo")
+        self.assertEqual(t("--role", "skipper", "--convoy", "8"), "skipper C8 · acct1 · Demo")
+        self.assertIn("USAGE", harbor(self.a, "title", "--role", "worker", "--account", "a b").stderr)
+
+    def test_a_takeover_retitles_the_previous_holder_and_the_view_lists_sessions_by_account(self):
+        ok(harbor(self.a, "worker", "register", "--role", "skipper", session="new"))
+        ok(harbor(self.a, "harbormaster", "takeover"))
+        out = ok(harbor(self.a, "harbormaster", "takeover", "--relieve", "the owner said so", session="new"))
+        self.assertIn("harbormaster · acct1 · Demo", out)
+        self.assertIn("previous holder acct1/mbp/s1 must now be titled: ex-harbormaster · acct1 · Demo", out)
+        self.assertEqual(self.repo.log_toml("harbor/workers/acct1/mbp/s1.toml")["title"], "ex-harbormaster · acct1 · Demo")
+        view = self.repo.log_files()["harbor/LOGBOOK.md"]
+        self.assertIn("## Sessions by account", view)
+        self.assertIn("| acct1 | new | harbormaster · acct1 · Demo | harbormaster | active |", view)
 
     def test_an_unknown_story_is_refused(self):
         res = harbor(self.a, "worker", "register", "--role", "vessel", "--story", "NOPE-1", session="v1")
