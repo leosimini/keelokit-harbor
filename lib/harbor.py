@@ -103,7 +103,7 @@ DEFAULTS = {
     # Keelokit's verify against origin/main, as build-story runs it under the convoy policy: a plain run (not
     # --since) leaves a seal and counts as green for shared seals; --keep-going lists every red in one run.
     "vessel_verify": "pnpm verify --keep-going",
-    # JOUNA's values (survey 5.3): a control at least every 90 minutes, relief after 3 hours.
+    # Values from the first fleet it ran on (survey 5.3): a control at least every 90 minutes, relief after 3 hours.
     "control_every_minutes": 90,
     "watch_expiry_minutes": 180,
     "convoy_preflight": "pnpm verify --preflight",
@@ -345,6 +345,7 @@ def config(state: dict) -> dict:
     key = "gatekeeper_ok" if "gatekeeper_ok" in harbor else "person_ok" if "person_ok" in harbor else "gatekeeper_ok"
     cfg["gatekeeper_ok"], cfg["gatekeeper_ok_key"] = harbor.get(key, DEFAULTS["gatekeeper_ok"]), key
     cfg.pop("person_ok", None)
+    cfg["import"] = harbor.get("import") if isinstance(harbor.get("import"), dict) else {}
     cfg["migrations"] = list((harbor.get("migrations") or {}).get("paths") or DEFAULT_MIGRATIONS)
     return cfg
 
@@ -2897,12 +2898,33 @@ def wanted_drop(args, cfg: dict, me: dict) -> int:
 
 # --- one-time import of a hand-kept board -------------------------------------------------------
 
-BOARD_STATES = [("armando", "assembling"), ("assembling", "assembling"), ("esperando", "waiting"), ("waiting", "waiting"),
-                ("listo", "ready"), ("ready", "ready"), ("verificando", "verifying"), ("verifying", "verifying"),
-                ("en main", "sailed"), ("on main", "sailed"), ("sailed", "sailed"), ("abortado", "aborted"),
-                ("cancelado", "aborted"), ("aborted", "aborted")]
-COLS = {"number": ("tren", "train", "convoy", "#", "n", "numero"), "skipper": ("jefe", "jefa", "skipper", "chief", "conductor"),
-        "branch": ("rama", "branch"), "state": ("estado", "state"), "handoff": ("handoff", "enlace", "link")}
+BOARD_STATES = [("assembling", "assembling"), ("waiting", "waiting"), ("ready", "ready"), ("verifying", "verifying"),
+                ("on main", "sailed"), ("sailed", "sailed"), ("aborted", "aborted")]
+COLS = {"number": ("convoy", "#", "n", "number"), "skipper": ("skipper", "chief"), "branch": ("branch",),
+        "state": ("state",), "handoff": ("handoff", "link")}
+# A project adds the words its board uses in state.toml; the defaults are English only:
+#   [harbor.import]
+#   columns = { number = ["train"], skipper = ["lead"] }      # header names, per column above
+#   states = { sailed = ["landed"] }                            # words of the state column, per state
+#   coordinator = ["coordinates"]                               # the word before the coordinator line
+
+
+def import_words(cfg: dict) -> dict:
+    """[harbor.import] checked: tables of word lists, lower-cased and without accents like the board's own text."""
+    imp = cfg.get("import") or {}
+    out = {"columns": {}, "states": {}, "coordinator": []}
+    for key, allowed in (("columns", COLS), ("states", {v for _, v in BOARD_STATES})):
+        table = imp.get(key, {})
+        if not isinstance(table, dict) or any(k not in allowed or not isinstance(v, list) or not all(isinstance(x, str) for x in v)
+                                              for k, v in table.items()):
+            raise HarborError("BAD_CONFIG", f"[harbor.import] {key} in .keelokit/state.toml: a table of word lists, "
+                              f"one of {', '.join(sorted(allowed))} each")
+        out[key] = {k: [plain(x) for x in v] for k, v in table.items()}
+    co = imp.get("coordinator", [])
+    if not isinstance(co, list) or not all(isinstance(x, str) for x in co):
+        raise HarborError("BAD_CONFIG", "[harbor.import] coordinator in .keelokit/state.toml: a list of words")
+    out["coordinator"] = [x for x in co if x.strip()]
+    return out
 
 
 def plain(s: str) -> str:
@@ -2923,36 +2945,40 @@ def board_tables(text: str) -> list[list[list[str]]]:
     return tables
 
 
-def parse_board(text: str) -> tuple[list[dict], list[str], str | None]:
+def parse_board(text: str, words: dict | None = None) -> tuple[list[dict], list[str], str | None]:
+    words = words or {"columns": {}, "states": {}, "coordinator": []}
+    states = BOARD_STATES + [(w, st) for st, ws in words["states"].items() for w in ws]
     rows, skipped = [], []
     for table in board_tables(text):
         header = [plain(h) for h in table[0]]
-        idx = {k: next((i for i, h in enumerate(header) if h in names), None) for k, names in COLS.items()}
+        idx = {k: next((i for i, h in enumerate(header) if h in (*names, *words["columns"].get(k, ()))), None)
+               for k, names in COLS.items()}
         if idx["number"] is None or idx["state"] is None:
             continue
         for r in table[1:]:
             get = (lambda k: r[idx[k]] if idx[k] is not None and idx[k] < len(r) else "")
             num = re.search(r"\d+", get("number"))
-            st = next((v for k, v in BOARD_STATES if k in plain(get("state"))), None)
+            st = next((v for k, v in states if k in plain(get("state"))), None)
             if not num or not st:
                 skipped.append(" | ".join(r))
                 continue
             rows.append({"number": int(num.group()), "state": st, "skipper": get("skipper").strip("` ") or None,
                          "branch": (re.findall(r"`([^`]+)`", get("branch")) or [get("branch").strip()])[0] or None,
                          "handoff": get("handoff") or None, "row": " | ".join(r)})
-    m = re.search(r"coordina[^:\n]*:\s*(.+)", text, re.IGNORECASE)
+    lead = "|".join(re.escape(w) for w in ["coordinator", *words["coordinator"]])
+    m = re.search(rf"(?:{lead})[^:\n]*:\s*(.+)", text, re.IGNORECASE)
     return rows, skipped, (m.group(1).strip() if m else None)
 
 
 def cmd_import_board(args) -> int:
-    keelokit()
+    cfg = config(keelokit())
     me = identity(args.session, need_session=False)
     src = Path(args.file)
     try:
         text = src.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         raise HarborError("USAGE", f"can't read {src}: {e}")
-    rows, skipped, coordinator = parse_board(text)
+    rows, skipped, coordinator = parse_board(text, import_words(cfg))
 
     def mutate(files, head):
         if "harbor/imported/BOARD.md" in files:

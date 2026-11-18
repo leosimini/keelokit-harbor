@@ -637,7 +637,38 @@ class TestConvoy(Base):
         self.assertFalse([p for p in tree if p.startswith(("harbor/", "convoys/")) or p == "LOGBOOK.md"])
 
 
+IMPORT_WORDS = """
+[harbor.import]
+columns = { number = ["tren"], skipper = ["jefe"], branch = ["rama"], state = ["estado"], handoff = ["enlace"] }
+states = { assembling = ["armando"], waiting = ["esperando"], ready = ["listo"], verifying = ["verificando"], sailed = ["en main"] }
+coordinator = ["coordina"]
+"""
+
+
 class TestImportBoard(Base):
+    def setUp(self):
+        super().setUp()
+        with open(self.a / ".keelokit/state.toml", "a") as f:
+            f.write(IMPORT_WORDS)
+
+    def test_without_the_projects_words_a_foreign_board_imports_nothing(self):
+        ok(harbor(self.a, "init"))
+        (self.a / ".keelokit/state.toml").write_text(STATE.format(verify="true"))
+        board = self.tmp / "BOARD.md"
+        board.write_text(BOARD)
+        self.assertIn("imported 0 convoy(s)", ok(harbor(self.a, "import-board", str(board))))
+
+    def test_english_defaults_and_a_bad_import_table(self):
+        ok(harbor(self.a, "init"))
+        (self.a / ".keelokit/state.toml").write_text(STATE.format(verify="true"))
+        board = self.tmp / "BOARD.md"
+        board.write_text("coordinator: boss\n\n| Convoy | Skipper | Branch | State |\n|---|---|---|---|\n"
+                         "| 3 | s3 | `convoy/3` | on main |\n")
+        self.assertIn("imported 1 convoy(s) from BOARD.md: 3", ok(harbor(self.a, "import-board", str(board))))
+        with open(self.a / ".keelokit/state.toml", "a") as f:
+            f.write('[harbor.import]\ncolumns = { number = "tren" }\n')
+        self.assertIn("BAD_CONFIG", harbor(self.a, "import-board", str(board)).stderr)
+
     def test_imports_numbered_trains_once(self):
         ok(harbor(self.a, "init"))
         board = self.tmp / "BOARD.md"
