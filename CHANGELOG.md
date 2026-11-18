@@ -20,6 +20,19 @@
   the hooks, messages name the config file in use, `[harbor] project` must be one line of at most 60
   characters, `worker register --story` says `NEEDS_KEELOKIT`, a worktree reads the main checkout's identity,
   and a Keelokit repo never falls back to `.harbor/local.toml`.
+- **Round-2 review fixes.** `push-guard` also says «fetch first» when the remote's tip is known but not in
+  what you push (a sibling fetched it meanwhile), so the write is retried instead of failing. The logbook
+  check falls back to the local trunk branch, then Harbor's copy, and with no trunk at all only the tree
+  check applies (a repo whose `main` was never pushed can `init`); the mailbox still needs `origin/<trunk>`
+  and says to push or fetch it. `init` no longer glues `.harbor/local.toml` onto a `.gitignore` without a
+  final newline, edits it only when git says the file is not ignored and only after the logbook was
+  created, and creates `.harbor/config.toml` (`[harbor]`) if missing: commit it so other clones see the
+  project. SessionStart tells a clone that has `origin/harbor/log` but no `.harbor/` or `.keelokit/`. A
+  worktree reads the main checkout's identity only for a plain `.git` checkout. `[harbor] project` is
+  trimmed and empty means the directory's name. A write pauses briefly between push attempts and retries a
+  fetch that cannot lock the ref. The `convoy approve` guard also catches quoted words (`convoy "approve"`).
+  **Behaviour change in Keelokit repos:** the committed-identity check covers `.keelokit/local.toml` too:
+  with it tracked, `init` is refused and `doctor` exits 1.
 - **`harbor.py push-guard`** lets a project's own pre-push hook accept the logbook and the mailboxes: exit 0
   sound, 1 unsound, 3 not a Harbor ref.
 

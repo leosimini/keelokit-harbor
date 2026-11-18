@@ -127,18 +127,21 @@ class Fleet(Plain):
         self.assertIn("missing: tools no-such-tool-xyz", res.stdout)
 
     def test_the_hooks_work_and_a_repo_with_neither_directory_stays_quiet(self):
+        bare = self.tmp / "bare"
+        sh(self.tmp, "git", "clone", "--quiet", str(self.remote), str(bare))
+        res = self.hook(bare)  # no logbook on the remote yet
+        self.assertEqual((res.stdout, res.returncode), ("", 0))
         self.ready()
         res = self.hook(self.a)
         self.assertIn("logbook @", res.stdout)
         self.assertIn("this session is acct1/mbp/sess", res.stdout)
-        bare = self.tmp / "bare"
-        sh(self.tmp, "git", "clone", "--quiet", str(self.remote), str(bare))
-        res = self.hook(bare)
-        self.assertEqual((res.stdout, res.returncode), ("", 0))
 
     def test_the_approve_guard_runs_on_any_input_whatever_repo_the_session_is_rooted_in(self):
         for command in ("harbor.py convoy approve 3", f"cd {self.tmp} && harbor.py convoy approve 3",
                         f"git -C {self.tmp} status && python3 x/harbor.py convoy approve 3"):
+            res = self.hook(self.a, "PreToolUse", tool_name="Bash", tool_input={"command": command})
+            self.assertEqual(res.returncode, 2, command)
+        for command in ('harbor.py convoy "approve" 3', "harbor.py convoy 'approve' 3"):
             res = self.hook(self.a, "PreToolUse", tool_name="Bash", tool_input={"command": command})
             self.assertEqual(res.returncode, 2, command)
         (self.a / ".keelokit").mkdir()
@@ -178,6 +181,48 @@ class Fleet(Plain):
         sh(self.a, "git", "worktree", "add", "--quiet", "-b", "side", str(wt))
         self.assertFalse((wt / ".harbor/local.toml").exists())
         self.assertEqual(ok(harbor(wt, "title", "--role", "dispatcher")).strip(), "dispatcher · acct1 · a")
+
+    def test_init_gitignore_edit_keeps_a_file_without_a_final_newline_and_adds_the_marker(self):
+        (self.a / ".gitignore").write_text("node_modules")
+        ok(harbor(self.a, "init"))
+        self.assertEqual((self.a / ".gitignore").read_text().splitlines(), ["node_modules", ".harbor/local.toml"])
+        self.assertEqual((self.a / ".harbor/config.toml").read_text().strip(), "[harbor]")
+
+    def test_a_clone_that_never_ran_init_hears_about_an_adopted_repo(self):
+        ok(harbor(self.a, "init"))
+        bare = self.tmp / "bare"
+        sh(self.tmp, "git", "clone", "--quiet", str(self.remote), str(bare))
+        res = self.hook(bare)
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("harbor/log", res.stdout)
+
+    def test_a_worktree_identity_fallback_needs_a_plain_main_checkout(self):
+        mod = load_module()
+        mod.ROOT, mod.COMMON = self.tmp / "x", self.tmp / "elsewhere" / "a.git"
+        (self.tmp / "elsewhere/.harbor").mkdir(parents=True)
+        (self.tmp / "elsewhere/.harbor/local.toml").write_text("")
+        self.assertEqual(mod.identity_file()[1], self.tmp / "x" / ".harbor/local.toml")
+
+    def test_transact_retries_a_fetch_that_cannot_lock_the_ref(self):
+        self.ready()
+        mod = load_module()
+        mod.ROOT, mod.COMMON, mod.REMOTE = self.a, self.a / ".git", "origin"
+        real, calls = mod.fetch, []
+
+        def flaky(branch):
+            calls.append(branch)
+            if len(calls) == 1:
+                raise mod.HarborError("FETCH_FAILED", "git fetch: cannot lock ref 'refs/remotes/origin/harbor/log'")
+            return real(branch)
+        mod.fetch = flaky
+        self.assertEqual(mod.transact("noop", "acct1/mbp/s1", lambda files, head: "done"), "done")
+        self.assertEqual(len(calls), 2)
+
+    def test_the_project_name_is_trimmed_and_empty_means_the_directory(self):
+        (self.a / ".harbor/config.toml").write_text('[harbor]\nproject = "  "\n')
+        self.assertEqual(ok(harbor(self.a, "title", "--role", "dispatcher")).strip(), "dispatcher · acct1 · a")
+        (self.a / ".harbor/config.toml").write_text('[harbor]\nproject = " Shop "\n')
+        self.assertEqual(ok(harbor(self.a, "title", "--role", "dispatcher")).strip(), "dispatcher · acct1 · Shop")
 
     def test_a_keelokit_repo_does_not_fall_back_to_the_harbor_identity(self):
         (self.a / ".keelokit").mkdir()
@@ -298,12 +343,26 @@ class PushGuard(Plain):
         self.assertEqual(res.returncode, 1)
         self.assertIn("fetch first", res.stderr)
 
-    def test_the_logbook_refuses_when_no_trunk_is_found(self):
+    def test_the_logbook_falls_back_to_a_local_trunk_and_to_none_but_the_mailbox_needs_a_remote_one(self):
         sha = self.orphan({"harbor/a.toml": "x = 1\n"})
         sh(self.a, "git", "update-ref", "-d", "refs/remotes/origin/main")
-        res = self.guard("refs/heads/harbor/log", sha)
+        self.assertEqual(self.guard("refs/heads/harbor/log", sha).returncode, 0)  # local main, no shared history
+        sh(self.a, "git", "branch", "-m", "main", "other")
+        self.assertEqual(self.guard("refs/heads/harbor/log", sha).returncode, 0)  # no trunk at all
+        bad = self.orphan({"harbor/a.toml": "x = 1\n", "src/x.py": "y\n"}, name="w2")
+        res = self.guard("refs/heads/harbor/log", bad)  # the tree check still applies
         self.assertEqual(res.returncode, 1)
-        self.assertIn("can't find", res.stderr)
+        self.assertIn("only regular files under harbor/", res.stderr)
+        res = self.guard("refs/heads/harbor/mailbox/acct1", sha)
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("push main first, or fetch it", res.stderr)
+
+    def test_a_local_remote_tip_that_is_not_an_ancestor_asks_for_a_fetch(self):
+        sha = self.orphan({"harbor/a.toml": "x = 1\n"})
+        other = self.orphan({"harbor/b.toml": "x = 1\n"}, name="w2")
+        res = self.guard("refs/heads/harbor/log", sha, remote_sha=other)
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("fetch first", res.stderr)
 
     def test_a_local_trunk_branch_is_not_the_trunk(self):
         sha = self.mailbox({"harbor/mailbox/acct1.md": "hi\n"})
@@ -331,6 +390,38 @@ exit 0
 
 class InstalledHook(Plain):
     """The documented pre-push snippet, installed for real."""
+
+    def test_push_retries_when_the_hook_asks_for_a_fetch_about_a_tip_the_clone_fetched_meanwhile(self):
+        self.ready(role="dispatcher")
+        old = sh(self.a, "git", "rev-parse", "origin/harbor/log")
+        commit = sh(self.a, "git", "commit-tree", f"{old}^{{tree}}", "-p", old, "-m", "x")
+        b = self.clone("b")
+        sh(b, "git", "fetch", "--quiet", "origin")
+        ok(harbor(b, "msg", "send", "--to", "account:acct1", "from b"))
+        self.install(self.a)
+        hook = self.a / ".git/hooks/pre-push"  # a sibling process fetches between git's advertisement and the guard
+        hook.write_text(hook.read_text().replace("while read", "git fetch -q origin harbor/log:refs/remotes/origin/harbor/log\nwhile read", 1))
+        saved = {k: os.environ.get(k) for k in GIT_ENV}
+        os.environ.update(GIT_ENV)
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+                                 for k, v in saved.items()])
+        mod = load_module()
+        mod.ROOT, mod.REMOTE = self.a, "origin"
+        self.assertFalse(mod.push(commit))
+
+    def test_init_works_through_the_hook_when_the_trunk_was_never_pushed(self):
+        lone = self.tmp / "lone"
+        sh(self.tmp, "git", "init", "--quiet", "-b", "main", str(lone))
+        sh(lone, "git", "remote", "add", "origin", str(self.remote))
+        (lone / "f").write_text("x\n")
+        sh(lone, "git", "add", "-A")
+        sh(lone, "git", "commit", "--quiet", "-m", "first")
+        sh(self.tmp, "git", "init", "--quiet", "--bare", "-b", "main", str(self.tmp / "empty.git"))
+        sh(lone, "git", "remote", "set-url", "origin", str(self.tmp / "empty.git"))
+        (lone / ".harbor").mkdir()
+        (lone / ".harbor/local.toml").write_text(IDENTITY.format(a="acct1"))
+        self.install(lone)
+        ok(harbor(lone, "init"))
 
     def install(self, clone: Path, harbor_path=HARBOR):
         hook = clone / ".git/hooks/pre-push"

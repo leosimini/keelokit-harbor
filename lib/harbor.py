@@ -69,6 +69,7 @@ import fnmatch  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
+import random  # noqa: E402
 import re  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
@@ -338,7 +339,7 @@ def project(hook: bool = False) -> dict:
     harbor = state.get("harbor") if isinstance(state.get("harbor"), dict) else {}
     TRUNK = trunk_of(harbor)
     name = harbor.get("project")
-    if not has_keelokit() and name is not None and not (isinstance(name, str) and name.strip() and len(name) <= 60 and name.isprintable()):
+    if not has_keelokit() and name is not None and not (isinstance(name, str) and len(name.strip()) <= 60 and name.strip().isprintable()):
         raise HarborError("BAD_CONFIG", f"[harbor] project = {name!r} in {CONFIG_PATH}: one line of at most 60 characters")
     if not isinstance(harbor.get("own_verify", False), bool):
         raise HarborError("BAD_CONFIG", f"[harbor] own_verify = {harbor['own_verify']!r} in {CONFIG_PATH}: "
@@ -371,6 +372,10 @@ def trunk_of(harbor: dict) -> str:
 def config(state: dict) -> dict:
     cfg = {**DEFAULTS, **{k: v for k, v in (state.get("harbor") or {}).items() if not isinstance(v, dict)}}
     harbor = state.get("harbor") or {}
+    if isinstance(cfg.get("project"), str):  # one trimmed line; empty is unset (the directory's name)
+        cfg["project"] = cfg["project"].strip()
+        if not cfg["project"]:
+            del cfg["project"]
     cfg["hotspots"] = harbor.get("hotspots") or {}
     cfg["generated"] = harbor.get("generated") or {}
     cfg["models"] = harbor.get("models") or {}
@@ -389,7 +394,8 @@ def identity_file() -> tuple[str, Path]:
     A linked worktree without its own falls back to the main checkout's."""
     name = ".keelokit/local.toml" if has_keelokit() else ".harbor/local.toml"
     path = ROOT / name
-    if not path.exists() and COMMON is not None and (COMMON.parent / name).exists():
+    if not path.exists() and COMMON is not None and COMMON.name == ".git" \
+            and (COMMON.parent / ".git").resolve() == COMMON.resolve() and (COMMON.parent / name).exists():
         path = COMMON.parent / name
     return name, path
 
@@ -468,7 +474,14 @@ def transact(message: str, by: str, mutate, init: bool = False):
     the change is replayed and its preconditions checked again, never forced."""
     global BEFORE_PUSH
     for attempt in range(PUSH_ATTEMPTS):
-        head = fetch(LOG_BRANCH)
+        if attempt:
+            time.sleep(random.uniform(0.05, 0.25) * attempt)  # a small jittered pause: clones don't collide in step
+        try:
+            head = fetch(LOG_BRANCH)
+        except HarborError as e:
+            if e.code == "FETCH_FAILED" and "cannot lock ref" in e.why and attempt < PUSH_ATTEMPTS - 1:
+                continue  # a sibling process holds the ref: try again
+            raise
         if head is None and not init:
             raise HarborError("NOT_INITIALIZED", f"the remote has no {LOG_BRANCH} yet: /harbor:adopt (harbor.py init)")
         old = read_tree(head) if head else {}
@@ -694,14 +707,30 @@ def cmd_check(args) -> int:
     return session_start(session, args.session, fresh=bool(args.hook))
 
 
+def logbook_fetched() -> bool:
+    """refs/remotes/<remote>/harbor/log exists (loose or packed): two file reads, no process."""
+    if COMMON is None:
+        return False
+    ref = f"refs/remotes/{REMOTE}/{LOG_BRANCH}"
+    try:
+        if (COMMON / ref).is_file():
+            return True
+        return any(l.rstrip().endswith(" " + ref) for l in (COMMON / "packed-refs").read_text().splitlines())
+    except OSError:
+        return False
+
+
 def session_start(session: str | None, arg_session: str | None, fresh: bool) -> int:
     """The SessionStart lines. `fresh`: fetch first (the logbook only, 4 s cap) and say so; else read the last fetch."""
     try:
         state = project(hook=True)
     except HarborError as e:
-        if e.code != "NO_PROJECT":  # a repo that is not Harbor's hears nothing
+        if e.code != "NO_PROJECT":
             print(f"Harbor: {e.why}.")
-        return 0
+        elif logbook_fetched():  # adopted with `init` in another clone, config not committed yet
+            print(f"Harbor: {REMOTE}/{LOG_BRANCH} exists but this repo has no .harbor/ or .keelokit/ "
+                  "(commit .harbor/config.toml, or /harbor:adopt).")
+        return 0  # any other repo is not Harbor's and hears nothing
     cfg = config(state)
     lines = []
     try:
@@ -735,16 +764,22 @@ def session_start(session: str | None, arg_session: str | None, fresh: bool) -> 
     return 0
 
 
+def ignore_identity() -> None:
+    """Keep .harbor/local.toml out of git (only when `git check-ignore` says it is not ignored: exit 1, not an error)."""
+    if run("git", "check-ignore", "-q", ".harbor/local.toml", check=False).returncode != 1:
+        return
+    path = ROOT / ".gitignore"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    with open(path, "a", encoding="utf-8") as f:  # the identity file stays out of git
+        f.write(("\n" if text and not text.endswith("\n") else "") + ".harbor/local.toml\n")
+    print("harbor: added .harbor/local.toml to .gitignore")
+
+
 def cmd_init(args) -> int:
     project()
     if why := committed_identity():
         raise HarborError("COMMITTED_IDENTITY", why)
     me = identity(args.session, need_session=False)
-    if not has_keelokit() and run("git", "check-ignore", "-q", ".harbor/local.toml", check=False).returncode != 0:
-        with open(ROOT / ".gitignore", "a", encoding="utf-8") as f:  # the identity file stays out of git
-            f.write(".harbor/local.toml\n")
-        print("harbor: added .harbor/local.toml to .gitignore")
-
     def mutate(files, head):
         if head:
             return "exists"
@@ -753,6 +788,12 @@ def cmd_init(args) -> int:
         return "created"
 
     result = transact("init the logbook", me["id"], mutate, init=True)
+    if not has_keelokit():
+        ignore_identity()
+        if not (ROOT / ".harbor/config.toml").exists():  # the project marker other clones see; committing it is the person's
+            (ROOT / ".harbor").mkdir(exist_ok=True)
+            (ROOT / ".harbor/config.toml").write_text("[harbor]\n", encoding="utf-8")
+            print("harbor: created .harbor/config.toml; commit it so every clone knows this project")
     print(f"harbor: logbook {LOG_BRANCH} {'already existed; nothing changed' if result == 'exists' else 'created on ' + REMOTE}")
     return 0
 
@@ -1817,7 +1858,7 @@ def convoy_approve(args, cfg: dict, me: dict) -> int:
     return 0
 
 
-GUARDED = re.compile(r"\bconvoy\s+approve\b")
+GUARDED = re.compile(r"\bconvoy\W{1,6}approve\b")  # also quoted, as JSON-escaped in tool_input
 
 
 def guard_text(raw: str) -> str:
@@ -2521,6 +2562,11 @@ def trunk_ref() -> str | None:
     return next((r for r in (f"refs/remotes/{REMOTE}/{TRUNK}", TRUNK_REF) if rev(r)), None)
 
 
+def log_trunk_ref() -> str | None:
+    """The logbook may also be checked against a local trunk branch; with no trunk at all there is no history to share."""
+    return trunk_ref() or next((r for r in (f"refs/heads/{TRUNK}",) if rev(r)), None)
+
+
 def new_commits(local_sha: str, remote_sha: str) -> list[str]:
     have = [f"^{remote_sha}"] if not ZERO.fullmatch(remote_sha) and run("git", "cat-file", "-e", f"{remote_sha}^{{commit}}", check=False).returncode == 0 else []
     return git("rev-list", "--reverse", local_sha, *have).split()
@@ -2531,10 +2577,8 @@ def unsound_log(sha: str, remote_sha: str, trunk: str | None) -> str | None:
         # another clone wrote first: the caller fetches and replays (push() looks for "fetch first")
         return f"the remote's tip of {LOG_BRANCH} is unknown here: fetch first"
     if not ZERO.fullmatch(remote_sha) and not ancestor(remote_sha, sha):
-        return f"the push would drop commits of {LOG_BRANCH} (the remote's tip is not in what you push)"
-    if not trunk:
-        return f"can't find {TRUNK} to check {LOG_BRANCH} against"
-    if run("git", "merge-base", sha, trunk, check=False).stdout.strip():
+        return f"the push would drop commits of {LOG_BRANCH} (the remote's tip is not in what you push): fetch first"
+    if trunk and run("git", "merge-base", sha, trunk, check=False).stdout.strip():
         return f"{LOG_BRANCH} shares history with {TRUNK}: it is a branch of its own"
     for c in new_commits(sha, remote_sha):
         for entry in git("ls-tree", "-r", "-z", "--full-tree", c).split("\0"):
@@ -2549,7 +2593,7 @@ def unsound_log(sha: str, remote_sha: str, trunk: str | None) -> str | None:
 def unsound_mailbox(sha: str, remote_sha: str, account: str, trunk: str | None) -> str | None:
     path = f"harbor/mailbox/{account}.md"
     if not trunk:
-        return f"can't find {TRUNK} to check the mailbox against"
+        return f"can't find {REMOTE}/{TRUNK} to check the mailbox against: push {TRUNK} first, or fetch it"
     if not run("git", "merge-base", sha, trunk, check=False).stdout.strip():
         return f"the mailbox of {account} must sit on top of {TRUNK}"
     for c in git("rev-list", "--reverse", sha, f"^{trunk}", *([f"^{remote_sha}"] if rev(remote_sha) and not ZERO.fullmatch(remote_sha) else [])).split():
@@ -2575,7 +2619,7 @@ def cmd_push_guard(args) -> int:
         if ZERO.fullmatch(sha):
             why = f"{ref[len('refs/heads/'):]} is never deleted"
         elif account is None:
-            why = unsound_log(sha, args.remote_sha, trunk_ref())
+            why = unsound_log(sha, args.remote_sha, log_trunk_ref())
         elif not NAME.fullmatch(account):
             why = f"'{account}' is not an account name"
         else:

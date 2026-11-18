@@ -931,7 +931,7 @@ With Keelokit nothing changes: its files stay the source and the policy is still
   (the project in titles) and `[harbor] trunk`. It is read only when there is no `.keelokit/`; with both,
   Keelokit wins and `doctor` and `log` say `.harbor/config.toml is ignored: this project runs on Keelokit`.
 - **Identity, never committed:** `.harbor/local.toml`, `[harbor] account` and `host`, one per clone, in
-  `.gitignore` (`init` adds it when it is not ignored). A Keelokit repo reads `.keelokit/local.toml` only, no
+  `.gitignore` (`init` adds it, after the logbook exists, when git says it is not ignored; it also creates `.harbor/config.toml` if missing, for the person to commit; SessionStart in a clone with `origin/harbor/log` and neither directory says so). A Keelokit repo reads `.keelokit/local.toml` only, no
   fallback to `.harbor/local.toml`; a linked worktree without its own file uses the main checkout's. If the file
   is tracked by git every clone would share one identity: `doctor` reports it (exit 1) and `init` refuses (exit 2).
 - **Titles:** `role · account · project`, the project being `[harbor] project` or the main checkout's
@@ -951,13 +951,14 @@ Harbor's.
 
 - `refs/heads/harbor/log`: no delete; the remote's tip must be an ancestor of what is pushed (no dropped
   commits). A tip the clone does not have means another clone wrote first (git runs the hook before it finds
-  out): the refusal says «fetch first», which Harbor's own write answers by fetching and replaying; every new commit's tree holds only regular files (mode 100644) under `harbor/`; the branch shares
+  out), or a tip it has but that is not in what is pushed (a sibling fetched it meanwhile): both refuse with «fetch first», which Harbor's own write answers by fetching and replaying; every new commit's tree holds only regular files (mode 100644) under `harbor/`; the branch shares
   no history with the trunk.
 - `refs/heads/harbor/mailbox/<account>` (a valid account name): on top of the trunk, each new commit a
   single-parent commit that adds or changes exactly `harbor/mailbox/<account>.md` as a regular file; no delete.
 
-The trunk is read from `origin/<trunk>`, then Harbor's own copy of it, never the local branch; with neither the push is
-refused. Any error on a Harbor ref is exit 1, and the repository is the hook's (its working directory), never the
+The mailbox reads the trunk from `origin/<trunk>`, then Harbor's own copy of it, never the local branch; with neither the push is
+refused («push <trunk> first, or fetch it»). The logbook also tries the local trunk branch, and with no trunk at all only the tree check
+applies (a brand-new repo whose trunk was never pushed can `init`). Any error on a Harbor ref is exit 1, and the repository is the hook's (its working directory), never the
 session's `CLAUDE_PROJECT_DIR`. So the hook below refuses on any exit but 0 and 3. A bash hook:
 
 ```bash
