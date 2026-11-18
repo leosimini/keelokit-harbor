@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **A git hook finds Harbor.** Each session's SessionStart records its own `harbor.py` in `git config --local
+  harbor.py` (only when it changed), so a project's pre-push hook runs `push-guard` with `H=$(git config
+  harbor.py)` and follows plugin upgrades; `${CLAUDE_PLUGIN_ROOT}` exists only inside the plugin's own hooks. A
+  hook with no recorded path refuses Harbor's refs (any exit but 0 and 3).
+
 ## 0.5.0 — 2026-11-18
 
 ### The fleet layer without Keelokit

@@ -136,6 +136,24 @@ class Fleet(Plain):
         self.assertIn("logbook @", res.stdout)
         self.assertIn("this session is acct1/mbp/sess", res.stdout)
 
+    def test_session_start_records_harbor_py_for_git_hooks_only_in_harbor_repos(self):
+        bare = self.tmp / "bare2"
+        sh(self.tmp, "git", "clone", "--quiet", str(self.remote), str(bare))
+        self.hook(bare)
+        got = subprocess.run(["git", "config", "--local", "--get", "harbor.py"], cwd=bare, capture_output=True, text=True)
+        self.assertEqual(got.returncode, 1, "a repo that is not Harbor's gets nothing written")
+        self.ready()
+        sh(self.a, "git", "config", "--local", "harbor.py", "/old/version/lib/harbor.py")  # the plugin was upgraded
+        self.hook(self.a)
+        self.assertEqual(sh(self.a, "git", "config", "--local", "--get", "harbor.py"), str(HARBOR.resolve()))
+        hook = self.a / ".git/hooks/pre-push"  # the documented snippet, reading the recorded path
+        hook.write_text(HOOK.replace("H={harbor}", "H=$(git config harbor.py)"))
+        hook.chmod(0o755)
+        ok(harbor(self.a, "msg", "send", "--to", "account:acct1", "through the recorded path"))
+        sh(self.a, "git", "config", "--local", "--unset", "harbor.py")
+        res = harbor(self.a, "msg", "send", "--to", "account:acct1", "no recorded path")
+        self.assertNotEqual(res.returncode, 0, "with nothing recorded the hook refuses Harbor's refs")
+
     def test_the_approve_guard_runs_on_any_input_whatever_repo_the_session_is_rooted_in(self):
         for command in ("harbor.py convoy approve 3", f"cd {self.tmp} && harbor.py convoy approve 3",
                         f"git -C {self.tmp} status && python3 x/harbor.py convoy approve 3"):

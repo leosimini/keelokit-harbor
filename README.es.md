@@ -151,6 +151,7 @@ necesitan la política de convoyes de Keelokit (`/keelokit:project-adopt`) y lo 
 proyecto con su propio hook de pre-push deja pasar las escrituras de Harbor con `push-guard`:
 
 ```bash
+H=$(git config harbor.py)  # each session records the plugin's current harbor.py here
 while read l ls r rs; do
   python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
   case $c in 0) continue;; 3) ;; *) exit 1;; esac  # 3: not Harbor's ref, the project's own rules go here

@@ -962,6 +962,7 @@ applies (a brand-new repo whose trunk was never pushed can `init`). Any error on
 session's `CLAUDE_PROJECT_DIR`. So the hook below refuses on any exit but 0 and 3. A bash hook:
 
 ```bash
+H=$(git config harbor.py)  # each session records the plugin's current harbor.py here
 while read l ls r rs; do
   python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
   case $c in 0) continue;; 3) ;; *) exit 1;; esac  # 3: not Harbor's ref, the project's own rules go here

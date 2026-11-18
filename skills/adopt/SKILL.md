@@ -98,6 +98,7 @@ convoys, seals or board import. Steps:
    through (`H` is the path of `lib/harbor.py`); exit 3 means the ref is not Harbor's and the project's own rules
    go on, any other exit refuses the push:
    ```bash
+   H=$(git config harbor.py)  # each session records the plugin's current harbor.py here
    while read l ls r rs; do
      python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
      case $c in 0) continue;; 3) ;; *) exit 1;; esac  # 3: not Harbor's ref, own rules for the other refs go here

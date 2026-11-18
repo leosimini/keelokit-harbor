@@ -720,6 +720,17 @@ def logbook_fetched() -> bool:
         return False
 
 
+def record_own_path() -> None:
+    """Keep `git config --local harbor.py` on this harbor.py, so a git hook (which has no CLAUDE_PLUGIN_ROOT) finds
+    the plugin's current version. Written only when it changed; any failure is silent."""
+    here = str(Path(__file__).resolve())
+    try:
+        if run("git", "config", "--local", "--get", "harbor.py", check=False).stdout.strip() != here:
+            run("git", "config", "--local", "harbor.py", here, check=False)
+    except Exception:
+        pass
+
+
 def session_start(session: str | None, arg_session: str | None, fresh: bool) -> int:
     """The SessionStart lines. `fresh`: fetch first (the logbook only, 4 s cap) and say so; else read the last fetch."""
     try:
@@ -731,6 +742,7 @@ def session_start(session: str | None, arg_session: str | None, fresh: bool) -> 
             print(f"Harbor: {REMOTE}/{LOG_BRANCH} exists but this repo has no .harbor/ or .keelokit/ "
                   "(commit .harbor/config.toml, or /harbor:adopt).")
         return 0  # any other repo is not Harbor's and hears nothing
+    record_own_path()
     cfg = config(state)
     lines = []
     try:
