@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 — 2026-11-18
 
 - **A git hook finds Harbor.** Each session's SessionStart records its own `harbor.py` in `git config --local
   harbor.py` (only when it changed), so a project's pre-push hook runs `push-guard` with `H=$(git config
