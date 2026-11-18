@@ -66,7 +66,9 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
    project) is the person who gives the yes for critical convoys and answers what sessions can't settle.
    **Requirements.** Offer to write `[harbor.requirements]` (tools, hosts, secret names, plugins, skills the
    work needs; see `docs/design.md`, "Phase 4") from what the repository already shows: its lockfiles,
-   `.claude/skills`, its verify's tools. Only what the person confirms. `harbor.py doctor` checks it.
+   `.claude/skills`, its verify's tools. Only what the person confirms. `harbor.py doctor` checks it. A key
+   a cloud session injects at the proxy is never an environment variable: list it under `network_secrets`
+   (reported `can't check`), not `secrets` (a `missing` env secret there is a false alarm).
 8. **Report** in ten lines: the policy commit's hash on the trunk (`origin/main`), the logbook's tip
    (`git rev-parse origin/harbor/log`), the cap, the hotspots, the import. Then: start convoys with
    `/harbor:convoy new`.

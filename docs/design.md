@@ -114,7 +114,7 @@ paths = ["apps/*/prisma/migrations", "*/migrations", "db/migrations"]
 ```
 
 The example hotspots are the first fleet's measured bottlenecks (§2.12); a project declares its own.
-Harbor ships no default hotspot list: that §2.12's contention generalises is an **INDICIO** at best.
+Harbor ships no default hotspot list: that §2.12's contention generalises is **EVIDENCE** at best.
 
 **The trunk.** This document says `main` for the branch convoys land on. It is `[harbor] trunk`:
 `main` unless the project names another, as one does whose `main` is production and deploys on every
@@ -258,14 +258,14 @@ last_seen = "2026-11-01T15:02:00Z"   # every write by this worker
 state = "ended"                  # active | ended | lost (2: set by the harbormaster's control)
 ended = "2026-11-01T16:48:00Z"
 spawned_by = "acct1/mbp/session_01Sk"   # the session that launched this one, and owns its result
-title = "vessel C8 · acme-a · Acme · wave 1 · CARGA-001"   # (3) the session title (see "Names")
+title = "vessel C8 · acme-a · Acme · wave 1 · STORY-001"   # (3) the session title (see "Names")
 canonical_branch = "carga-001"   # (3) the story id in lower case; `branch` is the one the session really uses
 children_at_end = ["acct1/mbp/session_01Ve"]   # sessions it launched that were still running when it ended
 
 [handover]                       # on a budget cut or any early end (R22)
 branch = "claude/carga-001"
 head = "4d44fdd8…"              # checked equal to origin/<branch>: only pushed work is handed over
-verified = "seal of 4d44fdd8 green; doctor --scope CARGA-001 green"
+verified = "seal of 4d44fdd8 green; doctor --scope STORY-001 green"
 pending = "screenshots of S3; reviewer round 2"
 worktree = "../app-carga-001"
 log = "/tmp/verify-carga-001.log"
@@ -276,7 +276,7 @@ log = "/tmp/verify-carga-001.log"
 ```toml
 schema = 1
 number = 8
-title = "CARGA wave 1"
+title = "STORY wave 1"
 state = "verifying"              # assembling | waiting | ready | verifying | sailed | aborted
 branch = "convoy/8"
 skipper = "acct1/mbp/session_01Abc"
@@ -285,7 +285,7 @@ base = "a2becf56d…"              # origin/main at new; (2) the main last merge
 head = "60099ef60…"              # (2) tip of convoy/<n> after the last assembly or fix
 created = "2026-10-31T19:51:00Z"
 depends_on = [7]                 # convoys that must sail first (R15)
-expected = ["CARGA-000", "CARGA-001", "CARGA-003"]
+expected = ["STORY-000", "STORY-001", "STORY-003"]
 
 [ok]                             # (2) the harbormaster's ok (R19)
 by = "ana/linux/session_02Ab"
@@ -312,7 +312,7 @@ ci = "green"                     # (2) recorded by the next control from ci.py h
 [[vessels]]
 branch = "claude/carga-001"
 head = "4d44fdd8…"               # the delivered commit; the remote tip must still be it
-story = "CARGA-001"              # --story, else the Story: trailers of its commits
+story = "STORY-001"              # --story, else the Story: trailers of its commits
 tier = "full"                    # as the vessel session chose it (Keelokit's tier)
 hotspots = ["schema"]            # computed from its diff against main and [harbor.hotspots]
 seal_base = "a2becf56d…"         # the main its vessel verify ran against
@@ -449,7 +449,7 @@ has a convoy number column and a state column, maps *assembling / waiting / read
 main* to the states below, and skips rows without a number. It knows English words only (the columns
 `convoy`, `#`, `n`, `number`, `skipper`, `branch`, `state`, `handoff`); a project whose board uses other
 words adds them in `state.toml`: `[harbor.import] columns = { number = ["…"], skipper = ["…"] }`, `states =
-{ sailed = ["…"] }` and `coordinator = ["…"]`. **Assumption:** the column layout of the board is known
+{ sailed = ["…"] }` and `coordinator = ["…"]`; an empty word is `BAD_CONFIG` (it would match every row). **Assumption:** the column layout of the board is known
 only from a description (§5.1); the tests use a board written from that description, not a real file.
 
 ## Life of a convoy
@@ -647,7 +647,7 @@ push wins because the replay rechecks the expiry (R20, §5.3). The harbormaster 
 the CI after a sail, notices loose pushes and lost workers; it never integrates unless it is also
 an integrator. What the harbormaster does not see (a session's local verify lock, its
 `.verify-status`) it learns only from logbook events (§5.6). The first fleet ran its coordinator on Opus
-(§3.4); that this was intended is a **HIPÓTESIS**, so Harbor's default is Sonnet, with
+(§3.4); that this was intended is a **HYPOTHESIS**, so Harbor's default is Sonnet, with
 `[harbor.models] harbormaster` to change it.
 
 ## Keelokit's pre-push and Harbor's pushes
@@ -672,7 +672,14 @@ commit that isn't the one checked out (checked with `scripts/test-with-keelokit.
 A session used to see the logbook only at SessionStart, from the last fetch, or when it ran a Harbor
 command, and decided on stale state. `harbor.py sync --hook` reads the hook JSON on stdin and keeps a
 per-clone file `<git-common-dir>/harbor/seen/<session>.json` (`tip`, `fetched_epoch`; `-` without a
-session id). Every fetch has a 5 s cap and `GIT_TERMINAL_PROMPT=0`.
+session id). Every fetch has a cap and `GIT_TERMINAL_PROMPT=0`, `--no-recurse-submodules`, and git's
+background `gc` and maintenance off. The logbook is fetched first, on its own 4 s cap; the trunk (only by the
+hooks that tell what the trunk changed: UserPromptSubmit and PostToolUse) comes after, best-effort, on a 3 s
+cap that is never started later than 7.5 s into the hook, so a hook ends well under its 10 s timeout and a
+slow trunk can never cost the logbook. The trunk goes to Harbor's own ref `refs/harbor/trunk`, never to
+`refs/remotes/<remote>/<trunk>` (`--refmap=` keeps git from updating it on the side): a hook that moved the
+session's own `origin/main` would make `git push --force-with-lease` trust a main the session never saw, and
+wipe another clone's commit. SessionStart and PreToolUse fetch the logbook only.
 
 | Hook | What it does | Delay |
 | --- | --- | --- |
@@ -689,7 +696,7 @@ line of at most 80 characters, and a long list is cut with "(+N more)" while the
 is claimed before the fetch, the seen file is written atomically, and the new tip is stored after the
 output and only if no other hook of the session moved it first (compare-and-set). A push is read from the
 `git push` itself (global options, `cd X &&`, `bash -c`, `$(…)`, refspecs; a bare push or `HEAD` means the current branch).
-Any error is exit 0: one line at SessionStart, silence elsewhere. The `convoy approve` guard runs first, on any input. A lock on the log ref younger than a minute reads as "busy"; an older one is removed. A failed fetch keeps the last good
+Any error is exit 0: one line at SessionStart, silence elsewhere. The `convoy approve` guard runs first, on any input. A lock on the log ref or on `refs/harbor/trunk` younger than a minute reads as "busy"; an older one is removed. A failed fetch keeps the last good
 fetch time and is not retried inside the window.
 
 Not used: `asyncRewake` hooks or a heartbeat that polls. They wake an idle session, and each wake spends
@@ -798,7 +805,7 @@ Keelokit's `main` yet):
 ## When main moves with a convoy assembled
 
 `main` moves for three reasons: another convoy sailed, a fix for a red `main` was pushed (the only
-allowed push outside a convoy, §2.4), or a loose push (§6.9, an **INDICIO** of how a convoy
+allowed push outside a convoy, §2.4), or a loose push (§6.9, **EVIDENCE** of how a convoy
 branch died). Harbor never rebases a convoy:
 
 - **assembling or waiting:** the next `assemble` merges `origin/main` into `convoy/<n>` and moves
@@ -856,27 +863,29 @@ with many sessions raises: which one is the harbormaster, which the dispatcher?
 | harbormaster | `harbormaster · acme-a · Acme` |
 | dispatcher | `dispatcher · acme-a · Acme` |
 | skipper of convoy 8 | `skipper C8 · acme-a · Acme` |
-| vessel of convoy 8 building a story | `vessel C8 · acme-a · Acme · wave 1 · CARGA-001` |
+| vessel of convoy 8 building a story | `vessel C8 · acme-a · Acme · wave 1 · STORY-001` |
 | a worker with no Harbor role | `worker · acme-a · Acme` |
 | the previous harbormaster, until it ends | `ex-harbormaster · acme-a · Acme` |
-| A subagent (an `Agent` description, not a session) | `CARGA-001 · verifier` (Keelokit's, unchanged) |
+| A subagent (an `Agent` description, not a session) | `STORY-001 · verifier` (Keelokit's, unchanged) |
 
 - **Role first** because that is what a list of sessions is scanned for; the account is always there
   because one account holds many sessions and two accounts hold the same roles. The convoy sits on the
   role (`skipper C8`, `vessel C8`), so the sessions of one convoy sort together. The story's part
-  (`wave 1 · CARGA-001`) is Keelokit's and goes last; the story id goes whole: it is the one stable key
+  (`wave 1 · STORY-001`) is Keelokit's and goes last; the story id goes whole: it is the one stable key
   (its file, its `Story:` trailer). The word for wave follows `[dashboard] lang`.
 - **Keelokit owns the story's part and the project's name** (sessions, stories and waves are its
   concepts): `status.py title <ID>` computes them from `.keelokit/answers.yml`, the story's front matter
   and the language. Harbor calls that command and puts the role, the convoy and the account around it;
-  it copies nothing. The account is the clone's (`.keelokit/local.toml`); `harbor.py title --account A`
+  it copies nothing. A Keelokit that predates `status.py title` still gets `role · account · project`, the
+  project being the repository directory's name; a story's title needs Keelokit. The account is the clone's (`.keelokit/local.toml`); `harbor.py title --account A`
   names another account's session before it exists (a dispatcher building a prompt for a session in its
   own account never needs it; the harbormaster asking for a session in another account does).
 - **Never typed.** `harbor.py title`, `worker register`, `convoy new` and `harbormaster takeover` print
   the title to set, and every skill that launches or adopts a session sets it right away: `title` of
   `create_session`, or `set_session_title` for a session it adopts.
 - **A role change re-titles the old holder.** `harbormaster takeover` prints, for the previous holder, the
-  `ex-harbormaster · …` title it must now carry, and records it in that worker's file. Harbor cannot rename a
+  `ex-harbormaster · …` title it must now carry, and records it, with the role `ex-harbormaster`, in that
+  worker's file (the view shows one harbormaster). Harbor cannot rename a
   session: the skills say to use `set_session_title` when the previous holder is in the same account, and
   to send it a `msg` with the title when it is in another.
 - **Branches keep Keelokit's convention**, the story id in lower case. A cloud session that is
@@ -898,7 +907,7 @@ A dispatcher's watcher reaches the logbook; a person reaches the dispatcher fast
 request the dispatcher is subscribed to (a comment by a person wakes the session in seconds). The name is
 fixed so that every account finds its own and nobody invents another: the branch `harbor/mailbox/<account>`,
 holding one file `harbor/mailbox/<account>.md`; the pull request is titled `Harbor mailbox: <account>`, a
-draft, never merged. `harbor.py account set A --mailbox-pr N` records the number in
+draft, never merged. `harbor.py account set A --mailbox-pr N` (`0` forgets it) records the number in
 `harbor/accounts/A.toml` (`mailbox_pr`); the Accounts table of `LOGBOOK.md` shows it; and the dispatcher
 subscribes again on every wake, because `subscribe_pr_activity` does not survive a restart. A project whose
 pre-push hook refuses unknown branches lets `harbor/mailbox/*` through, as it does the logbook.
@@ -917,32 +926,46 @@ the names of its secrets) never travels through git. Harbor makes both visible a
 tools = ["docker", "pnpm"]            # commands that must be on PATH
 hosts = ["registry.example.com"]      # outbound hosts the work needs
 secrets = ["EXAMPLE_API_TOKEN"]       # names only, never values; the variable must be set
+network_secrets = ["api.example.com"] # keys a cloud session injects at the proxy: never a variable, never checked
 plugins = ["design"]                  # Claude Code plugins the work expects
-skills = ["feature-delivery"]         # project skills; checked to exist in .claude/skills
+skills = ["code-review"]         # project skills; checked to exist in .claude/skills
 note = "one line for the gatekeeper"
 ```
 
 **`harbor.py doctor [--account A] [--if-changed]`** checks this machine against it and prints one line per
-item: `ok`, `missing` or `can't check`; it exits 1 when anything is missing. A tool is looked up on `PATH`; a
-host is reached with a short HTTPS HEAD through the environment's proxy (any answer counts, a refused page
-too); a secret is an environment variable that is set; a skill is a directory in `.claude/skills`; a
-plugin is checked only against Claude Code's local plugin list, and where that list is not there, it says
-`can't check` and never `missing`. The account is always this clone's: the checks run on this machine.
+item: `ok`, `missing` or `can't check`; it exits 0 when nothing is missing, 1 when anything is, and 2 when the
+check could not run or be recorded (`NOT_YOUR_ACCOUNT`, `BAD_CONFIG`, `PUSH_RETRIES_EXHAUSTED`, …: the error is
+on stderr). A tool is looked up on `PATH`; a host is reached with a short HTTPS HEAD through the
+environment's proxy, redirects not followed, 8 s at most per host (any answer counts, a refused page or a
+redirect too; a proxy that answers 429 or 503 at CONNECT says `can't check`, no verdict on the host); a secret
+is an environment variable that is set; a skill is a directory in `.claude/skills`; a plugin is checked against
+Claude Code's local plugin list, `missing` when the list is there and lacks it, `can't check` where that list
+is not there (a cloud session). **A missing secret may be a false alarm in a cloud session**, where a key is
+injected at the proxy and is never an environment variable: such a key is declared under `network_secrets`,
+which always says `can't check`. A key of the manifest that is not one of `tools`, `hosts`, `secrets`,
+`network_secrets`, `plugins`, `skills`, `note` is `BAD_CONFIG` (a typo like `secret =` would otherwise check
+nothing). The account is always this clone's: the checks run on this machine.
 The result goes to `harbor/accounts/A.toml` as `requirements_checked_at`, `requirements_hash` (of the
 manifest, not of the note) and `requirements_missing`, written once per change (a run that finds the same
-hash and the same list writes nothing). `--if-changed` skips the checks when the recorded hash is the
+hash and the same list writes nothing; a manifest emptied later records the empty state, so no stale
+`missing` stays in the views, and a project that never had one writes nothing). `--if-changed` skips the checks when the recorded hash is the
 manifest's and nothing was missing. The Accounts table shows the last check and what is missing. This
 replaces the `doctor --cloud` that earlier versions of this document designed and did not build.
 
 **The dispatcher** runs it when it arms and whenever the manifest changed on `main` since its last check
-(`doctor --if-changed` compares the hash); what is missing goes to the gatekeeper with `msg send --to
+(`doctor --if-changed` compares the hash; the first check on arming is a plain `doctor`, because a new
+container has never checked); what is missing goes to the gatekeeper with `msg send --to
 gatekeeper --kind question`: configuring an account is a person's decision, and Harbor never does it.
 
 **Running sessions are told.** The hooks that already summarize logbook changes (UserPromptSubmit,
-PostToolUse) fetch the trunk together with the logbook, and when `origin/<trunk>` changed the manifest,
-`.claude/` or a lockfile since the base this session branched from, they add one line, framed as data like
-the rest: `main changed the requirements manifest, .claude/, a lockfile: merge main and reinstall before going
-on`. It is said once for each tip of the trunk, and not at all after the session has merged it.
+PostToolUse) fetch the trunk after the logbook (see "Fresh reads"), and when it changed the manifest,
+`.claude/` or a lockfile since the base this session branched from (`git diff --name-only --no-renames`), they
+add one line, framed as data like the rest: `main changed the requirements manifest, .claude/, a lockfile:
+reinstall after your next merge of main (a skipper: at the next `convoy assemble`; a delivered vessel: leave the
+branch where it is)`. A skipper takes the trunk only through `convoy assemble`, and a delivered vessel that moved
+its branch would void its delivery, so the line never tells either to merge now. It is said again only when the
+set of changes differs from the last one told (a new tip with the same lockfile change is silent), and not at
+all after the session has merged the trunk. A shallow clone with no merge-base never gets it.
 
 ## Models and the first agent
 
@@ -961,24 +984,24 @@ Every `Agent` and `create_session` Harbor starts names its model (§3.3): its ow
 `[harbor.models]`, the story roles from Keelokit's brief. The defaults are the cheap case and the
 expensive one is the exception (R11, §3.11, §3.12). The harbormaster's round runs on `control`
 (Haiku): it only reads and reports, and the harbormaster acts on it on its own model. That the
-model rule changed the practice is an **INDICIO** (§3.7: commit counts, not tokens).
+model rule changed the practice is **EVIDENCE** (§3.7: commit counts, not tokens).
 
 ## Assumptions to validate
 
 | Assumption | Source | How it would be checked |
 |---|---|---|
 | Keelokit's `landing-policy` branch lands on its `main` as reviewed | Keelokit's report; checked here against `4b22a548c` | Harbor's tests use stand-ins; rerun the shared-seal check against Keelokit's release |
-| hotspots concentrate on shared types, schema, migrations, locales, generated files | §2.12 (**INDICIO** for the density) | `git log --format=%h -- <path>` counts in the adopting repo |
-| a coordinator on Opus was intended | §3.4 (**HIPÓTESIS**) | ask the owner; Harbor defaults to Sonnet |
-| trailers name the model of the session that signed | §3.6 (**HIPÓTESIS**) | not needed: Harbor records `model` per worker |
-| a reviewer of the right level doesn't replace a real run | §3.15 (**INDICIO**) | the convoy verify is a real run; nothing else assumes it |
-| duplicated history comes from rebasing sibling branches that share commits | §6.7 (**INDICIO**) | *(phase 2)* `add` warns when two vessels share commits not on `main` |
-| "future" migration names were an ordering convention without a reservation | §6.5 (**INDICIO**) | the migration check at assembly doesn't depend on it |
-| the hidden cost of direct landings | §4.11 (**INDICIO**) | the logbook's seal history gives the numbers the survey lacked |
-| the push that killed a convoy branch was a loose push | §6.9 (**INDICIO**) | `main.toml` records the cause of every move |
+| hotspots concentrate on shared types, schema, migrations, locales, generated files | §2.12 (**EVIDENCE** for the density) | `git log --format=%h -- <path>` counts in the adopting repo |
+| a coordinator on Opus was intended | §3.4 (**HYPOTHESIS**) | ask the owner; Harbor defaults to Sonnet |
+| trailers name the model of the session that signed | §3.6 (**HYPOTHESIS**) | not needed: Harbor records `model` per worker |
+| a reviewer of the right level doesn't replace a real run | §3.15 (**EVIDENCE**) | the convoy verify is a real run; nothing else assumes it |
+| duplicated history comes from rebasing sibling branches that share commits | §6.7 (**EVIDENCE**) | *(phase 2)* `add` warns when two vessels share commits not on `main` |
+| "future" migration names were an ordering convention without a reservation | §6.5 (**EVIDENCE**) | the migration check at assembly doesn't depend on it |
+| the hidden cost of direct landings | §4.11 (**EVIDENCE**) | the logbook's seal history gives the numbers the survey lacked |
+| the push that killed a convoy branch was a loose push | §6.9 (**EVIDENCE**) | `main.toml` records the cause of every move |
 | the board file's tables look as §5.1 describes | §5.1 | run the import on the real board |
-| a third review round without P0/P1 was unjustified | §3.14 (**HIPÓTESIS**) | not Harbor's: Keelokit caps rounds |
-| process documents conflicting at integration | §6.15 (**INDICIO**) | not Harbor's (R24) |
+| a third review round without P0/P1 was unjustified | §3.14 (**HYPOTHESIS**) | not Harbor's: Keelokit caps rounds |
+| process documents conflicting at integration | §6.15 (**EVIDENCE**) | not Harbor's (R24) |
 
 ## Without a decision
 
@@ -1114,7 +1137,7 @@ gets them from its dispatcher.
 schema = 1
 id = "w-0017"
 role = "vessel"                      # vessel | skipper | dispatcher
-story = "CARGA-001"                  # vessels: must be a story the project knows (Keelokit's title lookup)
+story = "STORY-001"                  # vessels: must be a story the project knows (Keelokit's title lookup)
 convoy = 28                          # optional
 model = "sonnet"                     # one of the allowed models
 account = "any"                      # or one account
@@ -1270,7 +1293,7 @@ In the fleet's words a convoy is a *train*, its board file is `BOARD.md` and its
 | R10 roles enforced by tools | Harbor's agents have `tools:` lists (skipper without Write, harbormaster read-only). Keelokit's reviewer and breaker are read-only by tools; its verifier needs Write for tests, and weakened tests are caught by `doctor --scope` (VERIFY-2), not by tools. Bash in any list is not a sandbox | 1 (agents) |
 | R11 model per role and level in project config, coordinator included; cheap defaults | `[harbor.models]` for skipper, harbormaster and the control round (Haiku); story roles by Keelokit's table per tier; `harbor.py models` | 2 |
 | R12 concurrency cap tied to budget, staggered starts | per-account `max_sessions` and `paused_until`; staggering without a decision | 1 |
-| R13 counter of review rounds, a third only with P0/P1 | dropped: Keelokit's `build-story` already stops after two rounds, and the case behind it is a **HIPÓTESIS** (§3.14) | — |
+| R13 counter of review rounds, a third only with P0/P1 | dropped: Keelokit's `build-story` already stops after two rounds, and the case behind it is a **HYPOTHESIS** (§3.14) | — |
 | R14 hotspots in config, branches serialized, warn on shared declarations | `[harbor.hotspots]`, `HOTSPOT_HELD` at `add`; the early warning from `touches` | 1, 2 (warning) |
 | R15 no parallel convoys that depend on each other from one base; order and re-base | `depends_on`, waiting until the dependency sails, then merge `main` | 1 (field), 2 |
 | R16 reserve or renumber migration timestamps; fail on a shared one | the check at assembly fails and names the rename; renumbering without a decision | 2 |

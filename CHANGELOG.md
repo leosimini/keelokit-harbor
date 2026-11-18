@@ -4,7 +4,7 @@
 
 ### Names and vocabulary
 - **Session titles read role first, then account, then project and scope**: `harbormaster · acme-a · Acme`,
-  `skipper C8 · acme-a · Acme`, `vessel C8 · acme-a · Acme · wave 1 · CARGA-001`, `dispatcher · …`,
+  `skipper C8 · acme-a · Acme`, `vessel C8 · acme-a · Acme · wave 1 · STORY-001`, `dispatcher · …`,
   `worker · …`. `harbor.py title` gains `--account` and the roles `worker` and `ex-harbormaster`. On a
   takeover the previous holder is told the `ex-harbormaster · …` title it must carry, and the skills set every
   title right away. The logbook lists sessions by account.
@@ -22,8 +22,27 @@
   project's work needs. **`harbor.py doctor`** checks this machine against it, records the result per
   account (once per change), and replaces the never-built `doctor --cloud`. The dispatcher runs it on arm and
   when the list changes and sends what is missing to the gatekeeper.
-- **Running sessions are told** when `main` changed the list, `.claude/` or a lockfile since their base: merge
-  `main` and reinstall before going on.
+- **Running sessions are told** when `main` changed the list, `.claude/` or a lockfile since their base:
+  reinstall after the next merge of `main` (a skipper takes it at `convoy assemble`, a delivered vessel does
+  not move its branch). Said again only when the set of changes differs, not for every new tip.
+- **`network_secrets`** declares keys a cloud session injects at the proxy; `doctor` reports them `can't
+  check` (a `secrets` entry is an environment variable, so a missing one may be a false alarm there).
+- **`doctor` is stricter and clearer**: a host check does not follow redirects and has a deadline, a busy
+  proxy (429/503 at CONNECT) says `can't check`; a plugin missing from a local plugin list is `missing`; an
+  unknown key in the manifest is `BAD_CONFIG`; a manifest emptied later clears the recorded `missing`; exit
+  codes are 0 nothing missing, 1 something missing, 2 the check could not run or be recorded. The dispatcher
+  runs a plain `doctor` on arming (a new container never checked).
+
+### Fixed
+- **The hooks no longer move `origin/<trunk>`.** The trunk fetch for the note about what it changed wrote the
+  session's own remote-tracking ref, which made `git push --force-with-lease` trust a main the session never
+  saw (another clone's commit was wiped in a reproduction). It now goes to Harbor's own `refs/harbor/trunk`,
+  after the logbook, best-effort, on its own cap; SessionStart and the PreToolUse push note fetch the logbook
+  only; no submodules, no background `gc`. A hook stays under its 10 s timeout, and a stale lock on the trunk
+  ref is cleared like the logbook's.
+- **A takeover leaves the previous holder with the role `ex-harbormaster`** (the view showed two
+  harbormasters); a Keelokit without `status.py title` still titles a session `role · account · project`;
+  `account set --mailbox-pr 0` forgets the mailbox; an empty word in `[harbor.import]` is refused.
 
 ## 0.3.1 — 2026-11-18
 

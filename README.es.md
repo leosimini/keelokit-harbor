@@ -49,7 +49,7 @@ controles, no dejadas a la memoria:
 | `harbor.py wanted add\|take\|prompt\|started\|drop\|list` | Pedidos de sesiones nuevas, que hace el harbormaster y toma un despachante con lugar |
 | `harbor.py title --role R [--convoy N] [--story ID] [--account A]` | El título que lleva una sesión: rol, cuenta, proyecto y alcance |
 | `harbor.py account set A --mailbox-pr N` | Registra el buzón de la cuenta, el pull request borrador `harbor/mailbox/A` |
-| `harbor.py doctor [--account A]` | Revisa esta máquina contra los `[harbor.requirements]` del proyecto: una línea por ítem, sale con 1 si falta alguno |
+| `harbor.py doctor [--account A]` | Revisa esta máquina contra los `[harbor.requirements]` del proyecto: una línea por ítem, sale con 1 si falta alguno y con 2 si la revisión no pudo correr |
 
 Sus hooks mantienen al día lo que cada sesión ve del logbook, para que no decida con un estado
 viejo. Una sesión arranca con un fetch, ve qué cambió en el logbook en cada prompt y después de las
@@ -87,7 +87,7 @@ seguí lo que dice sobre el latido.
 Una cuenta puede tener muchas sesiones, y una lista de ellas tiene que decir cuál es cuál. Toda sesión que
 Harbor conoce tiene un título que sale de `harbor.py title`, nunca escrito a mano, y se lee primero el rol,
 después la cuenta y después el proyecto y el alcance: `harbormaster · acme-a · Acme`, `dispatcher · acme-a ·
-Acme`, `skipper C8 · acme-a · Acme`, `vessel C8 · acme-a · Acme · wave 1 · CARGA-001`, `worker · acme-a ·
+Acme`, `skipper C8 · acme-a · Acme`, `vessel C8 · acme-a · Acme · wave 1 · STORY-001`, `worker · acme-a ·
 Acme`. Cuando la guardia cambia de manos, al titular anterior se le indica que lleve `ex-harbormaster · …`
 hasta que termine. El logbook lista las sesiones cuenta por cuenta, con sus títulos.
 
@@ -101,17 +101,18 @@ declara lo que su trabajo necesita:
 [harbor.requirements]
 tools = ["docker", "pnpm"]
 hosts = ["registry.example.com"]
-secrets = ["EXAMPLE_API_TOKEN"]       # solo nombres, nunca valores
+secrets = ["EXAMPLE_API_TOKEN"]       # solo nombres, nunca valores; variables de entorno
+network_secrets = ["api.example.com"] # claves que una sesión en la nube inyecta en el proxy: "can't check"
 plugins = ["design"]
-skills = ["feature-delivery"]
+skills = ["code-review"]
 note = "una línea para el gatekeeper"
 ```
 
 `harbor.py doctor` revisa la máquina contra eso y guarda el resultado por cuenta; cada despachante lo corre al
 armarse y cada vez que la lista cambia, y manda lo que falte al gatekeeper, que decide qué configurar. Una
 sesión en curso se entera, en el resumen del hook, cuando `main` cambió la lista, `.claude/` o un lockfile:
-traer `main` y reinstalar antes de seguir. El buzón de la cuenta, un pull request borrador llamado
-`harbor/mailbox/<cuenta>` al que se suscribe su despachante, se registra con `account set --mailbox-pr`.
+reinstalar después del próximo merge de `main` (un skipper lo toma en `convoy assemble`; una pieza entregada no mueve su rama); no se repite mientras el conjunto de cambios sea el mismo. El buzón de la cuenta, un pull request borrador llamado
+`harbor/mailbox/<cuenta>` al que se suscribe su despachante, se registra con `account set --mailbox-pr N` (`0` lo olvida).
 
 ## El gatekeeper
 
@@ -145,7 +146,7 @@ diseñado y no escrito está al principio de [`docs/design.md`](docs/design.md).
   su `state.toml` y usa sus niveles y su trailer `Story:`. Sin `.keelokit/`, Harbor imprime una
   línea y no hace nada.
 - Los hooks corren `lib/harbor.py sync --hook` desde el plugin y leen `.keelokit/state.toml` y
-  `.keelokit/local.toml` del proyecto. Una sesión arranca con un fetch nuevo (tope de 5 s), ve qué
+  `.keelokit/local.toml` del proyecto. Una sesión arranca con un fetch nuevo (tope de 4 s), ve qué
   cambió en el logbook en cada prompt (como máximo cada 60 s) y después de las herramientas (cada
   2 min), y recibe los convoys abiertos antes de un push a `main`. Funcionan sin red y nunca
   bloquean una sesión.

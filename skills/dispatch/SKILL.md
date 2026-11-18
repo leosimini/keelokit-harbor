@@ -30,10 +30,17 @@ gatekeeper (`/harbor:adopt` sets it). `ACCOUNT_AT_CAP`: the account is full; ask
 
 ## Requirements
 
-On arming, and on any wake after `main` changed the project's `[harbor.requirements]`, run `git pull --ff-only`
-and `python3 "$H" --session <id> doctor --if-changed`. It prints one line per item; for each `missing` one send
-`msg send --to gatekeeper --kind question "account <a>: <what> is missing"` (one message for the whole list is
-fine). Configuring an account is a person's decision: never install, set or change anything yourself.
+On arming, run `git pull --ff-only` and `python3 "$H" --session <id> doctor` (plain: a container that has never
+been checked must check, whatever the logbook says about an earlier one). On any later wake after `main` changed
+the project's `[harbor.requirements]`, run `git pull --ff-only` and `doctor --if-changed`. It prints one line
+per item; for each `missing` one send `msg send --to gatekeeper --kind question "account <a>: <what> is
+missing"` (one message for the whole list is fine). `can't check` is not a verdict: say nothing about it. A
+`missing` secret may be a false alarm in a cloud session, where keys are injected at the proxy and are never
+environment variables: say so in the question, and the project can list such a key under `network_secrets`.
+Exit codes: 0 nothing missing, 1 something missing, 2 the check could not run or be recorded (the error is on
+stderr: `NOT_YOUR_ACCOUNT` means this clone is another account's; `BAD_CONFIG` the manifest has a typo; with
+`PUSH_RETRIES_EXHAUSTED` run it again, and tell the gatekeeper if it repeats). Configuring an account is a
+person's decision: never install, set or change anything yourself.
 
 ## The loop (on every wake, whatever woke it)
 

@@ -47,7 +47,7 @@ written as checks, not left to memory:
 | `harbor.py wanted add\|take\|prompt\|started\|drop\|list` | Requests for new sessions, asked by the harbormaster and taken by a dispatcher with room |
 | `harbor.py title --role R [--convoy N] [--story ID] [--account A]` | The title a session carries: role, account, project and scope |
 | `harbor.py account set A --mailbox-pr N` | Records the account's mailbox, the draft pull request `harbor/mailbox/A` |
-| `harbor.py doctor [--account A]` | Checks this machine against the project's `[harbor.requirements]`: one line per item, exit 1 if one is missing |
+| `harbor.py doctor [--account A]` | Checks this machine against the project's `[harbor.requirements]`: one line per item, exit 1 if one is missing, 2 if the check could not run |
 
 Its hooks keep a session's view of the logbook fresh, so it doesn't decide on stale state. A
 session starts with a fetch, sees what changed in the logbook at each prompt and after tools, and
@@ -83,7 +83,7 @@ follow what it says about the heartbeat.
 An account can hold many sessions, and a list of them has to say which is which. Every session Harbor knows
 has a title from `harbor.py title`, never typed by hand, and it reads role first, then account, then project
 and scope: `harbormaster · acme-a · Acme`, `dispatcher · acme-a · Acme`, `skipper C8 · acme-a · Acme`,
-`vessel C8 · acme-a · Acme · wave 1 · CARGA-001`, `worker · acme-a · Acme`. When the watch changes hands, the
+`vessel C8 · acme-a · Acme · wave 1 · STORY-001`, `worker · acme-a · Acme`. When the watch changes hands, the
 previous holder is told to carry `ex-harbormaster · …` until it ends. The logbook lists the sessions account
 by account, with their titles.
 
@@ -97,17 +97,19 @@ declares what its work needs:
 [harbor.requirements]
 tools = ["docker", "pnpm"]
 hosts = ["registry.example.com"]
-secrets = ["EXAMPLE_API_TOKEN"]       # names only, never values
+secrets = ["EXAMPLE_API_TOKEN"]       # names only, never values; environment variables
+network_secrets = ["api.example.com"] # keys a cloud session injects at the proxy: reported "can't check"
 plugins = ["design"]
-skills = ["feature-delivery"]
+skills = ["code-review"]
 note = "one line for the gatekeeper"
 ```
 
 `harbor.py doctor` checks the machine against it and records the result per account; each dispatcher runs it
 when it arms and whenever the list changes, and sends what is missing to the gatekeeper, who decides what to
 configure. A running session is told, in the hook's summary, when `main` changed the list, `.claude/` or a
-lockfile: merge `main` and reinstall before going on. The account's mailbox, a draft pull request named
-`harbor/mailbox/<account>` that its dispatcher subscribes to, is recorded with `account set --mailbox-pr`.
+lockfile: reinstall after the next merge of `main` (a skipper takes it at `convoy assemble`; a delivered
+vessel does not move its branch), said again only when the set of changes differs. The account's mailbox, a draft pull request named
+`harbor/mailbox/<account>` that its dispatcher subscribes to, is recorded with `account set --mailbox-pr N` (`0` forgets it).
 
 ## The gatekeeper
 
@@ -141,7 +143,7 @@ designed but not written is listed at the top of [`docs/design.md`](docs/design.
   `state.toml`, and uses its tiers and its `Story:` trailer. Without `.keelokit/`, Harbor prints one
   line and does nothing.
 - The hooks run `lib/harbor.py sync --hook` from the plugin and read the project's
-  `.keelokit/state.toml` and `.keelokit/local.toml`. A session starts with a fresh fetch (5 s cap), sees
+  `.keelokit/state.toml` and `.keelokit/local.toml`. A session starts with a fresh fetch (4 s cap), sees
   what changed in the logbook at each prompt (at most every 60 s) and after tools (every 2 min), and
   gets the open convoys before a push to `main`. They work offline and never block a session.
 - `harbor.py seal` runs the command in `[harbor] vessel_verify` from the project's `state.toml`. That
