@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 — 2026-11-18
 
 ### Watcher
 - **`msg watch` refuses a cap above 115 minutes** (`CAP_TOO_LONG`), from `--cap` or from `[harbor]
