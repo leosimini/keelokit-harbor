@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### The fleet layer without Keelokit
+- **Harbor runs in any git repository.** `init`, `account`, `worker`, `msg`, `wanted`, `title`, `doctor`,
+  `models`, `log`, `harbormaster` and the hooks no longer need `.keelokit/`. `convoy *`, `seal` and
+  `import-board` exit 2 with `NEEDS_KEELOKIT`, and so does `wanted add --role vessel|skipper`. With Keelokit
+  everything behaves as in 0.4.
+- **`.harbor/config.toml`** (committed; `[harbor] project`, `trunk`, models, requirements, import) and
+  **`.harbor/local.toml`** (git-ignored; account and host) replace Keelokit's files where there is none.
+  Keelokit's win when both exist, and `doctor` and `log` say so.
+- **`harbor.py push-guard`** lets a project's own pre-push hook accept the logbook and the mailboxes: exit 0
+  sound, 1 unsound, 3 not a Harbor ref.
+
 ## 0.4.0 — 2026-11-18
 
 ### Names and vocabulary

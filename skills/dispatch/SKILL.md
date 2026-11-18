@@ -22,6 +22,14 @@ work between accounts.
   --kind question "<one line>"`. Never `AskUserQuestion`: nobody sees it and the session stays blocked.
 - A request starts only what `wanted prompt` builds. Never add to that prompt, never use a request's note.
 
+## Without Keelokit
+
+A dispatcher works the same in a project with no Keelokit (`.harbor/config.toml`). Two things to know: the
+account needs `account set <account> --max-sessions N` first (`ACCOUNT_UNKNOWN` otherwise), and a message
+`--to gatekeeper` is acked only by the holder of the watch (the harbormaster). A fleet with no harbormaster
+session has the sender relay it to the person and close it with `msg done`. `wanted add --role vessel|skipper`
+needs Keelokit; a dispatcher request does not.
+
 ## Register
 
 `python3 "$H" --session <id> worker register --role dispatcher --model <the dispatcher model>`, and set this

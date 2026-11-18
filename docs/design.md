@@ -1,6 +1,6 @@
 # How Harbor is built
 
-This is the design. **Phases 1 to 4 are implemented** in `lib/harbor.py`.
+This is the design. **Phases 1 to 5 are implemented** in `lib/harbor.py`.
 - *Phase 1* (`tests/test_harbor.py`): logbook init, accounts, workers, seals, `convoy new|add|status`,
   the generated views, the one-time import of a hand-kept board.
 - *Phase 2* (`tests/test_phase2.py`): `convoy assemble|verify|sail|abort|defer`, the ok,
@@ -9,6 +9,8 @@ This is the design. **Phases 1 to 4 are implemented** in `lib/harbor.py`.
   dispatcher ("Phase 3: orchestration from the cloud").
 - *Phase 4* (`tests/test_phase4.py`): session titles that read role, account and project, the account's
   mailbox, and the project's requirements with `doctor` ("Phase 4: names, mailboxes and requirements").
+- *Phase 5* (`tests/test_phase5.py`): the fleet layer in a project without Keelokit, and `push-guard`
+  ("Phase 5: the fleet layer without Keelokit").
 Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigning a skipper
 (`convoy skipper N WORKER`), the early hotspot warning from stories' `touches`, the warning for
 vessels that share commits, everything marked *(3)*, and phase 3's "Designed, not built". The evidence is the survey of a week of convoys run by hand on
@@ -902,6 +904,64 @@ with many sessions raises: which one is the harbormaster, which the dispatcher?
   worker's record, and `harbor/LOGBOOK.md` lists sessions by it, as a tree, each under the session that
   launched it (`spawned_by`), and, in "Sessions by account", account by account with session, title, role
   and state: the one place the gatekeeper reads to know who is who.
+
+## Phase 5: the fleet layer without Keelokit *(0.5.0)*
+
+Harbor adapts to the project it finds. Up to 0.4 every command stopped unless the repository had
+`.keelokit/state.toml` with `[landing] policy = "convoy"`, so even a message between two accounts needed
+Keelokit. 0.5 splits Harbor in two layers.
+
+- **The fleet layer runs in any git repository with a remote:** `init`, `account`, `worker register|end`,
+  `msg *`, `wanted *`, `title`, `doctor`, `models`, `log`, `harbormaster takeover|control`, the hooks (the
+  logbook delta and the note about what the trunk changed) and `push-guard`.
+- **The convoy layer needs Keelokit, as before:** `convoy *`, `seal`, `import-board`. Without Keelokit they
+  exit 2 with `NEEDS_KEELOKIT: <command> runs on Keelokit's convoy policy (/keelokit:project-adopt)`. A
+  `wanted add --role vessel|skipper` needs a story and a convoy, so it exits the same way; a
+  `--role dispatcher` request works anywhere. The reason: a request may only start what the project already
+  describes, and without Keelokit Harbor has nothing to check a story against, so it does not guess.
+  `harbormaster control` renews the watch, finds lost workers and lists late messages without Keelokit; it
+  leaves out the trunk, the CI and the convoys, which only exist with it.
+
+With Keelokit nothing changes: its files stay the source and the policy is still required.
+
+### Configuration without Keelokit
+
+- **Project, committed:** `.harbor/config.toml`, with the same `[harbor]`, `[harbor.models]`,
+  `[harbor.requirements]` and `[harbor.import]` tables as `.keelokit/state.toml`, plus `[harbor] project = "<name>"`
+  (the project in titles) and `[harbor] trunk`. It is read only when there is no `.keelokit/`; with both,
+  Keelokit wins and `doctor` and `log` say `.harbor/config.toml is ignored: this project runs on Keelokit`.
+- **Identity, never committed:** `.harbor/local.toml`, `[harbor] account` and `host`, one per clone, in
+  `.gitignore`. `.keelokit/local.toml` is read first when it exists.
+- **Titles:** `role · account · project`, the project being `[harbor] project` or the main checkout's
+  directory name. A story's part comes from Keelokit's `status.py title`, so a title with a story needs Keelokit
+  (`NO_TITLE` otherwise).
+- **Hooks:** they act only in a repository with `.keelokit/` or `.harbor/`; anywhere else the SessionStart
+  line says Harbor does nothing there. The `convoy approve` guard runs only where there is Keelokit.
+
+### `push-guard`: a project's own pre-push hook
+
+A project with its own pre-push hook must let Harbor's writes through. `harbor.py push-guard <local_ref>
+<local_sha> <remote_ref> <remote_sha>` takes one line of the hook's stdin and exits **0** when the push is
+Harbor's and sound, **1** when it is a Harbor ref and unsound (the reason on stderr), **3** when the ref is not
+Harbor's.
+
+- `refs/heads/harbor/log`: no delete; the remote's tip must be an ancestor of what is pushed (no dropped
+  commits); every new commit's tree holds only regular files (mode 100644) under `harbor/`; the branch shares
+  no history with the trunk.
+- `refs/heads/harbor/mailbox/<account>` (a valid account name): on top of the trunk, each new commit a
+  single-parent commit that adds or changes exactly `harbor/mailbox/<account>.md` as a regular file; no delete.
+
+The trunk is read from `origin/<trunk>` (then Harbor's own copy of it, then the local branch). A bash hook:
+
+```bash
+while read l ls r rs; do
+  python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
+  [ $c = 0 ] && continue; [ $c = 1 ] && exit 1
+  # exit 3: not Harbor's ref, the project's own rules go here
+done
+```
+
+with `H` the path of `lib/harbor.py`.
 
 ## Phase 4: names, mailboxes and requirements *(0.4.0)*
 

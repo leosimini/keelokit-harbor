@@ -49,6 +49,7 @@ controles, no dejadas a la memoria:
 | `harbor.py wanted add\|take\|prompt\|started\|drop\|list` | Pedidos de sesiones nuevas, que hace el harbormaster y toma un despachante con lugar |
 | `harbor.py title --role R [--convoy N] [--story ID] [--account A]` | El título que lleva una sesión: rol, cuenta, proyecto y alcance |
 | `harbor.py account set A --mailbox-pr N` | Registra el buzón de la cuenta, el pull request borrador `harbor/mailbox/A` |
+| `harbor.py push-guard LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA` | Para el pre-push propio de un proyecto: sale con 0 si el push del cuaderno o de un buzón es válido, con 1 si no, con 3 si la ref no es de Harbor |
 | `harbor.py doctor [--account A]` | Revisa esta máquina contra los `[harbor.requirements]` del proyecto: una línea por ítem, sale con 1 si falta alguno y con 2 si la revisión no pudo correr |
 
 Sus hooks mantienen al día lo que cada sesión ve del logbook, para que no decida con un estado
@@ -139,6 +140,23 @@ y subilo en Claude (*Customize → Plugins → Upload*). Todas las versiones est
 
 Después corré `/harbor:adopt` en un proyecto con Keelokit. Tests: `python3 -m unittest discover -s tests`. Lo
 diseñado y no escrito está al principio de [`docs/design.md`](docs/design.md).
+
+## Harbor sin Keelokit
+
+La capa de flota no requiere Keelokit: los mensajes entre cuentas, los pedidos de sesión, el despachador, los
+títulos, `doctor`, la guardia y los hooks funcionan en cualquier repositorio git con remoto. La configuración del
+proyecto va en `.harbor/config.toml` (versionado) y la cuenta y el equipo de cada clon en `.harbor/local.toml`
+(ignorado por git); `/harbor:adopt` escribe los dos. Los convoyes, los sellos y la importación del tablero
+necesitan la política de convoyes de Keelokit (`/keelokit:project-adopt`) y lo dicen si se los pide sin ella. Un
+proyecto con su propio hook de pre-push deja pasar las escrituras de Harbor con `push-guard`:
+
+```bash
+while read l ls r rs; do
+  python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
+  [ $c = 0 ] && continue; [ $c = 1 ] && exit 1
+  # exit 3: not Harbor's ref, the project's own rules go here
+done
+```
 
 ## Bueno saber
 

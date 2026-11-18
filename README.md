@@ -47,6 +47,7 @@ written as checks, not left to memory:
 | `harbor.py wanted add\|take\|prompt\|started\|drop\|list` | Requests for new sessions, asked by the harbormaster and taken by a dispatcher with room |
 | `harbor.py title --role R [--convoy N] [--story ID] [--account A]` | The title a session carries: role, account, project and scope |
 | `harbor.py account set A --mailbox-pr N` | Records the account's mailbox, the draft pull request `harbor/mailbox/A` |
+| `harbor.py push-guard LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA` | For a project's own pre-push hook: exit 0 for a sound push of the logbook or a mailbox, 1 for an unsound one, 3 for any other ref |
 | `harbor.py doctor [--account A]` | Checks this machine against the project's `[harbor.requirements]`: one line per item, exit 1 if one is missing, 2 if the check could not run |
 
 Its hooks keep a session's view of the logbook fresh, so it doesn't decide on stale state. A
@@ -136,6 +137,23 @@ and upload it in Claude (*Customize → Plugins → Upload*). All versions are i
 
 Then run `/harbor:adopt` in a Keelokit project. Tests: `python3 -m unittest discover -s tests`. What is
 designed but not written is listed at the top of [`docs/design.md`](docs/design.md).
+
+## Harbor without Keelokit
+
+Keelokit is not required for the fleet layer: messages between accounts, session requests, the
+dispatcher, titles, `doctor`, the watch and the hooks work in any git repository with a remote. Write the
+project's settings in `.harbor/config.toml` (committed) and each clone's account and host in
+`.harbor/local.toml` (git-ignored); `/harbor:adopt` does both. Convoys, seals and the board import need
+Keelokit's convoy policy (`/keelokit:project-adopt`) and say so when asked without it. A project with its own
+pre-push hook lets Harbor's writes through with `push-guard`:
+
+```bash
+while read l ls r rs; do
+  python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
+  [ $c = 0 ] && continue; [ $c = 1 ] && exit 1
+  # exit 3: not Harbor's ref, the project's own rules go here
+done
+```
 
 ## Good to know
 

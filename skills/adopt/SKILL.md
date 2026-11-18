@@ -1,6 +1,6 @@
 ---
 name: adopt
-description: Set Harbor up on a Keelokit project — the convoy landing policy, this clone's account and host, the logbook branch harbor/log, the account's session cap, the hotspots, and a one-time import of a hand-kept BOARD.md if there is one. Use when the user says "adopt harbor", "set up convoys", "sumá harbor", "configurá harbor", "adoptá harbor", or when the SessionStart line says the logbook is missing.
+description: Set Harbor up on a project, with or without Keelokit — on Keelokit the convoy landing policy, this clone's account and host, the logbook branch harbor/log, the account's session cap, the hotspots, and a one-time import of a hand-kept BOARD.md if there is one. Use when the user says "adopt harbor", "set up convoys", "sumá harbor", "configurá harbor", "adoptá harbor", or when the SessionStart line says the logbook is missing.
 ---
 
 # Adopt — Harbor on top of Keelokit
@@ -8,10 +8,12 @@ description: Set Harbor up on a Keelokit project — the convoy landing policy, 
 `H="${CLAUDE_PLUGIN_ROOT}/lib/harbor.py"`. Every write to the logbook goes through `python3 "$H"`;
 never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
 
-1. **Keelokit first, 0.12.0 or later** (`version` in its `plugin.json`; `.keelokit/bin/status.py title`
+0. **Which path.** Keelokit is optional. `.keelokit/` present: **with Keelokit**, steps 1 to 8 below. Absent:
+   **without Keelokit — fleet layer only**, the section at the end; do not stop. No remote `origin` → stop: the
+   logbook lives there.
+1. **Keelokit 0.12.0 or later** (`version` in its `plugin.json`; `.keelokit/bin/status.py title`
    exists). Older: say Harbor needs 0.12 (its pre-push lets the logbook through, and it titles
-   sessions) and point to `/keelokit:harness-upgrade`. No `.keelokit/` → say Harbor works on top of Keelokit, point to
-   `/keelokit:project-adopt`, and stop. No remote `origin` → stop: the logbook lives there.
+   sessions) and point to `/keelokit:harness-upgrade`.
 2. **The policy and the config.** Show the block you will add to `.keelokit/state.toml` and ask for
    a yes:
    ```toml
@@ -72,3 +74,37 @@ never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
 8. **Report** in ten lines: the policy commit's hash on the trunk (`origin/main`), the logbook's tip
    (`git rev-parse origin/harbor/log`), the cap, the hotspots, the import. Then: start convoys with
    `/harbor:convoy new`.
+
+## Without Keelokit — fleet layer only
+
+Messages between accounts, session requests for dispatchers, titles, `doctor`, the watch and the hooks. No
+convoys, seals or board import. Steps:
+
+1. **Config.** Ask the project's name and write `.harbor/config.toml` (committed):
+   ```toml
+   [harbor]
+   project = "<name>"
+   # trunk = "develop"   # only when the main branch is not `main`
+
+   [harbor.requirements]  # fill with the gatekeeper: tools, hosts, secrets, plugins, skills
+   ```
+2. **This clone.** Ask the account name and a short host name; write `.harbor/local.toml` (`[harbor] account = …,
+   host = …`) and add `.harbor/local.toml` to `.gitignore`. Each clone has its own.
+3. **The hooks** come with the plugin; check that `python3 "$H" check` prints this session's line.
+4. **The logbook.** `python3 "$H" init`, then ask how many sessions this account may run at once (the gatekeeper's
+   budget, no default) and `python3 "$H" account set <account> --max-sessions N`. Without it `worker register`
+   says `ACCOUNT_UNKNOWN`.
+5. **A pre-push hook of the project's own?** Add this to it so Harbor's writes (the logbook, the mailboxes) go
+   through (`H` is the path of `lib/harbor.py`); exit 3 means the ref is not Harbor's and the project's own rules
+   go on:
+   ```bash
+   while read l ls r rs; do
+     python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
+     [ $c = 0 ] && continue; [ $c = 1 ] && exit 1
+     # own rules for the other refs
+   done
+   ```
+6. **Dispatchers** as in step 7 above.
+7. **Report**: the logbook's tip, the cap, and what is not available (convoys, seals, `wanted add --role
+   vessel|skipper`, the board import) and that `/keelokit:project-adopt` followed by this skill's Keelokit path
+   adds them later.
