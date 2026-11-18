@@ -13,7 +13,10 @@ when the project sets it).
 
 ## takeover
 
-`python3 "$H" --session <id> harbormaster takeover`; set this session's title to the one it prints.
+`python3 "$H" --session <id> harbormaster takeover`; set this session's title to the one it prints
+(`set_session_title`, right away). If it also prints a previous holder, that session must now carry the
+`ex-harbormaster · …` title it names (it is the one place its role is told until it ends): set it with
+`set_session_title` when the holder is in this account, otherwise send it a `msg` with that title.
 Refused with `WATCH_HELD` while another
 session's watch hasn't expired; `--relieve "<reason>"` only when the person says so in this
 conversation (the gatekeeper's word). Then schedule this session's own control every `[harbor] control_every_minutes`

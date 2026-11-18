@@ -10,7 +10,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
 
     harbor.py check [--hook]                 SessionStart: Keelokit present, landing policy, a brief
     harbor.py init                           create the logbook on the remote (once; again is a no-op)
-    harbor.py account set ACCOUNT [--max-sessions N] [--heartbeat-hours N]
+    harbor.py account set ACCOUNT [--max-sessions N] [--heartbeat-hours N] [--mailbox-pr N]
     harbor.py account pause ACCOUNT --until TIMESTAMP [--reason TEXT]
     harbor.py account resume ACCOUNT
     harbor.py worker register --role vessel|skipper|harbormaster|dispatcher [--convoy N] [--branch B] [--model M]
@@ -553,13 +553,14 @@ def render_logbook(files: dict, cs: dict) -> str:
         out += ["", f"{ended} ended worker(s), with their handovers, in `harbor/workers/`."]
     acs = accounts(files)
     if acs:
-        out += ["", "## Accounts", "", "| Account | Max sessions | Active | Paused until |", "|---|---|---|---|"]
+        out += ["", "## Accounts", "", "| Account | Max sessions | Active | Paused until | Mailbox |", "|---|---|---|---|---|"]
         for a, d in acs.items():
             active = sum(1 for w in live.values() if w.get("account") == a and w.get("state") == "active")
             until = d.get("paused_until")
             if until and d.get("reason"):
                 until = f"{until} ({d['reason']})"
-            out.append(f"| {a} | {d.get('max_sessions')} | {active} | {cell(until)} |")
+            out.append(f"| {a} | {d.get('max_sessions')} | {active} | {cell(until)} | "
+                       f"{'PR #' + str(d['mailbox_pr']) if d.get('mailbox_pr') else '—'} |")
     if live:
         out += ["", "## Sessions by account", "", "| Account | Session | Title | Role | State |", "|---|---|---|---|---|"]
         for w in sorted(live.values(), key=lambda w: (str(w.get("account")), str(w.get("session")))):
@@ -701,8 +702,8 @@ def cmd_account(args) -> int:
     def mutate(files, head):
         cur = load(files, path) or {"schema": SCHEMA, "account": args.account}
         if args.action == "set":
-            if args.max_sessions is None and args.heartbeat_hours is None:
-                raise HarborError("USAGE", "account set needs --max-sessions N and/or --heartbeat-hours N")
+            if args.max_sessions is None and args.heartbeat_hours is None and args.mailbox_pr is None:
+                raise HarborError("USAGE", "account set needs --max-sessions N, --heartbeat-hours N and/or --mailbox-pr N")
             if args.max_sessions is not None:
                 if args.max_sessions < 1:
                     raise HarborError("USAGE", "--max-sessions is at least 1")
@@ -714,6 +715,13 @@ def cmd_account(args) -> int:
                     raise HarborError("ACCOUNT_UNKNOWN", f"account '{args.account}' has no cap yet: "
                                       "account set --max-sessions first")
                 cur["heartbeat_hours"] = args.heartbeat_hours
+            if args.mailbox_pr is not None:
+                if args.mailbox_pr < 1:
+                    raise HarborError("USAGE", "--mailbox-pr is a pull request number")
+                if "max_sessions" not in cur:
+                    raise HarborError("ACCOUNT_UNKNOWN", f"account '{args.account}' has no cap yet: "
+                                      "account set --max-sessions first")
+                cur["mailbox_pr"] = args.mailbox_pr
         else:
             if "max_sessions" not in cur:
                 raise HarborError("ACCOUNT_UNKNOWN", f"account '{args.account}' has no cap yet: account set first")
@@ -730,7 +738,8 @@ def cmd_account(args) -> int:
     cur = transact(f"account {args.action} {args.account}", me["id"], mutate)
     print(f"harbor: account {args.account}: max {cur.get('max_sessions')} session(s)"
           + (f", paused until {cur['paused_until']}" if cur.get("paused_until") else "")
-          + (f", heartbeat every {cur['heartbeat_hours']} h" if cur.get("heartbeat_hours") else ""))
+          + (f", heartbeat every {cur['heartbeat_hours']} h" if cur.get("heartbeat_hours") else "")
+          + (f", mailbox PR #{cur['mailbox_pr']}" if cur.get("mailbox_pr") else ""))
     return 0
 
 
@@ -3038,6 +3047,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("account")
     s.add_argument("--max-sessions", type=int)
     s.add_argument("--heartbeat-hours", type=int, help="how often the account's dispatcher is woken by a scheduled task")
+    s.add_argument("--mailbox-pr", type=int, metavar="N", help="the account's mailbox: the draft pull request harbor/mailbox/<account>")
     s = asub.add_parser("pause")
     s.add_argument("account")
     s.add_argument("--until", required=True)

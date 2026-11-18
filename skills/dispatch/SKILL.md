@@ -25,7 +25,7 @@ work between accounts.
 ## Register
 
 `python3 "$H" --session <id> worker register --role dispatcher --model <the dispatcher model>`, and set this
-session's title to the one it prints. If it says `ACCOUNT_UNKNOWN`, the account has no cap yet: tell the
+session's title to the one it prints (`set_session_title`, right away). If it says `ACCOUNT_UNKNOWN`, the account has no cap yet: tell the
 gatekeeper (`/harbor:adopt` sets it). `ACCOUNT_AT_CAP`: the account is full; ask the gatekeeper and stop.
 
 ## The loop (on every wake, whatever woke it)
@@ -39,13 +39,16 @@ gatekeeper (`/harbor:adopt` sets it). `ACCOUNT_AT_CAP`: the account is full; ask
    queued on purpose: the watcher exits at once while one is queued, and you would wake in a loop.
 2. **Requests.** `python3 "$H" --session <id> wanted list`. For each open one this account has room for,
    `wanted take <id>`; then `wanted prompt <id>` and pass its output, unchanged, as the prompt of
-   `create_session`, naming the model it states; then `wanted started <id> --session <the new session's id>`.
+   `create_session`, naming the model it states and passing the title it prints as `Name this session: …` as
+   the session's `title`; then `wanted started <id> --session <the new session's id>`.
    `WANTED_TAKEN` means another dispatcher won: go on. `ACCOUNT_AT_CAP` or `ACCOUNT_PAUSED`: leave it open.
 3. **Silent workers.** `python3 "$H" log` lists the workers of this account with their last seen. For each
    one silent longer than `[harbor] silent_minutes` (`msg status` prints the setting), ask `get_session` for it.
    Running and merely quiet: leave it. Ended, failed or gone: say so to `harbormaster` with `msg send --to
    harbormaster`, and let the harbormaster's control mark it lost.
-4. **Re-arm** the watcher (below) and go back to sleep. Don't poll.
+4. **Mailbox.** If the account has a mailbox (`log` shows `PR #N` in the Accounts table), subscribe to it again
+   with `subscribe_pr_activity`: a subscription does not survive a restart, and every wake may be one.
+5. **Re-arm** the watcher (below) and go back to sleep. Don't poll.
 
 ## The watcher
 
@@ -74,7 +77,11 @@ If this session is gone, the task should start a fresh dispatcher in the same ac
 ## Optional
 
 - **A mailbox for the gatekeeper.** One draft pull request per account, never merged, that the dispatcher
-  subscribes to with `subscribe_pr_activity`. A comment on it by a person or a bot wakes the session in
+  subscribes to with `subscribe_pr_activity`. Its name is fixed: branch `harbor/mailbox/<account>`, holding one
+  file `harbor/mailbox/<account>.md`; pull request title `Harbor mailbox: <account>`, draft, never merged. Record
+  it with `python3 "$H" --session <id> account set <account> --mailbox-pr <N>`; the logbook views show it, and
+  step 4 of the loop subscribes again on every wake. If the project's pre-push hook refuses unknown branches,
+  it needs to let `harbor/mailbox/*` through, as it does the logbook. A comment on it by a person or a bot wakes the session in
   seconds; a comment posted by a Claude session never does (the platform counts it as the session's own), so
   agents reach the dispatcher through the logbook, not through this PR.
 - **A fire URL.** A scheduled task with no schedule whose prompt only starts a fresh dispatcher. Its token is

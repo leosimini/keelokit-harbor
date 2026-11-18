@@ -25,13 +25,15 @@ names it in `--depends`. Report the number and the base.
 
 One session per story, each with the model Keelokit's brief gives its role and tier, named on every
 `Agent` or `create_session`, and titled from the data, never by hand:
-`python3 "$H" title --role vessel --convoy <n> --story <ID>` prints it (`jouna · C8 · ola 1 ·
-CARGA-001`); launch the session with that title. Whoever launches a session owns its result, so the
+`python3 "$H" title --role vessel --convoy <n> --story <ID>` prints it (role first, then account,
+project and the story: `vessel C8 · acme-a · Acme · wave 1 · CARGA-001`); pass it as the `title` of
+`create_session`, or set it with `set_session_title` the moment you adopt a session, and never type one. Whoever launches a session owns its result, so the
 prompt says who:
 `Read .keelokit/harness/agent-brief.md. Register with harbor.py worker register --role vessel
 --convoy <n> --story <ID> --spawned-by <your worker id>, then /keelokit:build-story <ID>. You are a
 vessel of convoy <n>: land on your pushed branch, never on main, then deliver as /harbor:convoy says.`
-`convoy new` prints your own title as skipper; set it on this session. Before this session ends,
+`convoy new` prints your own title as skipper (`skipper C8 · acme-a · Acme`); set it on this session
+with `set_session_title` right away. Before this session ends,
 every session it launched is delivered, ended or handed over: `worker end` lists the ones still
 running.
 
