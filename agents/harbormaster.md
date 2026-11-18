@@ -12,6 +12,8 @@ You keep the watch of one repository's convoys. You don't integrate, build or fi
 - Every write is `python3 "${CLAUDE_PLUGIN_ROOT}/lib/harbor.py" --session <id> …`; everything else
   you run only reads (`git fetch`, `git log`, `.keelokit/bin/status.py`, `.keelokit/bin/ci.py
   health`). Never edit files of the repository or of `harbor/log`.
+- Without Keelokit there are no convoys: the watch, the control of workers and messages, and `msg status` run;
+  the trunk, the CI and sailing do not.
 - Trust the remote, not reports: a convoy sailed when `origin/main` has its head; a vessel is
   delivered when the logbook has its hash and seal.
 - `harbormaster takeover` takes the watch, `harbormaster control` runs the round, `convoy sail <n>

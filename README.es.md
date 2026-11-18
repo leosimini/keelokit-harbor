@@ -125,8 +125,8 @@ falta una persona. Los agentes deciden dentro de lo que el gatekeeper ya decidi�
 
 ## Probarlo
 
-Necesitás Keelokit 0.12.0 o posterior en el proyecto (`.keelokit/`), Python 3.11+, git y un remoto
-`origin`.
+Necesitás Python 3.11+, git y un remoto `origin`; la capa de convoyes necesita además Keelokit 0.12.0 o
+posterior en el proyecto (`.keelokit/`).
 
 ```bash
 claude plugin marketplace add leosimini/keelokit-harbor
@@ -138,7 +138,7 @@ y subilo en Claude (*Customize → Plugins → Upload*). Todas las versiones est
 [releases](https://github.com/leosimini/keelokit-harbor/releases). Para cargarlo desde un clon:
 `claude --plugin-dir /ruta/a/keelokit-harbor`.
 
-Después corré `/harbor:adopt` en un proyecto con Keelokit. Tests: `python3 -m unittest discover -s tests`. Lo
+Después corré `/harbor:adopt` en un proyecto (con o sin Keelokit). Tests: `python3 -m unittest discover -s tests`. Lo
 diseñado y no escrito está al principio de [`docs/design.md`](docs/design.md).
 
 ## Harbor sin Keelokit
@@ -153,21 +153,20 @@ proyecto con su propio hook de pre-push deja pasar las escrituras de Harbor con 
 ```bash
 while read l ls r rs; do
   python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
-  [ $c = 0 ] && continue; [ $c = 1 ] && exit 1
-  # exit 3: not Harbor's ref, the project's own rules go here
+  case $c in 0) continue;; 3) ;; *) exit 1;; esac  # 3: not Harbor's ref, the project's own rules go here
 done
 ```
 
 ## Bueno saber
 
-- Harbor depende de Keelokit y no copia nada de su código. Corre el `pnpm verify` de Keelokit, lee
-  su `state.toml` y usa sus niveles y su trailer `Story:`. Sin `.keelokit/`, Harbor imprime una
-  línea y no hace nada.
-- Los hooks corren `lib/harbor.py sync --hook` desde el plugin y leen `.keelokit/state.toml` y
-  `.keelokit/local.toml` del proyecto. Una sesión arranca con un fetch nuevo (tope de 4 s), ve qué
-  cambió en el logbook en cada prompt (como máximo cada 60 s) y después de las herramientas (cada
-  2 min), y recibe los convoys abiertos antes de un push a `main`. Funcionan sin red y nunca
-  bloquean una sesión.
+- Harbor no copia nada del código de Keelokit. Con Keelokit corre su `pnpm verify`, lee su `state.toml` y usa
+  sus niveles y su trailer `Story:`; sin `.keelokit/`, la capa de flota corre desde `.harbor/` (ver «Harbor sin
+  Keelokit») y un repositorio sin ninguno de los dos directorios se deja en paz, sin decir nada.
+- Los hooks corren `lib/harbor.py sync --hook` desde el plugin y leen la configuración y la identidad del
+  proyecto (`.keelokit/state.toml` y `.keelokit/local.toml`, o `.harbor/config.toml` y `.harbor/local.toml`).
+  Una sesión arranca con un fetch nuevo (tope de 4 s), ve qué cambió en el logbook en cada prompt (como máximo
+  cada 60 s) y después de las herramientas (cada 2 min) y, con Keelokit, recibe los convoys abiertos antes de
+  un push a `main`. Funcionan sin red y nunca bloquean una sesión.
 - `harbor.py seal` corre el comando de `[harbor] vessel_verify` del `state.toml` del proyecto. Es
   código del proyecto, igual que sus tests.
 - Un convoy con una historia de nivel full o que toca un área crítica también espera el sí del gatekeeper antes

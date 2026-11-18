@@ -10,6 +10,16 @@
 - **`.harbor/config.toml`** (committed; `[harbor] project`, `trunk`, models, requirements, import) and
   **`.harbor/local.toml`** (git-ignored; account and host) replace Keelokit's files where there is none.
   Keelokit's win when both exist, and `doctor` and `log` say so.
+- **Round-1 review fixes.** The `convoy approve` guard runs on any input again (0.4 behaviour), so a session
+  rooted in a repository without Keelokit cannot approve by `cd`-ing into one that has it. `push-guard` asks
+  for a fetch when the remote's tip is unknown (a logbook write racing another clone replays instead of
+  failing), refuses when it finds no trunk, never reads the local trunk branch, maps every error on a Harbor
+  ref to exit 1 and works in the hook's repository; the documented snippet now refuses on any exit but 0 and 3.
+  A repository with neither `.keelokit/` nor `.harbor/` hears nothing at SessionStart. `doctor` and `init`
+  catch a committed `.harbor/local.toml`, and `init` git-ignores it. Fleet-only repos get no convoy lines in
+  the hooks, messages name the config file in use, `[harbor] project` must be one line of at most 60
+  characters, `worker register --story` says `NEEDS_KEELOKIT`, a worktree reads the main checkout's identity,
+  and a Keelokit repo never falls back to `.harbor/local.toml`.
 - **`harbor.py push-guard`** lets a project's own pre-push hook accept the logbook and the mailboxes: exit 0
   sound, 1 unsound, 3 not a Harbor ref.
 

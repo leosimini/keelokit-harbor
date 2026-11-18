@@ -931,12 +931,16 @@ With Keelokit nothing changes: its files stay the source and the policy is still
   (the project in titles) and `[harbor] trunk`. It is read only when there is no `.keelokit/`; with both,
   Keelokit wins and `doctor` and `log` say `.harbor/config.toml is ignored: this project runs on Keelokit`.
 - **Identity, never committed:** `.harbor/local.toml`, `[harbor] account` and `host`, one per clone, in
-  `.gitignore`. `.keelokit/local.toml` is read first when it exists.
+  `.gitignore` (`init` adds it when it is not ignored). A Keelokit repo reads `.keelokit/local.toml` only, no
+  fallback to `.harbor/local.toml`; a linked worktree without its own file uses the main checkout's. If the file
+  is tracked by git every clone would share one identity: `doctor` reports it (exit 1) and `init` refuses (exit 2).
 - **Titles:** `role · account · project`, the project being `[harbor] project` or the main checkout's
   directory name. A story's part comes from Keelokit's `status.py title`, so a title with a story needs Keelokit
   (`NO_TITLE` otherwise).
-- **Hooks:** they act only in a repository with `.keelokit/` or `.harbor/`; anywhere else the SessionStart
-  line says Harbor does nothing there. The `convoy approve` guard runs only where there is Keelokit.
+- **Hooks:** they act only in a repository with `.keelokit/` or `.harbor/`; anywhere else they say nothing. The
+  `convoy approve` guard runs on any input, as in 0.4, whatever repository the session is rooted in (a command can
+  `cd` into one that has Keelokit). Without Keelokit the hooks leave out the convoy lines: SessionStart does not
+  count convoys, and a push to the trunk gets no note and no fetch.
 
 ### `push-guard`: a project's own pre-push hook
 
@@ -946,22 +950,24 @@ Harbor's and sound, **1** when it is a Harbor ref and unsound (the reason on std
 Harbor's.
 
 - `refs/heads/harbor/log`: no delete; the remote's tip must be an ancestor of what is pushed (no dropped
-  commits); every new commit's tree holds only regular files (mode 100644) under `harbor/`; the branch shares
+  commits). A tip the clone does not have means another clone wrote first (git runs the hook before it finds
+  out): the refusal says «fetch first», which Harbor's own write answers by fetching and replaying; every new commit's tree holds only regular files (mode 100644) under `harbor/`; the branch shares
   no history with the trunk.
 - `refs/heads/harbor/mailbox/<account>` (a valid account name): on top of the trunk, each new commit a
   single-parent commit that adds or changes exactly `harbor/mailbox/<account>.md` as a regular file; no delete.
 
-The trunk is read from `origin/<trunk>` (then Harbor's own copy of it, then the local branch). A bash hook:
+The trunk is read from `origin/<trunk>`, then Harbor's own copy of it, never the local branch; with neither the push is
+refused. Any error on a Harbor ref is exit 1, and the repository is the hook's (its working directory), never the
+session's `CLAUDE_PROJECT_DIR`. So the hook below refuses on any exit but 0 and 3. A bash hook:
 
 ```bash
 while read l ls r rs; do
   python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
-  [ $c = 0 ] && continue; [ $c = 1 ] && exit 1
-  # exit 3: not Harbor's ref, the project's own rules go here
+  case $c in 0) continue;; 3) ;; *) exit 1;; esac  # 3: not Harbor's ref, the project's own rules go here
 done
 ```
 
-with `H` the path of `lib/harbor.py`.
+with `H` the path of `lib/harbor.py`: a stale `H` or a Harbor that cannot run exits 2, and that refuses the push.
 
 ## Phase 4: names, mailboxes and requirements *(0.4.0)*
 

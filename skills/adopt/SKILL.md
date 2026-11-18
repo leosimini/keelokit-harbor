@@ -3,7 +3,7 @@ name: adopt
 description: Set Harbor up on a project, with or without Keelokit — on Keelokit the convoy landing policy, this clone's account and host, the logbook branch harbor/log, the account's session cap, the hotspots, and a one-time import of a hand-kept BOARD.md if there is one. Use when the user says "adopt harbor", "set up convoys", "sumá harbor", "configurá harbor", "adoptá harbor", or when the SessionStart line says the logbook is missing.
 ---
 
-# Adopt — Harbor on top of Keelokit
+# Adopt — Harbor on a project
 
 `H="${CLAUDE_PLUGIN_ROOT}/lib/harbor.py"`. Every write to the logbook goes through `python3 "$H"`;
 never edit `harbor/log` by hand. Design: `${CLAUDE_PLUGIN_ROOT}/docs/design.md`.
@@ -96,12 +96,11 @@ convoys, seals or board import. Steps:
    says `ACCOUNT_UNKNOWN`.
 5. **A pre-push hook of the project's own?** Add this to it so Harbor's writes (the logbook, the mailboxes) go
    through (`H` is the path of `lib/harbor.py`); exit 3 means the ref is not Harbor's and the project's own rules
-   go on:
+   go on, any other exit refuses the push:
    ```bash
    while read l ls r rs; do
      python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
-     [ $c = 0 ] && continue; [ $c = 1 ] && exit 1
-     # own rules for the other refs
+     case $c in 0) continue;; 3) ;; *) exit 1;; esac  # 3: not Harbor's ref, own rules for the other refs go here
    done
    ```
 6. **Dispatchers** as in step 7 above.

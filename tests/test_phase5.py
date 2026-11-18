@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 
 try:
-    from .test_harbor import GIT_ENV, HARBOR, NOW, harbor, ok, sh
+    from .test_harbor import GIT_ENV, HARBOR, NOW, harbor, load_module, ok, sh
 except ImportError:  # run as `discover -s tests`: the tests directory is the top level
-    from test_harbor import GIT_ENV, HARBOR, NOW, harbor, ok, sh
+    from test_harbor import GIT_ENV, HARBOR, NOW, harbor, load_module, ok, sh
 
 IDENTITY = '[harbor]\naccount = "{a}"\nhost = "mbp"\n'
 ZERO = "0" * 40
@@ -134,14 +134,16 @@ class Fleet(Plain):
         bare = self.tmp / "bare"
         sh(self.tmp, "git", "clone", "--quiet", str(self.remote), str(bare))
         res = self.hook(bare)
-        self.assertIn("does nothing", res.stdout)
-        self.assertEqual(res.returncode, 0)
+        self.assertEqual((res.stdout, res.returncode), ("", 0))
 
-    def test_the_approve_guard_only_runs_where_there_is_keelokit(self):
-        fields = {"tool_name": "Bash", "tool_input": {"command": "harbor.py convoy approve 3"}}
-        self.assertEqual(self.hook(self.a, "PreToolUse", **fields).returncode, 0)
+    def test_the_approve_guard_runs_on_any_input_whatever_repo_the_session_is_rooted_in(self):
+        for command in ("harbor.py convoy approve 3", f"cd {self.tmp} && harbor.py convoy approve 3",
+                        f"git -C {self.tmp} status && python3 x/harbor.py convoy approve 3"):
+            res = self.hook(self.a, "PreToolUse", tool_name="Bash", tool_input={"command": command})
+            self.assertEqual(res.returncode, 2, command)
         (self.a / ".keelokit").mkdir()
-        self.assertEqual(self.hook(self.a, "PreToolUse", **fields).returncode, 2)
+        res = self.hook(self.a, "PreToolUse", tool_name="Bash", tool_input={"command": "harbor.py convoy approve 3"})
+        self.assertEqual(res.returncode, 2)
 
     def test_keelokit_wins_when_both_exist(self):
         self.ready()
@@ -152,6 +154,57 @@ class Fleet(Plain):
         self.assertIn(".harbor/config.toml is ignored: this project runs on Keelokit", ok(harbor(self.a, "log")))
         self.assertIn("is ignored", ok(harbor(self.a, "doctor")))
         self.assertNotIn("Ignored", ok(harbor(self.a, "title", "--role", "dispatcher")))
+
+
+    def test_a_committed_identity_file_is_refused_by_doctor_and_init(self):
+        sh(self.a, "git", "add", "-f", ".harbor/local.toml")
+        sh(self.a, "git", "commit", "--quiet", "-m", "identity")
+        res = harbor(self.a, "doctor")
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("committed", res.stdout)
+        res = harbor(self.a, "init")
+        self.assertEqual(res.returncode, 2, res.stdout + res.stderr)
+        self.assertIn("every clone shares one identity", res.stderr)
+
+    def test_init_keeps_the_identity_file_out_of_git(self):
+        ok(harbor(self.a, "init"))
+        self.assertIn(".harbor/local.toml", (self.a / ".gitignore").read_text().splitlines())
+        sh(self.a, "git", "check-ignore", "-q", ".harbor/local.toml")
+        ok(harbor(self.a, "init"))
+        self.assertEqual((self.a / ".gitignore").read_text().count(".harbor/local.toml"), 1)
+
+    def test_a_worktree_without_its_own_identity_uses_the_main_checkouts(self):
+        wt = self.tmp / "wt"
+        sh(self.a, "git", "worktree", "add", "--quiet", "-b", "side", str(wt))
+        self.assertFalse((wt / ".harbor/local.toml").exists())
+        self.assertEqual(ok(harbor(wt, "title", "--role", "dispatcher")).strip(), "dispatcher · acct1 · a")
+
+    def test_a_keelokit_repo_does_not_fall_back_to_the_harbor_identity(self):
+        (self.a / ".keelokit").mkdir()
+        (self.a / ".keelokit/state.toml").write_text('[landing]\npolicy = "convoy"\n')
+        res = harbor(self.a, "init")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn(".keelokit/local.toml", res.stderr)
+
+    def test_the_project_name_is_one_short_line(self):
+        for bad in ('"a\\nb"', '"' + "x" * 61 + '"', "3"):
+            (self.a / ".harbor/config.toml").write_text(f"[harbor]\nproject = {bad}\n")
+            res = harbor(self.a, "title", "--role", "dispatcher")
+            self.assertEqual(res.returncode, 2, bad)
+            self.assertIn("BAD_CONFIG", res.stderr)
+
+    def test_a_story_worker_without_keelokit_needs_keelokit(self):
+        self.ready()
+        res = harbor(self.a, "worker", "register", "--role", "vessel", "--story", "X-1", session="s2")
+        self.assertEqual(res.returncode, 2, res.stderr)
+        self.assertIn("NEEDS_KEELOKIT", res.stderr)
+
+    def test_the_fleet_hooks_say_nothing_about_convoys(self):
+        self.ready()
+        self.assertNotIn("convoy", self.hook(self.a).stdout)
+        res = self.hook(self.a, "PreToolUse", tool_name="Bash", tool_input={"command": "git push origin main"})
+        self.assertEqual((res.stdout, res.returncode), ("", 0))
+
 
 
 class PushGuard(Plain):
@@ -238,6 +291,80 @@ class PushGuard(Plain):
         self.assertEqual(self.guard("refs/heads/harbor/mailbox/acct1", sha).returncode, 1)
         sha = self.mailbox({"harbor/mailbox/acct1.md": "hi\n"}, 0o755)
         self.assertEqual(self.guard("refs/heads/harbor/mailbox/acct1", sha).returncode, 1)
+
+    def test_an_unknown_remote_tip_asks_for_a_fetch_and_a_known_one_refuses(self):
+        sha = self.orphan({"harbor/a.toml": "x = 1\n"})
+        res = self.guard("refs/heads/harbor/log", sha, remote_sha="1" * 40)
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("fetch first", res.stderr)
+
+    def test_the_logbook_refuses_when_no_trunk_is_found(self):
+        sha = self.orphan({"harbor/a.toml": "x = 1\n"})
+        sh(self.a, "git", "update-ref", "-d", "refs/remotes/origin/main")
+        res = self.guard("refs/heads/harbor/log", sha)
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("can't find", res.stderr)
+
+    def test_a_local_trunk_branch_is_not_the_trunk(self):
+        sha = self.mailbox({"harbor/mailbox/acct1.md": "hi\n"})
+        sh(self.a, "git", "update-ref", "-d", "refs/remotes/origin/main")
+        self.assertEqual(self.guard("refs/heads/harbor/mailbox/acct1", sha).returncode, 1)
+
+    def test_an_error_on_a_harbor_ref_is_exit_1_and_the_repo_is_the_hooks_not_the_sessions(self):
+        res = self.guard("refs/heads/harbor/log", "d" * 40)
+        self.assertEqual(res.returncode, 1, res.stderr)
+        sha = self.orphan({"harbor/a.toml": "x = 1\n"})
+        res = harbor(self.a, "push-guard", "refs/heads/harbor/log", sha, "refs/heads/harbor/log", ZERO, session=None,
+                     env={"CLAUDE_PROJECT_DIR": str(self.tmp)})
+        self.assertEqual(res.returncode, 0, res.stderr)
+
+
+HOOK = """#!/bin/sh
+H={harbor}
+while read l ls r rs; do
+  python3 "$H" push-guard "$l" "$ls" "$r" "$rs"; c=$?
+  case $c in 0) continue;; 3) ;; *) exit 1;; esac
+done
+exit 0
+"""
+
+
+class InstalledHook(Plain):
+    """The documented pre-push snippet, installed for real."""
+
+    def install(self, clone: Path, harbor_path=HARBOR):
+        hook = clone / ".git/hooks/pre-push"
+        hook.write_text(HOOK.format(harbor=harbor_path))
+        hook.chmod(0o755)
+
+    def test_two_clones_racing_on_the_logbook_both_land_through_the_hook(self):
+        import contextlib
+        import io
+        self.ready(role="dispatcher")
+        b = self.clone("b")
+        sh(b, "git", "fetch", "--quiet", "origin")
+        for c in (self.a, b):
+            self.install(c)
+        saved = {k: os.environ.get(k) for k in (*GIT_ENV, "HARBOR_NOW", "CLAUDE_PROJECT_DIR")}
+        os.environ.update({**GIT_ENV, "HARBOR_NOW": NOW})
+        os.environ.pop("CLAUDE_PROJECT_DIR", None)
+        self.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+                                 for k, v in saved.items()])
+        mod = load_module()
+        mod.BEFORE_PUSH = lambda: ok(harbor(b, "msg", "send", "--to", "account:acct1", "from b"))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = mod.main(["--session", "s1", "msg", "send", "--to", "account:acct1", "from a"], root=self.a)
+        self.assertEqual(rc, 0, err.getvalue())
+        log = ok(harbor(self.a, "msg", "list"))
+        self.assertIn("from a", log)
+        self.assertIn("from b", log)
+
+    def test_a_hook_that_cannot_run_harbor_refuses_the_push(self):
+        self.ready(role="dispatcher")
+        self.install(self.a, self.tmp / "gone.py")
+        res = harbor(self.a, "msg", "send", "--to", "account:acct1", "hi")
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("PUSH_FAILED", res.stderr)
 
 
 if __name__ == "__main__":
