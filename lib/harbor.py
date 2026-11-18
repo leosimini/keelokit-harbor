@@ -90,6 +90,7 @@ MAIN = "main"
 # by default). keelokit() sets it from the state file, and every command and every hook that acts on the
 # trunk goes through keelokit() first; where there is no state file or no convoy policy it stays `main`.
 TRUNK = MAIN
+CONFIG_PATH = ".keelokit/state.toml"  # where project() read the settings from
 CFG: dict = {}  # the project's config as keelokit() last read it; the generated views read their limits from it
 STATES = ("assembling", "waiting", "ready", "verifying", "sailed", "aborted")
 OPEN = ("assembling", "waiting", "ready", "verifying")
@@ -144,7 +145,7 @@ DEFAULT_MODELS = {
 }
 VESSEL_MODEL = "sonnet"        # what `wanted add --role vessel` asks for when nothing says otherwise
 DEFAULT_MIGRATIONS = ["apps/*/prisma/migrations", "*/migrations", "db/migrations"]
-ENV_CODES = {"NO_KEELOKIT", "POLICY_NOT_CONVOY", "BAD_CONFIG", "NO_IDENTITY", "NO_SESSION", "NOT_A_REPO", "USAGE",
+ENV_CODES = {"NO_KEELOKIT", "NEEDS_KEELOKIT", "NO_PROJECT", "POLICY_NOT_CONVOY", "BAD_CONFIG", "NO_IDENTITY", "NO_SESSION", "NOT_A_REPO", "USAGE",
              "FETCH_FAILED", "PUSH_FAILED"}
 
 ROOT = Path.cwd()
@@ -301,37 +302,59 @@ def fmt_ts(t: dt.datetime) -> str:
     return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def keelokit() -> dict:
-    """The project's .keelokit/state.toml, or a refusal: Harbor runs only on Keelokit with the convoy policy.
-    Also sets TRUNK from it, so nothing acts on a trunk the state file didn't name."""
-    global TRUNK, CFG
-    if not (ROOT / ".keelokit").is_dir():
-        raise HarborError("NO_KEELOKIT", "this repo has no .keelokit/: Harbor works on top of Keelokit "
-                          "(/keelokit:project-adopt) and does nothing here")
+def has_keelokit() -> bool:
+    return (ROOT / ".keelokit").is_dir()
+
+
+def keelokit(command: str = "this command") -> dict:
+    """The convoy layer's gate: the project's .keelokit/state.toml with the convoy policy, or a refusal."""
+    if not has_keelokit():
+        raise HarborError("NEEDS_KEELOKIT", f"{command} runs on Keelokit's convoy policy (/keelokit:project-adopt)")
+    return project()
+
+
+def project(hook: bool = False) -> dict:
+    """The project's settings, read once per command: .keelokit/state.toml when the repo has Keelokit (it then
+    needs [landing] policy = "convoy", as in 0.4), else .harbor/config.toml (absent: no settings, the defaults).
+    Sets TRUNK, CONFIG_PATH and CFG. `hook`: a repo with neither .keelokit/ nor .harbor/ is not Harbor's."""
+    global TRUNK, CFG, CONFIG_PATH
+    if has_keelokit():
+        CONFIG_PATH = ".keelokit/state.toml"
+    elif (ROOT / ".harbor").is_dir() or not hook:
+        CONFIG_PATH = ".harbor/config.toml"
+    else:
+        raise HarborError("NO_PROJECT", "this repo has no .keelokit/ or .harbor/: Harbor does nothing here (/harbor:adopt)")
     try:
-        state = tomllib.loads((ROOT / ".keelokit/state.toml").read_text(encoding="utf-8"))
+        state = tomllib.loads((ROOT / CONFIG_PATH).read_text(encoding="utf-8"))
     except FileNotFoundError:
         state = {}
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
-        raise HarborError("NO_KEELOKIT", f".keelokit/state.toml is not valid TOML: {e}")
-    policy = (state.get("landing") or {}).get("policy")
-    if policy != "convoy":
-        raise HarborError("POLICY_NOT_CONVOY", f"[landing] policy is {json.dumps(policy) if policy else 'not set'} in "
-                          ".keelokit/state.toml; Harbor runs only with policy = \"convoy\" (/harbor:adopt)")
+        raise HarborError("NO_KEELOKIT" if has_keelokit() else "BAD_CONFIG", f"{CONFIG_PATH} is not valid TOML: {e}")
+    if has_keelokit():
+        policy = (state.get("landing") or {}).get("policy")
+        if policy != "convoy":
+            raise HarborError("POLICY_NOT_CONVOY", f"[landing] policy is {json.dumps(policy) if policy else 'not set'} in "
+                              ".keelokit/state.toml; Harbor runs only with policy = \"convoy\" (/harbor:adopt)")
     harbor = state.get("harbor") if isinstance(state.get("harbor"), dict) else {}
     TRUNK = trunk_of(harbor)
     if not isinstance(harbor.get("own_verify", False), bool):
-        raise HarborError("BAD_CONFIG", f"[harbor] own_verify = {harbor['own_verify']!r} in .keelokit/state.toml: "
+        raise HarborError("BAD_CONFIG", f"[harbor] own_verify = {harbor['own_verify']!r} in {CONFIG_PATH}: "
                           "it is true or false")
     CFG = config(state)
     return state
+
+
+def ignored_note() -> str | None:
+    if has_keelokit() and (ROOT / ".harbor/config.toml").exists():
+        return ".harbor/config.toml is ignored: this project runs on Keelokit"
+    return None
 
 
 def trunk_of(harbor: dict) -> str:
     """[harbor] trunk, checked: a branch name that can live on the remote beside the logbook and convoy/<n>."""
     name = harbor.get("trunk", MAIN)
     if not (isinstance(name, str) and BRANCH.fullmatch(name) and ".." not in name and not name.endswith(".lock")):
-        raise HarborError("BAD_CONFIG", f"[harbor] trunk = {name!r} in .keelokit/state.toml is not a branch name "
+        raise HarborError("BAD_CONFIG", f"[harbor] trunk = {name!r} in {CONFIG_PATH} is not a branch name "
                           "(letters, digits, . _ - and /)")
     # Not the logbook, not a convoy branch, and no name git can't keep beside them (`convoy` and
     # `convoy/1` can't both exist): a sail would push a convoy's head onto Harbor's own branches.
@@ -359,15 +382,18 @@ def config(state: dict) -> dict:
 
 
 def identity(session: str | None, need_session: bool = True) -> dict:
+    # .keelokit/local.toml is read first; without it, .harbor/local.toml (a project without Keelokit)
+    where = next((f for f in (".keelokit/local.toml", ".harbor/local.toml") if (ROOT / f).exists()),
+                 ".keelokit/local.toml" if has_keelokit() else ".harbor/local.toml")
     try:
-        local = tomllib.loads((ROOT / ".keelokit/local.toml").read_text(encoding="utf-8")).get("harbor") or {}
+        local = tomllib.loads((ROOT / where).read_text(encoding="utf-8")).get("harbor") or {}
     except FileNotFoundError:
         local = {}
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
-        raise HarborError("NO_IDENTITY", f".keelokit/local.toml is not valid TOML: {e}")
+        raise HarborError("NO_IDENTITY", f"{where} is not valid TOML: {e}")
     account, host = local.get("account"), local.get("host")
     if not (isinstance(account, str) and NAME.fullmatch(account) and isinstance(host, str) and NAME.fullmatch(host)):
-        raise HarborError("NO_IDENTITY", "set [harbor] account and host in .keelokit/local.toml (letters, digits, . _ -); "
+        raise HarborError("NO_IDENTITY", f"set [harbor] account and host in {where} (letters, digits, . _ -); "
                           "the file is git-ignored, one per clone")
     session = session or os.environ.get("HARBOR_SESSION") or os.environ.get("CLAUDE_SESSION_ID") or None
     if session is not None and not NAME.fullmatch(session):
@@ -652,7 +678,7 @@ def cmd_check(args) -> int:
 def session_start(session: str | None, arg_session: str | None, fresh: bool) -> int:
     """The SessionStart lines. `fresh`: fetch first (the logbook only, 4 s cap) and say so; else read the last fetch."""
     try:
-        state = keelokit()
+        state = project(hook=True)
     except HarborError as e:
         print(f"Harbor: {e.why}.")
         return 0
@@ -690,7 +716,7 @@ def session_start(session: str | None, arg_session: str | None, fresh: bool) -> 
 
 
 def cmd_init(args) -> int:
-    keelokit()
+    project()
     me = identity(args.session, need_session=False)
 
     def mutate(files, head):
@@ -706,7 +732,7 @@ def cmd_init(args) -> int:
 
 
 def cmd_account(args) -> int:
-    keelokit()
+    project()
     me = identity(args.session, need_session=False)
     if not NAME.fullmatch(args.account):
         raise HarborError("USAGE", f"account '{args.account}' has characters outside letters, digits, . _ -")
@@ -785,8 +811,10 @@ def session_title(role: str, convoy: int | None, story: str | None, account: str
     base = keelokit_title(story)
     if not base and story:
         return None
-    # a Keelokit without status.py title: the repository (the main checkout, not a worktree) names the project
-    base = base or (COMMON.parent if COMMON else ROOT).name.replace(SEP, " ")
+    # no Keelokit, or one without status.py title: [harbor] project, else the repository (the main checkout,
+    # not a worktree), names the project
+    name = CFG.get("project") if not has_keelokit() and isinstance(CFG.get("project"), str) else None
+    base = base or (name or (COMMON.parent if COMMON else ROOT).name).replace(SEP, " ")
     project, *scope = base.split(SEP)
     head = role + (f" C{convoy}" if convoy and role in ("vessel", "skipper") else "")
     return SEP.join([head, account, project, *(scope if story else [])])
@@ -799,7 +827,7 @@ def paused(acc: dict | None) -> str | None:
 
 
 def cmd_worker(args) -> int:
-    keelokit()
+    project()
     me = identity(args.session)
     path = worker_path(me["id"])
 
@@ -881,7 +909,7 @@ def cmd_worker(args) -> int:
 
 
 def cmd_seal(args) -> int:
-    state = keelokit()
+    state = keelokit("seal")
     cfg = config(state)
     me = identity(args.session, need_session=False)
     if git("status", "--porcelain", "--untracked-files=normal"):
@@ -1027,7 +1055,7 @@ def hotspots_of(paths: list[str], spots: dict) -> list[str]:
 
 
 def cmd_convoy(args) -> int:
-    state = keelokit()
+    state = keelokit("convoy")
     cfg = config(state)
     if args.action == "status":
         return convoy_status(args)
@@ -1169,7 +1197,7 @@ def convoy_status(args) -> int:
 
 
 def cmd_models(args) -> int:
-    cfg = config(keelokit())
+    cfg = config(project())
     for role, default in DEFAULT_MODELS.items():
         chosen = cfg["models"].get(role)
         print(f"{role} {chosen or default} ({'state.toml [harbor.models]' if chosen else 'default'})")
@@ -1178,23 +1206,26 @@ def cmd_models(args) -> int:
 
 
 def cmd_title(args) -> int:
-    keelokit()
+    project()
     account = args.account or identity(args.session, need_session=False)["account"]
     if not NAME.fullmatch(account):
         raise HarborError("USAGE", f"account '{account}' has characters outside letters, digits, . _ -")
     title = session_title(args.role, args.convoy, args.story, account)
     if not title:
         raise HarborError("NO_TITLE", "Keelokit's status.py title can't say"
-                          + (f" (is {args.story} a story with a wave?)" if args.story else " (Keelokit 0.12 or later?)"))
+                          + (f" (is {args.story} a story with a wave?)" if args.story else " (Keelokit 0.12 or later?)")
+                          if has_keelokit() else "a story's title comes from Keelokit (/keelokit:project-adopt)")
     print(title)
     return 0
 
 
 def cmd_log(args) -> int:
-    keelokit()
+    project()
     head, files = snapshot()
     sys.stdout.write(files.get("harbor/LOGBOOK.md") or files.get("LOGBOOK.md", ""))
     print(f"\n(logbook @{short(head)})")
+    if note := ignored_note():
+        print(note)
     return 0
 
 
@@ -2063,7 +2094,7 @@ def what_changed(seen_tip: str | None, tip: str) -> str:
 
 def req_section(sha: str) -> dict | None:
     """[harbor.requirements] as `sha` has it, None when the file or the section isn't there."""
-    res = run("git", "show", f"{sha}:.keelokit/state.toml", check=False)
+    res = run("git", "show", f"{sha}:{CONFIG_PATH}", check=False)
     try:
         sec = (tomllib.loads(res.stdout).get("harbor") or {}).get("requirements") if res.returncode == 0 else None
     except tomllib.TOMLDecodeError:
@@ -2267,10 +2298,21 @@ def json_context(name: str, text: str) -> None:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": name, "additionalContext": text}}))
 
 
+def fleet_only(raw: str, root: Path | None) -> bool:
+    """True when the hook's repo is found and has no Keelokit: there is no `convoy approve` to guard."""
+    try:
+        ev = json.loads(raw or "{}")
+        ev = ev if isinstance(ev, dict) else {}
+        found = find_git(Path(root or os.environ.get("CLAUDE_PROJECT_DIR") or ev.get("cwd") or Path.cwd()).resolve())
+        return bool(found) and not (found[0] / ".keelokit").is_dir()
+    except (ValueError, OSError):
+        return False
+
+
 def cmd_sync(args, root: Path | None = None) -> int:
     global ROOT, REMOTE, COMMON
     raw = "" if sys.stdin.isatty() else sys.stdin.read()
-    if GUARDED.search(guard_text(raw)):  # first, on any input, whatever the event
+    if GUARDED.search(guard_text(raw)) and not fleet_only(raw, root):  # first, on any input, whatever the event
         return cmd_guard(args, raw)
     try:
         ev = json.loads(raw or "{}")
@@ -2293,7 +2335,7 @@ def cmd_sync(args, root: Path | None = None) -> int:
         gap = {"UserPromptSubmit": PROMPT_GAP, "PostToolUse": TOOL_GAP}.get(name)
         if gap and (seen_path(session) is None or throttled(session, gap)):
             return 0  # the common case: one small JSON read; no session id, nothing to compare with
-        keelokit()
+        project(hook=True)
         if name == "UserPromptSubmit":
             deliver(session, gap, print)
         elif name == "PostToolUse":
@@ -2314,7 +2356,7 @@ PHASE2 = {"assemble": convoy_assemble, "approve": convoy_approve, "verify": conv
 
 
 def cmd_harbormaster(args) -> int:
-    state = keelokit()
+    state = project()
     cfg = config(state)
     me = identity(args.session)
     if args.action == "takeover":
@@ -2363,13 +2405,13 @@ def cmd_harbormaster(args) -> int:
 
     # control
     _, files = snapshot()
-    main_tip = fetch(TRUNK)
+    main_tip = fetch(TRUNK) if has_keelokit() else None  # without Keelokit there are no convoys: no trunk to follow
     tips = {}
     for c in convoys(files).values():
         if c.get("state") in OPEN:
             for v in c.get("vessels") or []:
                 tips[v["branch"]] = fetch(v["branch"])
-    ci, ci_line = ci_health(cfg)
+    ci, ci_line = ci_health(cfg) if has_keelokit() else ("", "")
 
     def mutate(files, h):
         hm = watch(files)
@@ -2378,7 +2420,7 @@ def cmd_harbormaster(args) -> int:
         w = active_worker(files, me)
         hm.update(last_control=now(), expires=fmt_ts(parse_ts(now()) + expiry(cfg)))
         save(files, "harbor/harbormaster.toml", hm)
-        lines = [f"watch: {me['id']} until {hm['expires']}", f"{TRUNK}: {short(main_tip)} · {ci_line}"]
+        lines = [f"watch: {me['id']} until {hm['expires']}"] + ([f"{TRUNK}: {short(main_tip)} · {ci_line}"] if has_keelokit() else [])
         mt = load(files, "harbor/main.toml") or {}
         cs = convoys(files)
         cause = ""
@@ -2446,6 +2488,75 @@ def cmd_harbormaster(args) -> int:
     if urgent:
         print("\n".join(urgent[:10]) + (f"\n… {len(urgent) - 10} more: harbor.py msg status" if len(urgent) > 10 else ""))
     return 0
+
+# --- push-guard: a project's own pre-push hook lets Harbor's writes through ---------------------------
+# `harbor.py push-guard <local_ref> <local_sha> <remote_ref> <remote_sha>`, one line of the pre-push stdin.
+# 0: a Harbor push and sound; 1: a Harbor ref and unsound (the reason on stderr); 3: not Harbor's ref.
+
+ZERO = re.compile(r"0+")
+MAILBOX = "refs/heads/harbor/mailbox/"
+
+
+def trunk_ref() -> str | None:
+    return next((r for r in (f"refs/remotes/{REMOTE}/{TRUNK}", TRUNK_REF, f"refs/heads/{TRUNK}") if rev(r)), None)
+
+
+def new_commits(local_sha: str, remote_sha: str) -> list[str]:
+    have = [f"^{remote_sha}"] if not ZERO.fullmatch(remote_sha) and run("git", "cat-file", "-e", f"{remote_sha}^{{commit}}", check=False).returncode == 0 else []
+    return git("rev-list", "--reverse", local_sha, *have).split()
+
+
+def unsound_log(sha: str, remote_sha: str, trunk: str | None) -> str | None:
+    if not ZERO.fullmatch(remote_sha) and not (rev(remote_sha) and ancestor(remote_sha, sha)):
+        return f"the push would drop commits of {LOG_BRANCH} (the remote's tip is not in what you push)"
+    if trunk and run("git", "merge-base", sha, trunk, check=False).stdout.strip():
+        return f"{LOG_BRANCH} shares history with {TRUNK}: it is a branch of its own"
+    for c in new_commits(sha, remote_sha):
+        for entry in git("ls-tree", "-r", "-z", "--full-tree", c).split("\0"):
+            if not entry:
+                continue
+            meta, path = entry.split("\t", 1)
+            if meta.split()[0] != "100644" or not path.startswith("harbor/"):
+                return f"commit {short(c)} of {LOG_BRANCH} holds {path}: only regular files under harbor/"
+    return None
+
+
+def unsound_mailbox(sha: str, remote_sha: str, account: str, trunk: str | None) -> str | None:
+    path = f"harbor/mailbox/{account}.md"
+    if not trunk:
+        return f"can't find {TRUNK} to check the mailbox against"
+    if not run("git", "merge-base", sha, trunk, check=False).stdout.strip():
+        return f"the mailbox of {account} must sit on top of {TRUNK}"
+    for c in git("rev-list", "--reverse", sha, f"^{trunk}", *([f"^{remote_sha}"] if rev(remote_sha) and not ZERO.fullmatch(remote_sha) else [])).split():
+        if len(git("rev-list", "--parents", "-n1", c).split()) > 2:
+            return f"commit {short(c)} is a merge: a mailbox commit changes one file"
+        rows = [r for r in git("diff-tree", "-r", "--no-commit-id", "--no-renames", "--root", "-z", "--raw", c).split("\0") if r]
+        if len(rows) != 2 or rows[1] != path or not rows[0].endswith(("A", "M")) or rows[0].split()[1] != "100644":
+            return f"commit {short(c)} must change exactly {path} (regular file)"
+    return None
+
+
+def cmd_push_guard(args) -> int:
+    ref, sha = args.remote_ref, args.local_sha
+    account = ref[len(MAILBOX):] if ref.startswith(MAILBOX) else None
+    if ref != f"refs/heads/{LOG_BRANCH}" and account is None:
+        return 3
+    try:
+        project()
+    except HarborError:
+        pass  # TRUNK stays the default
+    if ZERO.fullmatch(sha):
+        why = f"{ref[len('refs/heads/'):]} is never deleted"
+    elif account is None:
+        why = unsound_log(sha, args.remote_sha, trunk_ref())
+    elif not NAME.fullmatch(account):
+        why = f"'{account}' is not an account name"
+    else:
+        why = unsound_mailbox(sha, args.remote_sha, account, trunk_ref())
+    if why:
+        print(f"harbor: push-guard: {why}", file=sys.stderr)
+    return 1 if why else 0
+
 
 # --- phase 3: messages, session requests and the watcher ----------------------------------------
 # harbor/inbox/<id>.toml and harbor/wanted/<id>.toml; docs/design.md, "Phase 3". The logbook stays the
@@ -2671,7 +2782,7 @@ def actor(files: dict, me: dict) -> dict | None:
 
 
 def cmd_msg(args) -> int:
-    cfg = config(keelokit())
+    cfg = config(project())
     if args.action == "list":
         return msg_list(args, cfg)
     if args.action == "status":
@@ -2851,7 +2962,7 @@ def allowed_models(cfg: dict) -> list[str]:
 
 
 def cmd_wanted(args) -> int:
-    cfg = config(keelokit())
+    cfg = config(project())
     if args.action == "list":
         _, files = snapshot()
         shown = [request_line(r) for r in requests(files).values() if args.all or r.get("state") in ("open", "taken")]
@@ -2864,6 +2975,8 @@ def cmd_wanted(args) -> int:
 
 def wanted_add(args, cfg: dict, me: dict) -> int:
     role, story = args.role, args.story
+    if role != "dispatcher":
+        keelokit("wanted add --role " + role)  # a request starts only what the project describes: a story, a convoy
     if role == "vessel" and not story:
         raise HarborError("USAGE", "a vessel request needs --story: a vessel builds one story")
     if role != "vessel" and story:
@@ -3129,7 +3242,9 @@ def cmd_doctor(args) -> int:
 
 
 def doctor(args) -> int:
-    cfg = config(keelokit())
+    cfg = config(project())
+    if note := ignored_note():
+        print(f"harbor: {note}")
     me = identity(args.session, need_session=False)
     account = args.account or me["account"]
     if account != me["account"]:
@@ -3260,7 +3375,7 @@ def parse_board(text: str, words: dict | None = None) -> tuple[list[dict], list[
 
 
 def cmd_import_board(args) -> int:
-    cfg = config(keelokit())
+    cfg = config(keelokit("import-board"))
     me = identity(args.session, need_session=False)
     src = Path(args.file)
     try:
@@ -3420,6 +3535,9 @@ def parser() -> argparse.ArgumentParser:
     y.add_argument("--hook", action="store_true", help="read the Claude Code hook JSON on stdin")
     g = sub.add_parser("guard")
     g.add_argument("--claude", action="store_true")
+    pg = sub.add_parser("push-guard", help="for a project's own pre-push hook: exit 0 a sound Harbor push, 1 an unsound one, 3 not Harbor's")
+    for f in ("local_ref", "local_sha", "remote_ref", "remote_sha"):
+        pg.add_argument(f)
     i = sub.add_parser("import-board")
     i.add_argument("file")
     return p
@@ -3428,7 +3546,7 @@ def parser() -> argparse.ArgumentParser:
 COMMANDS = {"check": cmd_check, "init": cmd_init, "account": cmd_account, "worker": cmd_worker, "seal": cmd_seal,
             "convoy": cmd_convoy, "log": cmd_log, "import-board": cmd_import_board, "harbormaster": cmd_harbormaster,
             "models": cmd_models, "doctor": cmd_doctor, "guard": cmd_guard, "sync": cmd_sync, "title": cmd_title,
-            "msg": cmd_msg, "wanted": cmd_wanted}
+            "msg": cmd_msg, "wanted": cmd_wanted, "push-guard": cmd_push_guard}
 
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:

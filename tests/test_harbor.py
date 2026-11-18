@@ -151,9 +151,9 @@ class TestCheck(unittest.TestCase):
         self.assertEqual(res.returncode, 0)
         self.assertIn("no .keelokit/", res.stdout)
         self.assertIn("does nothing", res.stdout)
-        res = harbor(self.tmp, "init")
+        res = harbor(self.tmp, "convoy", "new")
         self.assertEqual(res.returncode, 2)
-        self.assertIn("NO_KEELOKIT", res.stderr)
+        self.assertIn("NEEDS_KEELOKIT", res.stderr)
 
     def test_without_the_convoy_policy_it_says_so(self):
         sh(self.tmp, "git", "init", "--quiet")
