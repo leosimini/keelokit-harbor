@@ -42,6 +42,8 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py wanted add --role vessel|skipper|dispatcher [--story ID] [--convoy N] [--model M] [--account A]
                          [--note TEXT]       the harbormaster asks for a session
     harbor.py wanted take ID | prompt ID | started ID --session S | drop ID | list [--all]
+    harbor.py doctor [--account A] [--if-changed]   check this machine against [harbor.requirements]: one line per
+                                             item (ok, missing, can't check), exit 1 if any is missing; recorded per account
     harbor.py log                            print LOGBOOK.md as the remote has it
     harbor.py models                         the model of each Harbor role, and where it comes from
     harbor.py guard --claude                 PreToolUse hook: an agent can't run `convoy approve`
@@ -69,11 +71,15 @@ import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import shlex  # noqa: E402
+import shutil  # noqa: E402
+import ssl  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
 import tomllib  # noqa: E402
 import unicodedata  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 SCHEMA = 1
@@ -345,6 +351,7 @@ def config(state: dict) -> dict:
     key = "gatekeeper_ok" if "gatekeeper_ok" in harbor else "person_ok" if "person_ok" in harbor else "gatekeeper_ok"
     cfg["gatekeeper_ok"], cfg["gatekeeper_ok_key"] = harbor.get(key, DEFAULTS["gatekeeper_ok"]), key
     cfg.pop("person_ok", None)
+    cfg["requirements"] = harbor.get("requirements") if isinstance(harbor.get("requirements"), dict) else {}
     cfg["import"] = harbor.get("import") if isinstance(harbor.get("import"), dict) else {}
     cfg["migrations"] = list((harbor.get("migrations") or {}).get("paths") or DEFAULT_MIGRATIONS)
     return cfg
@@ -490,6 +497,13 @@ def render(files: dict) -> None:
     files["harbor/LOGBOOK.md"] = render_logbook(files, cs)
 
 
+def requirements_cell(d: dict) -> str:
+    if not d.get("requirements_checked_at"):
+        return "—"
+    missing = d.get("requirements_missing") or []
+    return cell(one(f"missing: {', '.join(missing)}" if missing else "ok", 100) + f" ({d['requirements_checked_at']})")
+
+
 def render_logbook(files: dict, cs: dict) -> str:
     out = [GENERATED, "", "# Logbook", ""]
     hm = load(files, "harbor/harbormaster.toml") or {}
@@ -553,14 +567,15 @@ def render_logbook(files: dict, cs: dict) -> str:
         out += ["", f"{ended} ended worker(s), with their handovers, in `harbor/workers/`."]
     acs = accounts(files)
     if acs:
-        out += ["", "## Accounts", "", "| Account | Max sessions | Active | Paused until | Mailbox |", "|---|---|---|---|---|"]
+        out += ["", "## Accounts", "", "| Account | Max sessions | Active | Paused until | Mailbox | Requirements |",
+                "|---|---|---|---|---|---|"]
         for a, d in acs.items():
             active = sum(1 for w in live.values() if w.get("account") == a and w.get("state") == "active")
             until = d.get("paused_until")
             if until and d.get("reason"):
                 until = f"{until} ({d['reason']})"
             out.append(f"| {a} | {d.get('max_sessions')} | {active} | {cell(until)} | "
-                       f"{'PR #' + str(d['mailbox_pr']) if d.get('mailbox_pr') else '—'} |")
+                       f"{'PR #' + str(d['mailbox_pr']) if d.get('mailbox_pr') else '—'} | {requirements_cell(d)} |")
     if live:
         out += ["", "## Sessions by account", "", "| Account | Session | Title | Role | State |", "|---|---|---|---|---|"]
         for w in sorted(live.values(), key=lambda w: (str(w.get("account")), str(w.get("session")))):
@@ -1820,7 +1835,8 @@ def read_seen(session: str | None) -> dict:
         return {}
     num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None  # noqa: E731
     return {"tip": d["tip"] if isinstance(d.get("tip"), str) else None,
-            "fetched_epoch": num(d.get("fetched_epoch")), "attempt_epoch": num(d.get("attempt_epoch"))}
+            "fetched_epoch": num(d.get("fetched_epoch")), "attempt_epoch": num(d.get("attempt_epoch")),
+            "main_tip": d["main_tip"] if isinstance(d.get("main_tip"), str) else None}
 
 
 def write_seen(session: str | None, d: dict) -> None:
@@ -1840,11 +1856,14 @@ def write_seen(session: str | None, d: dict) -> None:
         pass
 
 
-def update_seen(session: str | None, tip: str | None = ..., fetched: bool = False) -> None:
-    """Merge into the seen file: the tip (when given), the attempt time, and the fetch time when `fetched`."""
+def update_seen(session: str | None, tip: str | None = ..., fetched: bool = False, main_tip: str | None = ...) -> None:
+    """Merge into the seen file: the tip (when given), the trunk tip announced (when given), the attempt time, and
+    the fetch time when `fetched`."""
     d = read_seen(session)
     if tip is not ...:
         d["tip"] = tip
+    if main_tip is not ...:
+        d["main_tip"] = main_tip
     d["attempt_epoch"] = epoch()
     if fetched:
         d["fetched_epoch"] = d["attempt_epoch"]
@@ -1878,7 +1897,8 @@ def fetch_capped(retry: bool = True) -> str:
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=4")
     try:
         res = subprocess.run(["git", "fetch", "--quiet", "--no-tags", REMOTE,
-                              f"+refs/heads/{LOG_BRANCH}:refs/remotes/{REMOTE}/{LOG_BRANCH}"],
+                              f"+refs/heads/{LOG_BRANCH}:refs/remotes/{REMOTE}/{LOG_BRANCH}",
+                              f"+refs/heads/{TRUNK}:refs/remotes/{REMOTE}/{TRUNK}"],
                              cwd=ROOT, capture_output=True, text=True, timeout=FETCH_CAP, env=env,
                              stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError):
@@ -1886,7 +1906,8 @@ def fetch_capped(retry: bool = True) -> str:
         return "offline"
     if res.returncode == 0:
         return "ok"
-    if "ouldn't find remote ref" in res.stderr or "ould not find remote ref" in res.stderr:
+    if ("ouldn't find remote ref" in res.stderr or "ould not find remote ref" in res.stderr) \
+            and f"refs/heads/{LOG_BRANCH}" in res.stderr:
         run("git", "update-ref", "-d", f"refs/remotes/{REMOTE}/{LOG_BRANCH}", check=False)
         return "ok"
     if "cannot lock ref" in res.stderr:
@@ -2006,6 +2027,34 @@ def what_changed(seen_tip: str | None, tip: str) -> str:
         return ""
 
 
+def req_section(sha: str) -> dict | None:
+    """[harbor.requirements] as `sha` has it, None when the file or the section isn't there."""
+    res = run("git", "show", f"{sha}:.keelokit/state.toml", check=False)
+    try:
+        sec = (tomllib.loads(res.stdout).get("harbor") or {}).get("requirements") if res.returncode == 0 else None
+    except tomllib.TOMLDecodeError:
+        sec = None
+    return sec if isinstance(sec, dict) else None
+
+
+def main_note(session: str | None) -> tuple[str, str | None]:
+    """(text, trunk tip): one line when the trunk changed the requirements manifest, `.claude/` or a lockfile since
+    the base this session branched from; empty when it didn't, or the same trunk tip was already announced."""
+    main = rev(f"refs/remotes/{REMOTE}/{TRUNK}")
+    if not main or main == read_seen(session).get("main_tip"):
+        return "", None
+    base = git("merge-base", "HEAD", main, check=False)
+    if not base or base == main:
+        return "", main
+    paths = git("diff", "--name-only", base, main, check=False).splitlines()
+    what = (["the requirements manifest"] if req_section(base) != req_section(main) else []) \
+        + ([".claude/"] if any(p.startswith(".claude/") for p in paths) else []) \
+        + (["a lockfile"] if any(p.rsplit("/", 1)[-1] in LOCKFILES for p in paths) else [])
+    if not what:
+        return "", main
+    return block([f"{TRUNK} @{short(main)}"], [f"{TRUNK} changed {', '.join(what)}: merge {TRUNK} and reinstall before going on"], []), main
+
+
 def deliver(session: str | None, gap: int, emit) -> None:
     """Fetch unless one happened less than `gap` s ago and `emit` what changed since the seen tip. The window is
     claimed before the fetch (parallel hooks don't all fetch); the new tip is stored after the output and only
@@ -2017,14 +2066,18 @@ def deliver(session: str | None, gap: int, emit) -> None:
     got = fetch_capped()
     tip = rev(f"refs/remotes/{REMOTE}/{LOG_BRANCH}")
     update_seen(session, fetched=got == "ok")
-    if not tip or (tip == seen.get("tip")):
-        return
-    text = what_changed(seen.get("tip"), tip)
-    if read_seen(session).get("tip") != seen.get("tip"):
-        return  # another hook of this session took it
-    if text:
-        emit(text)
-    update_seen(session, tip)
+    note, main = main_note(session) if got == "ok" else ("", None)
+    text = ""
+    if tip and tip != seen.get("tip"):
+        text = what_changed(seen.get("tip"), tip)
+        if read_seen(session).get("tip") != seen.get("tip"):
+            return  # another hook of this session took it
+    if text or note:
+        emit("\n".join(x for x in (text, note) if x))
+    if tip and tip != seen.get("tip"):
+        update_seen(session, tip)
+    if main:
+        update_seen(session, main_tip=main)
 
 
 def segments(command: str) -> list[list[str]]:
@@ -2918,6 +2971,127 @@ def wanted_drop(args, cfg: dict, me: dict) -> int:
     return 0
 
 
+# --- what an account needs to work in the project -----------------------------------------------
+# [harbor.requirements] in state.toml is the manifest. What the repo carries (.claude/, lockfiles, CLAUDE.md)
+# reaches every account through the trunk; what belongs to an account (its cloud environment, connectors,
+# plugins, secret names) never travels through git. `doctor` makes the second visible; configuring an account
+# is a person's decision, so it never changes anything.
+
+REQ_KEYS = ("tools", "hosts", "secrets", "plugins", "skills")
+REQ_WORD = {"tools": re.compile(r"[^\s/]+"), "hosts": re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*"),
+            "secrets": re.compile(r"[A-Za-z_][A-Za-z0-9_]*"), "plugins": NAME, "skills": NAME}
+LOCKFILES = {"pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock", "bun.lockb", "poetry.lock", "uv.lock",
+             "Pipfile.lock", "Cargo.lock", "Gemfile.lock", "go.sum", "composer.lock"}
+
+
+def requirements_of(cfg: dict) -> dict:
+    """[harbor.requirements] checked: lists of plain words (a host is a name, a secret is a variable name)."""
+    raw = cfg.get("requirements") or {}
+    out = {}
+    for k in REQ_KEYS:
+        v = raw.get(k, [])
+        if not isinstance(v, list) or not all(isinstance(x, str) and REQ_WORD[k].fullmatch(x.strip()) for x in v):
+            raise HarborError("BAD_CONFIG", f"[harbor.requirements] {k} in .keelokit/state.toml: a list of "
+                              f"{'host names' if k == 'hosts' else 'variable names' if k == 'secrets' else 'names'}")
+        out[k] = [x.strip() for x in v]
+    if not isinstance(raw.get("note", ""), str):
+        raise HarborError("BAD_CONFIG", "[harbor.requirements] note in .keelokit/state.toml: one line of text")
+    out["note"] = one(raw.get("note", ""), 200)
+    return out
+
+
+def requirements_hash(req: dict) -> str:
+    return hashlib.sha256(json.dumps({k: req[k] for k in REQ_KEYS}, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def host_reachable(host: str) -> bool:
+    """A short HTTPS HEAD through the proxy the environment sets. Any answer counts, a refusal of the page too; a
+    certificate this machine doesn't trust also means the host was reached."""
+    try:
+        urllib.request.urlopen(urllib.request.Request(f"https://{host}/", method="HEAD"), timeout=5).close()
+        return True
+    except urllib.error.HTTPError:
+        return True
+    except urllib.error.URLError as e:
+        return isinstance(e.reason, ssl.SSLCertVerificationError)
+    except (OSError, ValueError):
+        return False
+
+
+def plugin_installed(name: str) -> bool | None:
+    """True when Claude Code's local plugin list has it; None when this machine can't say (a cloud session)."""
+    try:
+        data = json.loads((Path.home() / ".claude/plugins/installed_plugins.json").read_text(encoding="utf-8"))
+        plugins = data.get("plugins", data) if isinstance(data, dict) else {}
+        return True if name in {str(k).split("@")[0] for k in plugins} else None
+    except (OSError, ValueError):
+        return None
+
+
+def check_requirements(req: dict) -> list[tuple[str, str, str]]:
+    out = []
+    for k in REQ_KEYS:
+        for item in req[k]:
+            if k == "tools":
+                good = shutil.which(item) is not None
+            elif k == "hosts":
+                good = host_reachable(item)
+            elif k == "secrets":
+                good = bool(os.environ.get(item))
+            elif k == "skills":
+                good = (ROOT / ".claude/skills" / item).is_dir()
+            else:
+                found = plugin_installed(item)
+                out.append(("ok" if found else "can't check", k, item))
+                continue
+            out.append(("ok" if good else "missing", k, item))
+    return out
+
+
+def cmd_doctor(args) -> int:
+    cfg = config(keelokit())
+    me = identity(args.session, need_session=False)
+    account = args.account or me["account"]
+    if account != me["account"]:
+        raise HarborError("NOT_YOUR_ACCOUNT", f"this clone is account '{me['account']}' (.keelokit/local.toml): "
+                          "the checks run on this machine, so only a session of that account can run them")
+    req = requirements_of(cfg)
+    if not any(req[k] for k in REQ_KEYS):
+        print("harbor: no [harbor.requirements] in .keelokit/state.toml: nothing to check")
+        return 0
+    digest = requirements_hash(req)
+    if args.if_changed:
+        stored = accounts(snapshot()[1]).get(account) or {}
+        if stored.get("requirements_hash") == digest and not stored.get("requirements_missing"):
+            print(f"harbor: requirements unchanged since the check of {stored.get('requirements_checked_at')}, none missing")
+            return 0
+    results = check_requirements(req)
+    for status, kind, item in results:
+        print(f"{status}: {kind} {item}")
+    if req["note"]:
+        print(f"note: {req['note']}")
+    missing = [f"{kind}: {item}" for status, kind, item in results if status == "missing"]
+
+    def record(files, head):
+        acc = accounts(files).get(account)
+        if not acc:
+            raise HarborError("ACCOUNT_UNKNOWN", f"account '{account}' has no cap yet: account set --max-sessions first")
+        if acc.get("requirements_hash") == digest and (acc.get("requirements_missing") or []) == missing:
+            return False  # once per change, not per run
+        acc.update(requirements_checked_at=now(), requirements_hash=digest, requirements_missing=missing)
+        save(files, f"harbor/accounts/{account}.toml", acc)
+        return True
+
+    try:
+        wrote = transact(f"doctor {account}", me["id"], record)
+        print(f"harbor: recorded in the logbook ({len(missing)} missing)" if wrote else "harbor: same as the last record")
+    except HarborError as e:
+        if e.code not in ("NOT_INITIALIZED", "ACCOUNT_UNKNOWN"):
+            raise
+        print(f"harbor: not recorded: {e.why}")
+    return 1 if missing else 0
+
+
 # --- one-time import of a hand-kept board -------------------------------------------------------
 
 BOARD_STATES = [("assembling", "assembling"), ("waiting", "waiting"), ("ready", "ready"), ("verifying", "verifying"),
@@ -3139,6 +3313,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--session", dest="started_session", required=True, metavar="S", help="the session it started")
     s = wsub2.add_parser("list")
     s.add_argument("--all", action="store_true")
+    d = sub.add_parser("doctor")
+    d.add_argument("--account", metavar="A", help="default: this clone's account")
+    d.add_argument("--if-changed", action="store_true", help="skip the checks when the manifest is the one last recorded and nothing was missing")
     sub.add_parser("log")
     sub.add_parser("models")
     t = sub.add_parser("title")
@@ -3157,7 +3334,7 @@ def parser() -> argparse.ArgumentParser:
 
 COMMANDS = {"check": cmd_check, "init": cmd_init, "account": cmd_account, "worker": cmd_worker, "seal": cmd_seal,
             "convoy": cmd_convoy, "log": cmd_log, "import-board": cmd_import_board, "harbormaster": cmd_harbormaster,
-            "models": cmd_models, "guard": cmd_guard, "sync": cmd_sync, "title": cmd_title,
+            "models": cmd_models, "doctor": cmd_doctor, "guard": cmd_guard, "sync": cmd_sync, "title": cmd_title,
             "msg": cmd_msg, "wanted": cmd_wanted}
 
 
