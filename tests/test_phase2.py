@@ -246,10 +246,21 @@ class TestTitles(Phase2):
         out = ok(harbor(self.a, "harbormaster", "takeover", "--relieve", "the owner said so", session="new"))
         self.assertIn("harbormaster · acct1 · Demo", out)
         self.assertIn("previous holder acct1/mbp/s1 must now be titled: ex-harbormaster · acct1 · Demo", out)
-        self.assertEqual(self.repo.log_toml("harbor/workers/acct1/mbp/s1.toml")["title"], "ex-harbormaster · acct1 · Demo")
+        old = self.repo.log_toml("harbor/workers/acct1/mbp/s1.toml")
+        self.assertEqual((old["title"], old["role"]), ("ex-harbormaster · acct1 · Demo", "ex-harbormaster"))
         view = self.repo.log_files()["harbor/LOGBOOK.md"]
         self.assertIn("## Sessions by account", view)
         self.assertIn("| acct1 | new | harbormaster · acct1 · Demo | harbormaster | active |", view)
+        self.assertIn("| acct1 | s1 | ex-harbormaster · acct1 · Demo | ex-harbormaster | active |", view)
+        self.assertEqual(view.count("| harbormaster | active |"), 1, "one harbormaster in the view")
+
+    def test_a_keelokit_without_session_titles_still_gets_role_account_and_project(self):
+        (self.a / ".keelokit/bin/status.py").unlink()
+        project = self.a.name
+        self.assertEqual(ok(harbor(self.a, "title", "--role", "skipper", "--convoy", "4")).strip(), f"skipper C4 · acct1 · {project}")
+        out = ok(harbor(self.a, "harbormaster", "takeover"))
+        self.assertIn(f"session title: harbormaster · acct1 · {project}", out)
+        self.assertIn("NO_TITLE", harbor(self.a, "title", "--role", "vessel", "--story", "QA-1").stderr, "a story needs Keelokit")
 
     def test_an_unknown_story_is_refused(self):
         res = harbor(self.a, "worker", "register", "--role", "vessel", "--story", "NOPE-1", session="v1")

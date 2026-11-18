@@ -10,7 +10,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
 
     harbor.py check [--hook]                 SessionStart: Keelokit present, landing policy, a brief
     harbor.py init                           create the logbook on the remote (once; again is a no-op)
-    harbor.py account set ACCOUNT [--max-sessions N] [--heartbeat-hours N] [--mailbox-pr N]
+    harbor.py account set ACCOUNT [--max-sessions N] [--heartbeat-hours N] [--mailbox-pr N|0]
     harbor.py account pause ACCOUNT --until TIMESTAMP [--reason TEXT]
     harbor.py account resume ACCOUNT
     harbor.py worker register --role vessel|skipper|harbormaster|dispatcher [--convoy N] [--branch B] [--model M]
@@ -43,7 +43,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
                          [--note TEXT]       the harbormaster asks for a session
     harbor.py wanted take ID | prompt ID | started ID --session S | drop ID | list [--all]
     harbor.py doctor [--account A] [--if-changed]   check this machine against [harbor.requirements]: one line per
-                                             item (ok, missing, can't check), exit 1 if any is missing; recorded per account
+                                             item (ok, missing, can't check), exit 1 if any is missing, 2 on error; recorded per account
     harbor.py log                            print LOGBOOK.md as the remote has it
     harbor.py models                         the model of each Harbor role, and where it comes from
     harbor.py guard --claude                 PreToolUse hook: an agent can't run `convoy approve`
@@ -75,6 +75,7 @@ import shutil  # noqa: E402
 import ssl  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
+import threading  # noqa: E402
 import time  # noqa: E402
 import tomllib  # noqa: E402
 import unicodedata  # noqa: E402
@@ -137,7 +138,7 @@ DEFAULTS = {
 # in .keelokit/harness/agent-brief.md, by role and tier; Harbor doesn't keep a second one.
 DEFAULT_MODELS = {
     "skipper": "sonnet",       # integrate, resolve conflicts (survey §3.3)
-    "harbormaster": "sonnet",  # the ok is judgment; Opus for it is a HIPÓTESIS of the survey (§3.4)
+    "harbormaster": "sonnet",  # the ok is judgment; Opus for it is a HYPOTHESIS of the survey (§3.4)
     "control": "haiku",        # the round only reads the logbook, git and the CI, and reports (§3.3)
     "dispatcher": "haiku",     # drains messages and requests; writes no code
 }
@@ -649,7 +650,7 @@ def cmd_check(args) -> int:
 
 
 def session_start(session: str | None, arg_session: str | None, fresh: bool) -> int:
-    """The SessionStart lines. `fresh`: fetch first (5 s cap) and say so; else read the last fetch."""
+    """The SessionStart lines. `fresh`: fetch first (the logbook only, 4 s cap) and say so; else read the last fetch."""
     try:
         state = keelokit()
     except HarborError as e:
@@ -663,7 +664,7 @@ def session_start(session: str | None, arg_session: str | None, fresh: bool) -> 
                      " — pass --session to harbor.py.")
     except HarborError as e:
         lines.append(f"Harbor: {e.why}.")
-    got = fetch_capped() if fresh else None
+    got = fetch_capped(with_trunk=False) if fresh else None
     head = rev(f"refs/remotes/{REMOTE}/{LOG_BRANCH}")
     if fresh:
         update_seen(session, head, got == "ok")
@@ -731,12 +732,15 @@ def cmd_account(args) -> int:
                                       "account set --max-sessions first")
                 cur["heartbeat_hours"] = args.heartbeat_hours
             if args.mailbox_pr is not None:
-                if args.mailbox_pr < 1:
-                    raise HarborError("USAGE", "--mailbox-pr is a pull request number")
+                if args.mailbox_pr < 0:
+                    raise HarborError("USAGE", "--mailbox-pr is a pull request number, or 0 to forget it")
                 if "max_sessions" not in cur:
                     raise HarborError("ACCOUNT_UNKNOWN", f"account '{args.account}' has no cap yet: "
                                       "account set --max-sessions first")
-                cur["mailbox_pr"] = args.mailbox_pr
+                if args.mailbox_pr:
+                    cur["mailbox_pr"] = args.mailbox_pr
+                else:
+                    cur.pop("mailbox_pr", None)
         else:
             if "max_sessions" not in cur:
                 raise HarborError("ACCOUNT_UNKNOWN", f"account '{args.account}' has no cap yet: account set first")
@@ -775,11 +779,13 @@ def keelokit_title(story: str | None = None) -> str | None:
 
 def session_title(role: str, convoy: int | None, story: str | None, account: str) -> str | None:
     """Every session's title, the role first and the account always: `harbormaster · acme-a · Demo`,
-    `skipper C8 · acme-a · Demo`, `vessel C8 · acme-a · Demo · wave 1 · CARGA-001`. The project and the story's
-    part come from Keelokit's title. `worker` (no Harbor role) and `ex-harbormaster` are titles too."""
+    `skipper C8 · acme-a · Demo`, `vessel C8 · acme-a · Demo · wave 1 · STORY-001`. The project and the story's
+    part come from Keelokit's title (without one, the project is the repository directory's name, and a story has no
+    title). `worker` (no Harbor role) and `ex-harbormaster` are titles too."""
     base = keelokit_title(story)
-    if not base:
+    if not base and story:
         return None
+    base = base or ROOT.name  # a Keelokit without status.py title: the repository's directory names the project
     project, *scope = base.split(SEP)
     head = role + (f" C{convoy}" if convoy and role in ("vessel", "skipper") else "")
     return SEP.join([head, account, project, *(scope if story else [])])
@@ -1784,7 +1790,10 @@ def cmd_guard(args, raw: str | None = None) -> int:
 # `convoy approve` guard, which runs first and on any input. Logbook text goes into the model's context,
 # so it is framed as data and every field is one short line.
 
-FETCH_CAP = 5  # seconds, the git child's hard limit
+FETCH_CAP = 4  # seconds, the logbook fetch's hard limit
+TRUNK_CAP = 3  # seconds, the trunk fetch's (best-effort, after the logbook)
+TRUNK_BUDGET = 7.5  # seconds since the start: no trunk fetch begins later, so a hook ends under its 10 s timeout
+TRUNK_REF = "refs/harbor/trunk"  # Harbor's own copy of the trunk tip: the session's remote-tracking ref stays its own
 PROMPT_GAP, TOOL_GAP = 60, 120
 DELTA_MAX = 1000
 FIELD_MAX = 80
@@ -1836,7 +1845,8 @@ def read_seen(session: str | None) -> dict:
     num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None  # noqa: E731
     return {"tip": d["tip"] if isinstance(d.get("tip"), str) else None,
             "fetched_epoch": num(d.get("fetched_epoch")), "attempt_epoch": num(d.get("attempt_epoch")),
-            "main_tip": d["main_tip"] if isinstance(d.get("main_tip"), str) else None}
+            "main_tip": d["main_tip"] if isinstance(d.get("main_tip"), str) else None,
+            "main_what": [w for w in d["main_what"] if isinstance(w, str)] if isinstance(d.get("main_what"), list) else []}
 
 
 def write_seen(session: str | None, d: dict) -> None:
@@ -1856,7 +1866,8 @@ def write_seen(session: str | None, d: dict) -> None:
         pass
 
 
-def update_seen(session: str | None, tip: str | None = ..., fetched: bool = False, main_tip: str | None = ...) -> None:
+def update_seen(session: str | None, tip: str | None = ..., fetched: bool = False, main_tip: str | None = ...,
+                main_what: list | None = None) -> None:
     """Merge into the seen file: the tip (when given), the trunk tip announced (when given), the attempt time, and
     the fetch time when `fetched`."""
     d = read_seen(session)
@@ -1864,6 +1875,8 @@ def update_seen(session: str | None, tip: str | None = ..., fetched: bool = Fals
         d["tip"] = tip
     if main_tip is not ...:
         d["main_tip"] = main_tip
+    if main_what is not None:
+        d["main_what"] = main_what
     d["attempt_epoch"] = epoch()
     if fetched:
         d["fetched_epoch"] = d["attempt_epoch"]
@@ -1877,44 +1890,59 @@ def throttled(session: str | None, gap: int) -> bool:
 
 
 def clear_stale_lock() -> bool:
-    """Remove the log ref's lock when it is older than a minute: a killed fetch leaves one behind."""
+    """Remove the lock of the log ref, or of Harbor's private trunk ref, when it is older than a minute: a killed
+    fetch leaves one behind."""
+    cleared = False
     if COMMON:
-        lock = COMMON / "refs/remotes" / REMOTE / f"{LOG_BRANCH}.lock"
-        try:
-            if time.time() - lock.stat().st_mtime > LOCK_STALE:
-                lock.unlink()
-                return True
-        except OSError:
-            pass
-    return False
+        for lock in (COMMON / "refs/remotes" / REMOTE / f"{LOG_BRANCH}.lock", COMMON / f"{TRUNK_REF}.lock"):
+            try:
+                if time.time() - lock.stat().st_mtime > LOCK_STALE:
+                    lock.unlink()
+                    cleared = True
+            except OSError:
+                pass
+    return cleared
 
 
-def fetch_capped(retry: bool = True, with_trunk: bool = True) -> str:
-    """Fetch the logbook (and the trunk, for the note about what it changed), 5 s cap, never asking anything. 'ok' (also when the remote has no logbook yet),
-    'busy' (a lock on the ref, younger than a minute: another fetch is running) or 'offline'."""
+def capped_fetch(spec: str, cap: float, *opts: str) -> subprocess.CompletedProcess | None:
+    """One fetch of `spec`, never asking anything, no submodules, no gc; None when it hit `cap` seconds."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
     env.setdefault("GIT_ASKPASS", "true")
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=4")
     try:
-        res = subprocess.run(["git", "fetch", "--quiet", "--no-tags", REMOTE,
-                              f"+refs/heads/{LOG_BRANCH}:refs/remotes/{REMOTE}/{LOG_BRANCH}",
-                              *([f"+refs/heads/{TRUNK}:refs/remotes/{REMOTE}/{TRUNK}"] if with_trunk else [])],
-                             cwd=ROOT, capture_output=True, text=True, timeout=FETCH_CAP, env=env,
-                             stdin=subprocess.DEVNULL)
+        return subprocess.run(["git", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch", "--quiet", "--no-tags",
+                               "--no-recurse-submodules", *opts, REMOTE, spec], cwd=ROOT, capture_output=True, text=True,
+                              timeout=cap, env=env, stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def fetch_capped(retry: bool = True, with_trunk: bool = True) -> str:
+    """Fetch the logbook (FETCH_CAP s), then, best-effort, the trunk into Harbor's private ref TRUNK_REF (TRUNK_CAP s,
+    for the note about what it changed; `refs/remotes/<remote>/<trunk>` is never touched: a `--force-with-lease`
+    reads it). The trunk never changes the status; the whole call stays under the 10 s hook timeout.
+    'ok' (also when the remote has no logbook yet), 'busy' (a lock on the ref, younger than a minute: another
+    fetch is running) or 'offline'."""
+    start = time.monotonic()
+    res = capped_fetch(f"+refs/heads/{LOG_BRANCH}:refs/remotes/{REMOTE}/{LOG_BRANCH}", FETCH_CAP)
+    if res is None:
         clear_stale_lock()
         return "offline"
-    if res.returncode == 0:
-        return "ok"
-    if ("ouldn't find remote ref" in res.stderr or "ould not find remote ref" in res.stderr) \
-            and f"refs/heads/{LOG_BRANCH}" in res.stderr:
-        run("git", "update-ref", "-d", f"refs/remotes/{REMOTE}/{LOG_BRANCH}", check=False)
-        return "ok"
-    if with_trunk and ("ouldn't find remote ref" in res.stderr or "ould not find remote ref" in res.stderr):
-        return fetch_capped(retry, False)  # the remote has no trunk of that name: the logbook still matters
-    if "cannot lock ref" in res.stderr:
-        return fetch_capped(False, with_trunk) if retry and clear_stale_lock() else "busy"
-    return "offline"
+    if res.returncode != 0:
+        if ("ouldn't find remote ref" in res.stderr or "ould not find remote ref" in res.stderr) \
+                and f"refs/heads/{LOG_BRANCH}" in res.stderr:
+            run("git", "update-ref", "-d", f"refs/remotes/{REMOTE}/{LOG_BRANCH}", check=False)
+        elif "cannot lock ref" in res.stderr:
+            return fetch_capped(False, with_trunk) if retry and clear_stale_lock() else "busy"
+        else:
+            return "offline"
+    if with_trunk:
+        left = TRUNK_BUDGET - (time.monotonic() - start)
+        # --refmap= : git would otherwise also update refs/remotes/<remote>/<trunk> on the side
+        got = capped_fetch(f"+refs/heads/{TRUNK}:{TRUNK_REF}", min(TRUNK_CAP, left), "--refmap=") if left >= 1 else None
+        if got is None or "cannot lock ref" in got.stderr:
+            clear_stale_lock()
+    return "ok"
 
 
 def fetch_age(session: str | None) -> str:
@@ -2039,22 +2067,25 @@ def req_section(sha: str) -> dict | None:
     return sec if isinstance(sec, dict) else None
 
 
-def main_note(session: str | None) -> tuple[str, str | None]:
-    """(text, trunk tip): one line when the trunk changed the requirements manifest, `.claude/` or a lockfile since
-    the base this session branched from; empty when it didn't, or the same trunk tip was already announced."""
-    main = rev(f"refs/remotes/{REMOTE}/{TRUNK}")
+def main_note(session: str | None) -> tuple[str, str | None, list]:
+    """(text, trunk tip, what changed): one line when the trunk changed the requirements manifest, `.claude/` or a
+    lockfile since the base this session branched from; empty when it didn't, when this tip was already looked at, or
+    when the same things were already announced (a later tip says it again only if the set differs). A shallow
+    clone with no merge-base never gets it."""
+    main = rev(TRUNK_REF)
     if not main or main == read_seen(session).get("main_tip"):
-        return "", None
+        return "", None, []
     base = git("merge-base", "HEAD", main, check=False)
     if not base or base == main:
-        return "", main
-    paths = git("diff", "--name-only", base, main, check=False).splitlines()
+        return "", main, []
+    paths = git("diff", "--name-only", "--no-renames", base, main, check=False).splitlines()
     what = (["the requirements manifest"] if req_section(base) != req_section(main) else []) \
         + ([".claude/"] if any(p.startswith(".claude/") for p in paths) else []) \
         + (["a lockfile"] if any(p.rsplit("/", 1)[-1] in LOCKFILES for p in paths) else [])
-    if not what:
-        return "", main
-    return block([f"{TRUNK} @{short(main)}"], [f"{TRUNK} changed {', '.join(what)}: merge {TRUNK} and reinstall before going on"], []), main
+    if not what or what == read_seen(session).get("main_what"):
+        return "", main, what
+    return block([f"{TRUNK} @{short(main)}"], [f"{TRUNK} changed {', '.join(what)}: reinstall after your next merge of {TRUNK} "
+                                               f"(a skipper: at the next `convoy assemble`; a delivered vessel: leave the branch where it is)"], []), main, what
 
 
 def deliver(session: str | None, gap: int, emit) -> None:
@@ -2068,7 +2099,7 @@ def deliver(session: str | None, gap: int, emit) -> None:
     got = fetch_capped()
     tip = rev(f"refs/remotes/{REMOTE}/{LOG_BRANCH}")
     update_seen(session, fetched=got == "ok")
-    note, main = main_note(session) if got == "ok" else ("", None)
+    note, main, what = main_note(session) if got == "ok" else ("", None, [])
     text = ""
     if tip and tip != seen.get("tip"):
         text = what_changed(seen.get("tip"), tip)
@@ -2079,7 +2110,7 @@ def deliver(session: str | None, gap: int, emit) -> None:
     if tip and tip != seen.get("tip"):
         update_seen(session, tip)
     if main:
-        update_seen(session, main_tip=main)
+        update_seen(session, main_tip=main, main_what=what)
 
 
 def segments(command: str) -> list[list[str]]:
@@ -2207,7 +2238,7 @@ def push_note(command: str, session: str | None) -> tuple[str, str | None]:
     to_main, to_convoy = push_targets(command)
     if not (via or to_main or to_convoy):
         return "", None
-    got = fetch_capped()
+    got = fetch_capped(with_trunk=False)
     tip = rev(f"refs/remotes/{REMOTE}/{LOG_BRANCH}")
     update_seen(session, fetched=got == "ok")
     if not tip:
@@ -2299,9 +2330,11 @@ def cmd_harbormaster(args) -> int:
                 old_title = session_title("ex-harbormaster", None, None, holder.split("/")[0])
                 if old_title:
                     former[:] = [holder, old_title]
-                    if prev := workers(files).get(holder):
+                if prev := workers(files).get(holder):
+                    prev["role"] = "ex-harbormaster"
+                    if old_title:
                         prev["title"] = old_title
-                        save(files, worker_path(holder), prev)
+                    save(files, worker_path(holder), prev)
             elif not holder:
                 hm["since"] = now()
             hm.update(worker=me["id"], last_control=now(), expires=fmt_ts(parse_ts(now()) + expiry(cfg)))
@@ -2785,7 +2818,7 @@ def msg_watch(args, cfg: dict, me: dict) -> int:
     deadline = time.monotonic() + cap * 60
     while True:
         try:
-            fetch_capped()  # a failed fetch is retried at the next poll; the last one read still counts
+            fetch_capped(with_trunk=False)  # a failed fetch is retried at the next poll; the last one read still counts
             head = rev(f"refs/remotes/{REMOTE}/{LOG_BRANCH}")
             lines = pending(read_tree(head), cfg, args.account) if head else []
         except Exception:
@@ -2979,16 +3012,22 @@ def wanted_drop(args, cfg: dict, me: dict) -> int:
 # plugins, secret names) never travels through git. `doctor` makes the second visible; configuring an account
 # is a person's decision, so it never changes anything.
 
-REQ_KEYS = ("tools", "hosts", "secrets", "plugins", "skills")
+REQ_KEYS = ("tools", "hosts", "secrets", "network_secrets", "plugins", "skills")
 REQ_WORD = {"tools": re.compile(r"[^\s/]+"), "hosts": re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*"),
-            "secrets": re.compile(r"[A-Za-z_][A-Za-z0-9_]*"), "plugins": NAME, "skills": NAME}
+            "secrets": re.compile(r"[A-Za-z_][A-Za-z0-9_]*"), "network_secrets": re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*"),
+            "plugins": NAME, "skills": NAME}
 LOCKFILES = {"pnpm-lock.yaml", "package-lock.json", "yarn.lock", "bun.lock", "bun.lockb", "poetry.lock", "uv.lock",
              "Pipfile.lock", "Cargo.lock", "Gemfile.lock", "go.sum", "composer.lock"}
+HOST_DEADLINE = 8  # seconds for one host, whatever the server does with the connection
 
 
 def requirements_of(cfg: dict) -> dict:
     """[harbor.requirements] checked: lists of plain words (a host is a name, a secret is a variable name)."""
     raw = cfg.get("requirements") or {}
+    if not isinstance(raw, dict) or (unknown := sorted(set(raw) - set(REQ_KEYS) - {"note"})):
+        raise HarborError("BAD_CONFIG", f"[harbor.requirements] in .keelokit/state.toml: "
+                          f"{', '.join(map(str, unknown)) if isinstance(raw, dict) else 'a table'} is not one of "
+                          f"{', '.join(REQ_KEYS)}, note")
     out = {}
     for k in REQ_KEYS:
         v = raw.get(k, [])
@@ -3006,26 +3045,43 @@ def requirements_hash(req: dict) -> str:
     return hashlib.sha256(json.dumps({k: req[k] for k in REQ_KEYS}, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def host_reachable(host: str) -> bool:
-    """A short HTTPS HEAD through the proxy the environment sets. Any answer counts, a refusal of the page too; a
-    certificate this machine doesn't trust also means the host was reached."""
-    try:
-        urllib.request.urlopen(urllib.request.Request(f"https://{host}/", method="HEAD"), timeout=5).close()
-        return True
-    except urllib.error.HTTPError:
-        return True
-    except urllib.error.URLError as e:
-        return isinstance(e.reason, ssl.SSLCertVerificationError)
-    except (OSError, ValueError):
-        return False
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # a 3xx is the answer: the host was reached, wherever it points
+
+
+def host_reachable(host: str) -> bool | None:
+    """A short HTTPS HEAD through the proxy the environment sets, redirects not followed. Any answer counts, a
+    refusal or a redirect too; a certificate this machine doesn't trust also means the host was reached. False when
+    the host does not answer within HOST_DEADLINE s; None (can't check) when the proxy itself is busy at CONNECT."""
+    result: list = []
+
+    def probe():
+        try:
+            urllib.request.build_opener(NoRedirect).open(urllib.request.Request(f"https://{host}/", method="HEAD"), timeout=5).close()
+            result.append(True)
+        except urllib.error.HTTPError:
+            result.append(True)
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, ssl.SSLCertVerificationError):
+                result.append(True)
+            else:
+                result.append(None if re.search(r"Tunnel connection failed: (429|503)", str(e.reason)) else False)
+        except (OSError, ValueError):
+            result.append(False)
+
+    t = threading.Thread(target=probe, daemon=True)
+    t.start()
+    t.join(HOST_DEADLINE)
+    return result[0] if result else False
 
 
 def plugin_installed(name: str) -> bool | None:
-    """True when Claude Code's local plugin list has it; None when this machine can't say (a cloud session)."""
+    """True or False against Claude Code's local plugin list; None when this machine has none to read (a cloud session)."""
     try:
         data = json.loads((Path.home() / ".claude/plugins/installed_plugins.json").read_text(encoding="utf-8"))
         plugins = data.get("plugins", data) if isinstance(data, dict) else {}
-        return True if name in {str(k).split("@")[0] for k in plugins} else None
+        return name in {str(k).split("@")[0] for k in plugins}
     except (OSError, ValueError):
         return None
 
@@ -3040,17 +3096,26 @@ def check_requirements(req: dict) -> list[tuple[str, str, str]]:
                 good = host_reachable(item)
             elif k == "secrets":
                 good = bool(os.environ.get(item))
+            elif k == "network_secrets":
+                good = None  # a cloud session injects it at the proxy: no variable, nothing to look at from here
             elif k == "skills":
                 good = (ROOT / ".claude/skills" / item).is_dir()
             else:
-                found = plugin_installed(item)
-                out.append(("ok" if found else "can't check", k, item))
-                continue
-            out.append(("ok" if good else "missing", k, item))
+                good = plugin_installed(item)
+            out.append(("can't check" if good is None else "ok" if good else "missing", k, item))
     return out
 
 
 def cmd_doctor(args) -> int:
+    """0 all present (or can't check), 1 something missing, 2 the check could not run or be recorded."""
+    try:
+        return doctor(args)
+    except HarborError as e:
+        print(f"harbor: {e.code}: {e.why}", file=sys.stderr)
+        return 2
+
+
+def doctor(args) -> int:
     cfg = config(keelokit())
     me = identity(args.session, need_session=False)
     account = args.account or me["account"]
@@ -3058,12 +3123,17 @@ def cmd_doctor(args) -> int:
         raise HarborError("NOT_YOUR_ACCOUNT", f"this clone is account '{me['account']}' (.keelokit/local.toml): "
                           "the checks run on this machine, so only a session of that account can run them")
     req = requirements_of(cfg)
-    if not any(req[k] for k in REQ_KEYS):
-        print("harbor: no [harbor.requirements] in .keelokit/state.toml: nothing to check")
-        return 0
     digest = requirements_hash(req)
-    if args.if_changed:
-        stored = accounts(snapshot()[1]).get(account) or {}
+    empty = not any(req[k] for k in REQ_KEYS)
+    if empty:
+        print("harbor: no [harbor.requirements] in .keelokit/state.toml: nothing to check")
+    elif args.if_changed:
+        try:
+            stored = accounts(snapshot()[1]).get(account) or {}
+        except HarborError as e:
+            if e.code != "NOT_INITIALIZED":
+                raise
+            stored = {}
         if stored.get("requirements_hash") == digest and not stored.get("requirements_missing"):
             print(f"harbor: requirements unchanged since the check of {stored.get('requirements_checked_at')}, none missing")
             return 0
@@ -3076,6 +3146,8 @@ def cmd_doctor(args) -> int:
 
     def record(files, head):
         acc = accounts(files).get(account)
+        if empty and not (acc and acc.get("requirements_checked_at")):
+            return False  # a project that never had a manifest writes nothing
         if not acc:
             raise HarborError("ACCOUNT_UNKNOWN", f"account '{account}' has no cap yet: account set --max-sessions first")
         if acc.get("requirements_hash") == digest and (acc.get("requirements_missing") or []) == missing:
@@ -3086,11 +3158,13 @@ def cmd_doctor(args) -> int:
 
     try:
         wrote = transact(f"doctor {account}", me["id"], record)
-        print(f"harbor: recorded in the logbook ({len(missing)} missing)" if wrote else "harbor: same as the last record")
+        if not empty or wrote:
+            print(f"harbor: recorded in the logbook ({len(missing)} missing)" if wrote else "harbor: same as the last record")
     except HarborError as e:
         if e.code not in ("NOT_INITIALIZED", "ACCOUNT_UNKNOWN"):
             raise
-        print(f"harbor: not recorded: {e.why}")
+        if not empty:
+            print(f"harbor: not recorded: {e.why}")
     return 1 if missing else 0
 
 
@@ -3117,11 +3191,15 @@ def import_words(cfg: dict) -> dict:
                                               for k, v in table.items()):
             raise HarborError("BAD_CONFIG", f"[harbor.import] {key} in .keelokit/state.toml: a table of word lists, "
                               f"one of {', '.join(sorted(allowed))} each")
+        if any(not plain(x) for v in table.values() for x in v):
+            raise HarborError("BAD_CONFIG", f"[harbor.import] {key} in .keelokit/state.toml: a word can't be empty")
         out[key] = {k: [plain(x) for x in v] for k, v in table.items()}
     co = imp.get("coordinator", [])
     if not isinstance(co, list) or not all(isinstance(x, str) for x in co):
         raise HarborError("BAD_CONFIG", "[harbor.import] coordinator in .keelokit/state.toml: a list of words")
-    out["coordinator"] = [x for x in co if x.strip()]
+    if any(not x.strip() for x in co):
+        raise HarborError("BAD_CONFIG", "[harbor.import] coordinator in .keelokit/state.toml: a word can't be empty")
+    out["coordinator"] = [x.strip() for x in co]
     return out
 
 
@@ -3223,7 +3301,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("account")
     s.add_argument("--max-sessions", type=int)
     s.add_argument("--heartbeat-hours", type=int, help="how often the account's dispatcher is woken by a scheduled task")
-    s.add_argument("--mailbox-pr", type=int, metavar="N", help="the account's mailbox: the draft pull request harbor/mailbox/<account>")
+    s.add_argument("--mailbox-pr", type=int, metavar="N", help="the account's mailbox: the draft pull request harbor/mailbox/<account>; 0 forgets it")
     s = asub.add_parser("pause")
     s.add_argument("account")
     s.add_argument("--until", required=True)

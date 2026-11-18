@@ -669,6 +669,16 @@ class TestImportBoard(Base):
             f.write('[harbor.import]\ncolumns = { number = "tren" }\n')
         self.assertIn("BAD_CONFIG", harbor(self.a, "import-board", str(board)).stderr)
 
+    def test_an_empty_import_word_is_refused(self):
+        ok(harbor(self.a, "init"))
+        board = self.tmp / "BOARD.md"
+        board.write_text("| Convoy | Skipper | Branch | State |\n|---|---|---|---|\n| 3 | s3 | `convoy/3` | whatever |\n")
+        for line in ('states = { sailed = [""] }', 'states = { sailed = [" "] }', 'columns = { skipper = [""] }', 'coordinator = [""]'):
+            (self.a / ".keelokit/state.toml").write_text(STATE.format(verify="true") + f"[harbor.import]\n{line}\n")
+            res = harbor(self.a, "import-board", str(board))
+            self.assertEqual(res.returncode, 2, line)
+            self.assertIn("can't be empty", res.stderr)
+
     def test_imports_numbered_trains_once(self):
         ok(harbor(self.a, "init"))
         board = self.tmp / "BOARD.md"
