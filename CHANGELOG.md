@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-18
 
 ### Names and vocabulary
 - **Session titles read role first, then account, then project and scope**: `harbormaster · acme-a · Acme`,
