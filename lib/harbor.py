@@ -1889,8 +1889,8 @@ def clear_stale_lock() -> bool:
     return False
 
 
-def fetch_capped(retry: bool = True) -> str:
-    """Fetch the logbook, 5 s cap, never asking anything. 'ok' (also when the remote has no logbook yet),
+def fetch_capped(retry: bool = True, with_trunk: bool = True) -> str:
+    """Fetch the logbook (and the trunk, for the note about what it changed), 5 s cap, never asking anything. 'ok' (also when the remote has no logbook yet),
     'busy' (a lock on the ref, younger than a minute: another fetch is running) or 'offline'."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
     env.setdefault("GIT_ASKPASS", "true")
@@ -1898,7 +1898,7 @@ def fetch_capped(retry: bool = True) -> str:
     try:
         res = subprocess.run(["git", "fetch", "--quiet", "--no-tags", REMOTE,
                               f"+refs/heads/{LOG_BRANCH}:refs/remotes/{REMOTE}/{LOG_BRANCH}",
-                              f"+refs/heads/{TRUNK}:refs/remotes/{REMOTE}/{TRUNK}"],
+                              *([f"+refs/heads/{TRUNK}:refs/remotes/{REMOTE}/{TRUNK}"] if with_trunk else [])],
                              cwd=ROOT, capture_output=True, text=True, timeout=FETCH_CAP, env=env,
                              stdin=subprocess.DEVNULL)
     except (subprocess.TimeoutExpired, OSError):
@@ -1910,8 +1910,10 @@ def fetch_capped(retry: bool = True) -> str:
             and f"refs/heads/{LOG_BRANCH}" in res.stderr:
         run("git", "update-ref", "-d", f"refs/remotes/{REMOTE}/{LOG_BRANCH}", check=False)
         return "ok"
+    if with_trunk and ("ouldn't find remote ref" in res.stderr or "ould not find remote ref" in res.stderr):
+        return fetch_capped(retry, False)  # the remote has no trunk of that name: the logbook still matters
     if "cannot lock ref" in res.stderr:
-        return fetch_capped(False) if retry and clear_stale_lock() else "busy"
+        return fetch_capped(False, with_trunk) if retry and clear_stale_lock() else "busy"
     return "offline"
 
 
