@@ -3,6 +3,13 @@
 ## Unreleased
 
 ### Phase 7: lessons from the JOUNA fleet
+- **HRB-8: a round every 30 minutes, scheduled with commands, not state.** The default of `[harbor]
+  control_every_minutes` is now **30** (was 90); the watch's expiry stays 180. A project that set
+  `control_every_minutes` keeps its value. `harbormaster takeover` prints the message the harbormaster
+  schedules for its control: the commands to run (`harbor.py … harbormaster control`, and
+  `python3 .keelokit/bin/ledger.py` when the project has it) and what to do with their output, never a pasted
+  state (no convoy numbers, heads or counts), so a compacted or new session reads the facts fresh. The skill and
+  the agent schedule it word for word.
 - **HRB-4: the ok goes straight to `all` when the scoped plan covers it.** `convoy sail --ok` without
   `--level` asks Keelokit for the convoy head's scoped plan (`verify_tools.py plan --base <main>`) and its
   `--all` plan, and counts the packages each covers the way Keelokit's scoped run does. When the scoped

@@ -7,6 +7,7 @@ the expected diff); the same stand-in answers `verify_tools.py wip-inside`.
 HRB-6: `convoy assemble` writes a seam report from the vessels' diffs against the base (shared files, exported
 names, CSS selectors and tokens, routes one vessel adds and another's tests use), and reaches `ready` only
 when the skipper has read every seam with `convoy seam N ID --note`.
+HRB-8: the control every 30 minutes by default, and the message takeover prints for it holds commands, not state.
 Run: python3 -m unittest discover -s tests"""
 import json
 import os
@@ -536,3 +537,67 @@ class TestHRB6Edges(Seams):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# HRB-8: a round every 30 minutes, scheduled with commands, not state.
+PROMPT = "harbor: schedule this message to this session every "
+
+
+def scheduled_prompt(out: str) -> str:
+    line = next(l for l in out.splitlines() if l.startswith(PROMPT))
+    return line.split("word for word: ", 1)[1]
+
+
+class TestHRB8(Phase2):
+    def relieve(self, session: str) -> str:
+        ok(harbor(self.a, "worker", "register", "--role", "skipper", session=session))
+        return ok(harbor(self.a, "harbormaster", "takeover", "--relieve", "the owner moved the watch", session=session))
+
+    def test_HRB_8_S1_a_new_watch_schedules_its_control_every_30_minutes_by_default(self):
+        out = self.relieve("s2")
+        self.assertIn("control every 30 minutes", out)
+        self.assertIn(PROMPT + "30 minutes", out)
+        self.assertIn("again in 30 minutes", scheduled_prompt(out))
+        hm = self.repo.log_toml("harbor/harbormaster.toml")
+        self.assertEqual(hm["expires"], "2026-11-01T19:00:00Z")  # the expiry stays 180 minutes
+
+    def test_HRB_8_S1_a_project_that_set_its_own_interval_keeps_it(self):
+        state = self.a / ".keelokit/state.toml"
+        state.write_text(state.read_text().replace("[harbor]\n", "[harbor]\ncontrol_every_minutes = 90\n", 1))
+        sh(self.a, "git", "commit", "--quiet", "-am", "keep 90")
+        out = self.relieve("s2")
+        self.assertIn("control every 90 minutes", out)
+        self.assertIn("again in 90 minutes", scheduled_prompt(out))
+
+    def test_HRB_8_S2_the_scheduled_prompt_has_the_commands_and_no_state_text(self):
+        empty = scheduled_prompt(self.relieve("s2"))
+        self.assertIn('lib/harbor.py" --session s2 harbormaster control', empty)
+        self.assertNotIn("ledger.py", empty)  # this project has no ledger
+        # Now the logbook holds a convoy with two vessels, a head and workers: the prompt doesn't change.
+        a, b = self.two_vessels_ready()
+        later = {"HARBOR_NOW": "2026-11-01T19:00:01Z"}
+        ok(harbor(self.a, "worker", "register", "--role", "skipper", session="s2", env=later))
+        busy = scheduled_prompt(ok(harbor(self.a, "harbormaster", "takeover", session="s2", env=later)))
+        self.assertEqual(busy, empty)
+        main = sh(self.a, "git", "rev-parse", "origin/main")
+        for fact in (a, b, main, a[:7], b[:7], main[:7], "convoy 1", "convoy/1", "QA-1", "QA-3", "vessel"):
+            self.assertNotIn(fact, busy)
+        digits = "".join(ch for ch in busy.replace("python3", "").replace("30 minutes", "").replace("s2", "") if ch.isdigit())
+        self.assertEqual(digits, "")  # no counts, numbers or heads: only the commands and the interval
+
+    def test_HRB_8_S2_the_prompt_runs_the_ledger_when_the_project_has_it(self):
+        ledger = self.a / ".keelokit/bin/ledger.py"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text("print('ledger')\n")
+        prompt = scheduled_prompt(self.relieve("s2"))
+        self.assertIn("harbormaster control and python3 .keelokit/bin/ledger.py", prompt)
+
+    def test_HRB_8_S2_the_skill_schedules_the_printed_commands_never_a_state(self):
+        root = Path(__file__).resolve().parent.parent
+        skill = (root / "skills/harbormaster/SKILL.md").read_text()
+        agent = (root / "agents/harbormaster.md").read_text()
+        for text in (skill, agent):
+            flat = " ".join(text.split())
+            self.assertIn("word for word", flat)
+            self.assertIn("never a state", flat)
+        self.assertIn("ledger.py", " ".join(skill.split()))
