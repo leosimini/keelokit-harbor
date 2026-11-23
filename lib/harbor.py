@@ -1415,11 +1415,16 @@ def run_cmd(template: str, **fields) -> tuple[int, str]:
         raise HarborError("VERIFY_NOT_FOUND", f"`{cmd}`: {e}")
 
 
+def generated_hits(path: str, generated: dict) -> list[str]:
+    """The commands of the [harbor.generated] patterns `path` matches (a pattern ending in / is a folder)."""
+    return [cmd for pat, cmd in generated.items() if (path.startswith(pat) if pat.endswith("/") else fnmatch.fnmatchcase(path, pat))]
+
+
 def generated_cmds(paths: list[str], generated: dict) -> list[str] | None:
     """The commands that rebuild every one of `paths`, or None when one of them isn't generated."""
     cmds = []
     for path in paths:
-        hit = [cmd for pat, cmd in generated.items() if (path.startswith(pat) if pat.endswith("/") else fnmatch.fnmatchcase(path, pat))]
+        hit = generated_hits(path, generated)
         if not hit:
             return None
         cmds += hit
@@ -1550,6 +1555,7 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
                     "duration_seconds": sum(int(t) for _, t in entry.get("steps") or [] if isinstance(t, (int, float))),
                     "by": me["id"], **steps_from(entry)}
     delivered = [(v["branch"], v["head"]) for v in vessels]
+    found = fix_commits(main_tip, head, vessels)
 
     def mutate(files, h):
         c2 = convoy_of(files, args.number)
@@ -1557,6 +1563,7 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         if [(v["branch"], v["head"]) for v in c2.get("vessels") or []] != delivered:
             raise HarborError("ASSEMBLE_STALE", "the vessels changed while assembling: run assemble again")
         w = active_worker(files, me)
+        record_fixes(c2, found, me)
         cs = convoys(files)
         changed = c2.get("head") != head or c2.get("base") != main_tip
         c2["integrator"], c2["head"], c2["base"] = me["id"], head, main_tip
@@ -1775,9 +1782,12 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
     level = ok["level"]
     seal = run_of(files, tip)
     if seal and seal.get("exit") == 0 and covers(seal.get("level"), level) and seal.get("base") == main_tip:
+        found = fix_commits(main_tip, tip, c.get("vessels") or [])
+
         def reuse(files, h):
             c2 = convoy_of(files, args.number)
             c2["head"] = tip
+            record_fixes(c2, found, me)
             c2.setdefault("events", []).append(event(me["id"], "verify-pass", f"{short(tip)}: its seal ({level_text(seal)}) "
                                                      "already covers it, nothing ran"))
             save_convoy(files, c2)
@@ -1797,9 +1807,12 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
     else:
         template = cfg["convoy_verify_all" if level == "all" else "convoy_verify"]
 
+    found = fix_commits(main_tip, tip, c.get("vessels") or [])
+
     def start(files, h):
         c2 = convoy_of(files, args.number)
         c2["head"] = tip
+        record_fixes(c2, found, me)
         c2.setdefault("events", []).append(event(me["id"], "verify-start", f"{short(tip)} on {me['host']}: "
                                                  f"`{template.format(base=main_tip, head=tip, branch=c['branch'])}`"))
         save_convoy(files, c2)
@@ -1850,6 +1863,117 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
     return 0 if sealed else 1
 
 
+# --- HRB-5: a mechanical preflight before the push to main ---------------------------------------
+# JOUNA's coordinator checked every train by hand before its push: parents, authors, commit count, wip/
+# branches, the expected diff. `convoy sail` does it every time, with git alone (and Keelokit's wip-inside
+# when the project has it), in seconds.
+
+# Authors no real person or session commits as: git's and tutorials' defaults. Keelokit has no list of its
+# own; `[harbor] placeholder_authors` adds names or emails (exact, any case).
+PLACEHOLDER_NAMES = {"your name", "you", "name", "user", "unknown", "root", "nobody", "(none)"}
+PLACEHOLDER_EMAILS = {"you@example.com", "your.email@example.com", "your_email@example.com", "your@email.com",
+                      "email@example.com", "name@example.com", "user@example.com", "root@localhost"}
+WIP_SECONDS = 50  # Keelokit's wip-inside lists the remote's wip branches: one ls-remote, well under this
+
+
+def fix_commits(base: str, head: str, vessels: list[dict]) -> list[str]:
+    """The integrator's commits on convoy/<n> itself: on the first-parent line from `base` to `head`, not
+    merges, and in no vessel. A commit that came in through a merge is never one."""
+    line = git("rev-list", "--first-parent", "--no-merges", "--reverse", f"{base}..{head}").split()
+    theirs = set(git("rev-list", head, f"^{base}", *[f"^{v['head']}" for v in vessels]).split())
+    return [s for s in line if s in theirs]
+
+
+def record_fixes(c: dict, found: list[str], me: dict) -> None:
+    new = [s for s in found if s not in (c.get("fixes") or [])]
+    if new:
+        c.setdefault("fixes", []).extend(new)
+        c.setdefault("events", []).append(event(me["id"], "fix", ", ".join(short(s) for s in new)))
+
+
+def placeholder_author(name: str, email: str, extra: set[str]) -> bool:
+    n, e = name.strip().lower(), email.strip().lower()
+    return (not n or "@" not in e or n in PLACEHOLDER_NAMES or e in PLACEHOLDER_EMAILS or e.endswith(".(none)")
+            or e.endswith("@localhost") or n in extra or e in extra)
+
+
+def changed_files(*args: str) -> set[str]:
+    return {p for p in git("diff", "--no-renames", "--name-only", *args).splitlines() if p}
+
+
+def preflight(c: dict, base: str, head: str, cfg: dict) -> tuple[list[str], list[str]]:
+    """(failures, notes) for pushing `head` onto `base`. One line per failure, the first one decides."""
+    failures, notes = [], []
+    vessels = c.get("vessels") or []
+    fixes = set(c.get("fixes") or [])
+    heads = {v["head"]: v["branch"] for v in vessels}
+    # 1. The history: the vessels' commits, at most one merge per vessel (none when it went in as a
+    # fast-forward), merges of the trunk, and the recorded fixes. Nothing else.
+    for v in vessels:
+        if not ancestor(v["head"], head):
+            failures.append(f"vessel {v['branch']}@{short(v['head'])} is not in the head {short(head)}")
+    theirs = set()
+    for v in vessels:
+        theirs |= set(git("rev-list", v["head"], f"^{base}").split())
+    merged_once: dict[str, str] = {}
+    log = git("log", "--reverse", "--topo-order", "--format=%H%x00%P%x00%an%x00%ae%x00%s", f"{base}..{head}")
+    commits = [l.split("\x00") for l in log.splitlines() if l]
+    for sha, parents, _, _, subject in commits:
+        if sha in theirs or sha in fixes:
+            continue
+        others = parents.split()[1:]
+        if not others:
+            failures.append(f"stray commit {short(sha)} \"{one(subject, 80)}\": not in a vessel, not a recorded fix")
+            continue
+        brought = [heads[p] for p in others if p in heads]
+        if brought:
+            for b in brought:
+                if b in merged_once:
+                    failures.append(f"stray merge {short(sha)}: {b} was already merged by {short(merged_once[b])}")
+                merged_once[b] = sha
+        elif not all(ancestor(p, base) for p in others):
+            failures.append(f"stray merge {short(sha)} \"{one(subject, 80)}\": it merges no vessel and no {TRUNK}")
+    # 2. Every author is a real identity.
+    extra = {str(x).strip().lower() for x in cfg.get("placeholder_authors") or []}
+    for sha, _, name, email, _ in commits:
+        if placeholder_author(name, email, extra):
+            failures.append(f"placeholder author on {short(sha)}: {name} <{email}>")
+    # 3. No unproven wip/ tip inside the head (Keelokit 0.13's wip-inside: exit 0 names one, 1 none).
+    tool = ROOT / PLAN_TOOL
+    if not tool.exists():
+        notes.append("wip tips not checked: no Keelokit verify_tools.py")
+    else:
+        try:
+            res = subprocess.run([sys.executable, str(tool), "wip-inside", REMOTE, head], cwd=ROOT,
+                                 capture_output=True, text=True, timeout=WIP_SECONDS)
+        except subprocess.TimeoutExpired:
+            res = None
+            failures.append(f"Keelokit's wip-inside did not answer in {WIP_SECONDS} s")
+        if res is not None:
+            if res.returncode == 0:
+                tip = res.stdout.strip() or "a wip tip"
+                failures.append(f"unproven wip tip inside the head: {short(tip) if re.fullmatch(r'[0-9a-f]{40,64}', tip) else tip}")
+            elif res.returncode != 1:
+                notes.append("wip tips not checked: this Keelokit's verify_tools.py has no wip-inside (0.13 adds it)")
+    # 4. The diff: the head changes exactly what the vessels changed, apart from the fixes' files and the
+    # declared generated files.
+    expected = set()
+    for v in vessels:
+        expected |= changed_files(f"{base}...{v['head']}")
+    excused = set()
+    for sha in fixes:
+        excused |= {p for p in git("diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", sha).splitlines() if p}
+    got = changed_files(base, head)
+    loose = lambda p: p not in excused and not generated_hits(p, cfg.get("generated") or {})
+    for p in sorted(got - expected):
+        if loose(p):
+            failures.append(f"{p} changed outside the vessels and the recorded fixes")
+    for p in sorted(expected - got):
+        if loose(p):
+            failures.append(f"{p}: a vessel changed it, and the head against {TRUNK} doesn't")
+    return failures, notes
+
+
 def record_main_move(files: dict, before: str | None, after: str, by: str, cause: str) -> None:
     mt = load(files, "harbor/main.toml") or {"schema": SCHEMA}
     if before and before != after:
@@ -1887,6 +2011,20 @@ def convoy_sail(args, cfg: dict, me: dict) -> int:
     if not (seal.get("exit") == 0 and covers(seal.get("level"), ok["level"]) and seal.get("base") == main_tip):
         raise HarborError("NOT_SEALED", f"{short(tip)} has no green {ok['level']} seal against {short(main_tip)}: convoy verify first")
     git("checkout", "--quiet", "-B", c["branch"], tip)
+    # HRB-5: what main is about to receive is checked mechanically first; a failure stops the sail here.
+    t0 = time.monotonic()
+    failures, notes = preflight(c, main_tip, tip, cfg)
+    if failures:
+        def failed(files, h):
+            c2 = convoy_of(files, args.number)
+            c2.setdefault("events", []).append(event(me["id"], "preflight-failed", one(failures[0], 400)
+                                                     + (f" (+{len(failures) - 1} more)" if len(failures) > 1 else "")))
+            save_convoy(files, c2)
+        transact(f"convoy {args.number} preflight failed", me["id"], failed)
+        for line in failures[1:]:
+            print(f"harbor: preflight: {line}", file=sys.stderr)
+        raise HarborError("PREFLIGHT_FAILED", failures[0] + (f" (and {len(failures) - 1} more above)" if len(failures) > 1 else ""))
+    passed = f"preflight passed in {time.monotonic() - t0:.1f} s" + (f" ({'; '.join(notes)})" if notes else "")
 
     # The push runs the project's pre-push hook, which can take minutes. The sail says so in the
     # logbook first: an abort that arrives meanwhile is refused (SAILING) instead of being
@@ -1899,7 +2037,7 @@ def convoy_sail(args, cfg: dict, me: dict) -> int:
         if not ok2 or ok2.get("base") != main_tip or c2.get("head") != tip:
             raise HarborError("NO_OK", f"convoy {args.number} lost its ok or moved since this sail started: look at the logbook")
         c2["sailing"] = {"by": me["id"], "at": now(), "head": tip}
-        c2.setdefault("events", []).append(event(me["id"], "sailing", f"pushing {short(tip)} to {TRUNK}"))
+        c2.setdefault("events", []).append(event(me["id"], "sailing", f"{passed}; pushing {short(tip)} to {TRUNK}"))
         save_convoy(files, c2)
 
     def withdraw(files, h):
@@ -1932,6 +2070,7 @@ def convoy_sail(args, cfg: dict, me: dict) -> int:
     except HarborError as e:
         raise HarborError(e.code, f"{TRUNK} has {short(tip)}, but the logbook write failed ({e.why}); "
                           "the next harbormaster control records the sail")
+    print(f"harbor: convoy {args.number} {passed}")
     print(f"harbor: convoy {args.number} sailed: {TRUNK} {short(main_tip)} → {short(tip)}")
     return 0
 

@@ -33,6 +33,9 @@ after a green `all` on the same head is `ALREADY_COVERED`.
 
 ## HRB-5 · A mechanical preflight before the push to main
 
+*Built: `tests/test_phase7.py`; how it works is the preflight of `/harbor:convoy sail N` in
+[design.md](design.md#harborconvoy-sail-n-phase-2).*
+
 JOUNA's coordinator checked every train before its push to main, from a backup branch, in about a minute:
 parents, author, commit count, `wip/` branches and the expected diff. It never found a problem, and cost a
 minute. Harbor makes it a fixed, mechanical part of `convoy sail`:

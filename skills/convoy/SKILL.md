@@ -105,7 +105,15 @@ seals it when that completes the plan; at `all` the rerun is `--all --rerun-fail
 ## sail (integrator)
 
 `python3 "$H" --session <id> convoy sail <n>`, from the machine that verified. It pushes the sealed
-head to `main` as a fast-forward; `MAIN_MOVED` means assemble again and a new ok. `NEEDS_PERSON`:
+head to `main` as a fast-forward; `MAIN_MOVED` means assemble again and a new ok. Before the push it
+runs a preflight (HRB-5), a few seconds of git: the head's history from `main` is the vessels' commits,
+one merge per vessel (or a fast-forward), merges of `main` and your recorded fixes; no placeholder author;
+no unproven `wip/` tip (Keelokit's `wip-inside`, skipped with a note on an older Keelokit); and the head
+changes exactly the vessels' files, apart from the fixes' files and `[harbor.generated]`. A fix is a commit
+you make on `convoy/<n>` itself, never one merged in: `assemble` and `verify` record it (event `fix`).
+`PREFLIGHT_FAILED` names the line that failed and is in the logbook: a stray commit or merge, or a file
+nobody delivered, comes off `convoy/<n>` in a new commit (history is never rewritten), then verify again;
+a wip tip goes back to its vessel; never push around it. `NEEDS_PERSON`:
 tell the gatekeeper what to review (`git show origin/harbor/log:harbor/convoys/<n>.md`, `git diff
 origin/main...origin/convoy/<n>`) and that they approve by running `python3 <harbor.py> convoy approve
 <n>` in their own terminal. Never run it yourself: Harbor's hook blocks it, and getting around the
