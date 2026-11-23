@@ -17,7 +17,8 @@ vessels that share commits, everything marked *(3)*, and phase 3's "Designed, no
 [ledger-phase6.md](ledger-phase6.md) and not written yet. Phase 7, the lessons of the JOUNA fleet (the ok
 straight to `all`, a sail preflight, a seam report, cutoffs, a 30-minute round), is designed in
 [lessons-phase7.md](lessons-phase7.md); HRB-4, the ok straight to `all`, HRB-5, the sail preflight, HRB-6,
-the seam report at assemble, and HRB-7, a convoy's cutoff (`tests/test_phase7.py`), are written, the rest is not. The evidence is the survey of a week of convoys run by hand on
+the seam report at assemble, HRB-7, a convoy's cutoff, and HRB-8, the 30-minute round (`tests/test_phase7.py`),
+are written. The evidence is the survey of a week of convoys run by hand on
 the fleet Harbor was learned on (see the appendix; its finding ids, `n.m`, are cited as `§n.m`, its
 candidate rules as `R1`…`R26`). For how to use Harbor, see the [README](../README.md).
 
@@ -99,7 +100,7 @@ own_verify = false                 # true: the verify commands are the project's
 all_when_covered = 0.9             # (7) the ok's level is `all` when the scoped plan has every step of --all and this share of its packages
 ci_check = "python3 .keelokit/bin/ci.py health"     # (2) the ok needs it green (exit 1 = red); default when ci.py exists
 person_ok = "critical"             # (2) a person's yes too: "critical" (full tier or a critical area), "areas" (a critical area only), "always", "never"
-control_every_minutes = 90         # a value from the first fleet (§5.3)
+control_every_minutes = 30         # (7) every 30 minutes, as JOUNA's rounds (was 90, from the first fleet, §5.3)
 watch_expiry_minutes = 180         # a value from the first fleet (§5.3): relief after 3 hours without a control
 
 [harbor.models]                    # Harbor's own roles; `harbor.py models` prints what applies (§3.3)
@@ -714,7 +715,12 @@ Read-only: fetches and prints `LOGBOOK.md`, or `convoys/<n>.md`.
   Two takeovers at once: the second push is rejected, the replay finds the watch held and
   unexpired, and it fails with `WATCH_HELD` naming the holder. First commit wins (R20).
 - **Then:** the session schedules its own control every `control_every_minutes`: a task scheduled
-  by another session doesn't reach it (§5.3).
+  by another session doesn't reach it (§5.3). *(7)* Takeover prints the message to schedule, after
+  `schedule this message to this session every N minutes, word for word:`. It holds only commands to
+  run (`harbor.py --session <id> harbormaster control`, and `python3 .keelokit/bin/ledger.py` when the
+  project has that file) and what to do with their output, then to schedule itself again; never a
+  state (no convoy numbers, heads or counts), so a compacted or new session gets the facts fresh. The
+  same logbook or another gives the same message.
 
 ### `/harbor:harbormaster control` *(phase 2)*
 

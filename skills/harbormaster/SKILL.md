@@ -22,8 +22,11 @@ id), otherwise send it a `msg` with that title.
 Refused with `WATCH_HELD` while another
 session's watch hasn't expired; `--relieve "<reason>"` only when the person says so in this
 conversation (the gatekeeper's word). Then schedule this session's own control every `[harbor] control_every_minutes`
-(a task another session scheduled doesn't reach this one): one scheduled message to itself that
-runs `/harbor:harbormaster control` and schedules the next.
+(30 by default; a task another session scheduled doesn't reach this one): one scheduled message to itself, the
+one takeover prints after `schedule this message to this session …`, word for word. It holds only the commands
+to run (`harbor.py … harbormaster control`, and `python3 .keelokit/bin/ledger.py` when the project has it) and
+what to do with their output, never a state: no convoy numbers, heads, counts or "where we were", so a compacted
+or new session reads the facts fresh each round. Each round ends by scheduling the same message again.
 
 ## control
 

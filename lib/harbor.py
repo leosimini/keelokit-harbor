@@ -113,8 +113,9 @@ DEFAULTS = {
     # Keelokit's verify against origin/main, as build-story runs it under the convoy policy: a plain run (not
     # --since) leaves a seal and counts as green for shared seals; --keep-going lists every red in one run.
     "vessel_verify": "pnpm verify --keep-going",
-    # Values from the first fleet it ran on (survey 5.3): a control at least every 90 minutes, relief after 3 hours.
-    "control_every_minutes": 90,
+    # Relief after 3 hours is a value from the first fleet it ran on (survey 5.3). The control was every 90 minutes
+    # there; HRB-8: JOUNA's rounds every 25-30 minutes caught what 90 left for hours, so 30.
+    "control_every_minutes": 30,
     "watch_expiry_minutes": 180,
     "convoy_preflight": "pnpm verify --preflight",
     "convoy_verify": "pnpm verify --keep-going",
@@ -3031,6 +3032,15 @@ PHASE2 = {"assemble": convoy_assemble, "approve": convoy_approve, "verify": conv
           "defer": convoy_defer, "seam": convoy_seam}
 
 
+def control_prompt(session: str, minutes: int) -> str:
+    """HRB-8: the message the harbormaster schedules for its own control. Only commands to run and what to do with
+    their output, never a state (no convoy, head or count): a compacted or new session gets the facts fresh."""
+    ledger = " and python3 .keelokit/bin/ledger.py" if (ROOT / ".keelokit/bin/ledger.py").is_file() else ""
+    return (f"Harbor control round: run python3 \"${{CLAUDE_PLUGIN_ROOT}}/lib/harbor.py\" --session {session} harbormaster "
+            f"control{ledger}, read their output fresh (trust nothing remembered from earlier rounds), act on each line "
+            f"as /harbor:harbormaster control says, then schedule this same message again in {minutes} minutes.")
+
+
 def cmd_harbormaster(args) -> int:
     state = project()
     cfg = config(state)
@@ -3072,6 +3082,8 @@ def cmd_harbormaster(args) -> int:
         hm = transact(f"harbormaster takeover by {me['id']}", me["id"], mutate)
         print(f"harbor: {me['id']} holds the watch until {hm['expires']}; control every {cfg['control_every_minutes']} "
               "minutes, from a task this session schedules for itself")
+        print(f"harbor: schedule this message to this session every {cfg['control_every_minutes']} minutes, word for word: "
+              f"{control_prompt(me['session'], cfg['control_every_minutes'])}")
         if hm_title:
             print(f"harbor: session title: {hm_title}")
         if former:
