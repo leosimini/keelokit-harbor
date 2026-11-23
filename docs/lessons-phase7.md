@@ -13,6 +13,9 @@ Harbor 0.6.0, when Leo asks for a release.
 
 ## HRB-4 · The ok goes straight to `all` when the scoped plan already covers it
 
+*Built: `tests/test_phase7.py`; how it works is rule 6 of "Verifying without a bottleneck" in
+[design.md](design.md#verifying-without-a-bottleneck).*
+
 JOUNA ran a piece-scoped verify of each train's union and then `--all`: about two hours a train for nothing,
 because on a wide train the scoped plan is the whole suite and the second run repeats the first.
 

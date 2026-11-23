@@ -16,7 +16,8 @@ Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigni
 vessels that share commits, everything marked *(3)*, and phase 3's "Designed, not built". Phase 6, how Harbor fits Keelokit's ledger, is designed in
 [ledger-phase6.md](ledger-phase6.md) and not written yet. Phase 7, the lessons of the JOUNA fleet (the ok
 straight to `all`, a sail preflight, a seam report, cutoffs, a 30-minute round), is designed in
-[lessons-phase7.md](lessons-phase7.md) and not written yet. The evidence is the survey of a week of convoys run by hand on
+[lessons-phase7.md](lessons-phase7.md); HRB-4, the ok straight to `all` (`tests/test_phase7.py`), is
+written, the rest is not. The evidence is the survey of a week of convoys run by hand on
 the fleet Harbor was learned on (see the appendix; its finding ids, `n.m`, are cited as `§n.m`, its
 candidate rules as `R1`…`R26`). For how to use Harbor, see the [README](../README.md).
 
@@ -94,6 +95,7 @@ convoy_verify = "pnpm verify --keep-going"          # (2) level "changed": scope
 convoy_verify_all = "pnpm verify --all --keep-going" # (2) level "all": only what the routing can't bound
 convoy_rerun = "pnpm verify --rerun-failed --keep-going"   # (2) after a red; Keelokit seals it when it completes the plan
 own_verify = false                 # true: the verify commands are the project's own, not Keelokit's ("A level without Keelokit's record")
+all_when_covered = 0.9             # (7) the ok's level is `all` when the scoped plan has every step of --all and this share of its packages
 ci_check = "python3 .keelokit/bin/ci.py health"     # (2) the ok needs it green (exit 1 = red); default when ci.py exists
 person_ok = "critical"             # (2) a person's yes too: "critical" (full tier or a critical area), "areas" (a critical area only), "always", "never"
 control_every_minutes = 90         # a value from the first fleet (§5.3)
@@ -300,6 +302,8 @@ reason = "migrations and verify scripts: the risk table says --all"
 base = "a2becf56d…"              # main when the ok was given
 head = "60099ef60…"              # the convoy head the ok covers
 needs_person = "full-tier vessels claude/carga-001"   # why a person's yes is also needed; absent when it isn't
+level_by = "plan"                # (7) "plan" (Keelokit's plans chose it) or "harbormaster" (--level); absent with no plan
+plan = "the scoped plan covers --all: every step and 46 of 48 packages (96% ≥ 90%)"   # (7) what the plans said
 
 [ok.person]                      # (2) that yes, from the person's own terminal
 by = "acct1/mbp/-"
@@ -551,17 +555,21 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   `CONVOY_PUSH_REJECTED`, `ASSEMBLE_STALE` (vessels changed meanwhile). An open dependency is not an
   error: the convoy waits.
 
-### `/harbor:convoy sail N --ok --level changed|all --reason TEXT` *(phase 2)*
+### `/harbor:convoy sail N --ok [--level changed|all] [--reason TEXT]` *(phase 2; the level from the plans, phase 7)*
 
 - **Before:** the harbormaster with an unexpired watch; state ready; the convoy's `base` is
   `origin/main`; `ci.py health` says `main` is green where CI is reachable; nothing expected is
   missing (§4.7).
 - **The level** (R19): `changed` by default, `all` only for what Keelokit's routing can't bound;
   the reason names the files that decided it. The rules, and why money or migrations don't force
-  `all`, are in "Verifying without a bottleneck".
-- **Logbook:** `[ok]`, state verifying, event `ok`.
+  `all`, are in "Verifying without a bottleneck". Without `--level`, Keelokit's two plans decide it
+  (HRB-4, rule 6 there) and `--reason` is optional; with `--level` the harbormaster's word wins and
+  `--reason` is required. With no Keelokit plan to read, `--level` is required, as before (`USAGE`).
+- **Logbook:** `[ok]`, state verifying, event `ok`. When the plans were read, `[ok]` also has `plan`
+  (what they said) and `level_by` (`plan` or `harbormaster`); a reason Harbor wrote says so.
 - **Errors:** `NOT_HARBORMASTER` (also for an expired watch), `WRONG_STATE`, `MAIN_MOVED`,
-  `CONVOY_MOVED`, `MAIN_RED`.
+  `CONVOY_MOVED`, `MAIN_RED`, `ALREADY_COVERED` (an ok asked on a verifying convoy whose head already
+  has a green run covering that level: it sails, nothing runs again).
 
 ### `harbor.py convoy approve N [--note TEXT]` *(phase 2)*
 
@@ -723,7 +731,7 @@ verify measured 47 min where the docs said minutes (§6.12); one landing took te
 "a repo of this size can't take a full verify per piece" (§4.2), and grew narrower variants
 (a piece check, `--keep-going`, `--resume`). The fastest convoy was written and reviewed in an hour and
 landed four days later, waiting for its batch (§1.8). So Harbor treats verify minutes and machine
-time as the scarce resource. Five rules:
+time as the scarce resource. Six rules:
 
 1. **Scope by the diff; `--all` is the exception.** The convoy verify is Keelokit's scoped
    `pnpm verify --keep-going` on the convoy head. Because `main` is the convoy's base, that covers
@@ -785,6 +793,30 @@ time as the scarce resource. Five rules:
    that depends on one still verifying assembles on top of that one's head instead of idling
    (*stacked*, *phase 3*). When the first sails, `main` is already the second's base, and the
    second's verify reruns only if the first's head changed, which happens when the first goes red.
+
+6. **One run per head: the ok goes straight to `all` when the scoped plan covers it** *(phase 7, HRB-4)*.
+   On a wide convoy the scoped plan is the whole suite, and a scoped run followed by `--all` repeats it
+   (the JOUNA fleet paid about two hours a train for that). So `convoy sail --ok` asks Keelokit for both
+   plans of the convoy head, `verify_tools.py plan --base <main>` and `plan --all`, in a throwaway
+   worktree. Keelokit's plan names steps, not packages, so Harbor counts the packages with the
+   selectors Keelokit's scoped run uses (`pnpm --filter "...[<main>]" --filter "!{.}" ls`, every
+   package when a root manifest changed; a repo without `pnpm-workspace.yaml` is one package).
+   - When the scoped plan has every step of `--all` and at least `[harbor] all_when_covered` (default
+     0.9) of its packages, the ok's level is `all`, and its reason says so with the counts. Otherwise
+     `changed`, and the reason says what is narrower. The harbormaster can still pass `--level`; theirs
+     wins, and Harbor prints what the plans would have given.
+   - If the head already has a whole green `changed` run against today's main (a one-vessel convoy's
+     seal, or the verify of the pre-push at assemble) and the plans say `all`, the level stays `changed`:
+     that run already ran the plan, and nothing runs twice.
+   - `convoy verify` at `all` reuses nothing partial and runs once: after a red, the next run is the
+     whole `--all` again, never the scoped rerun (Keelokit narrows a rerun only within the level it ran
+     at). At `changed` it runs once, and a red is followed by the narrowed rerun of rule 3.
+   - Once the ok's run is green, an ok asked again for a level that run covers is refused with
+     `ALREADY_COVERED`: the convoy sails, and nobody starts a second run on that head.
+   - No plan (no `.keelokit/bin/verify_tools.py` in the head, `own_verify`, the plan or `pnpm` failing):
+     nothing changes, and the ok needs `--level` as before.
+   - **Assumption:** the package count mirrors Keelokit's `verify.sh` (0.12–0.14); if Keelokit's plan
+     ever names its packages, Harbor should read them from there instead.
 
 **Measure before tuning.** Every seal records its duration and, from Keelokit's
 `keelokit-verify.history`, each step's time, the failed steps and the known causes *(phase 1)*.

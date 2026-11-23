@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Phase 7: lessons from the JOUNA fleet
+- **HRB-4: the ok goes straight to `all` when the scoped plan covers it.** `convoy sail --ok` without
+  `--level` asks Keelokit for the convoy head's scoped plan (`verify_tools.py plan --base <main>`) and its
+  `--all` plan, and counts the packages each covers the way Keelokit's scoped run does. When the scoped
+  plan has every step of `--all` and at least `[harbor] all_when_covered` (default 0.9) of its packages,
+  the level is `all` and the reason says so; otherwise `changed`. `--level` from the harbormaster still
+  wins (then `--reason` is required, as before); the ok records `plan` and `level_by`. A head that already
+  has a whole green `changed` run keeps `changed` (no second run). With no Keelokit plan (no
+  `verify_tools.py`, `own_verify`, no `pnpm`), the ok needs `--level` as before.
+- **One run per head.** An ok asked again on a verifying convoy whose head already has a green run covering
+  that level is refused with `ALREADY_COVERED`. `convoy verify` at `all` no longer follows a red with the
+  scoped `convoy_rerun`: it runs the whole `--all` again, once.
+
 ## 0.5.1 — 2026-11-18
 
 - **A git hook finds Harbor.** Each session's SessionStart records its own `harbor.py` in `git config --local

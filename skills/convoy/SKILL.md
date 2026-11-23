@@ -80,10 +80,17 @@ a void delivery.
 
 ## The ok (harbormaster)
 
-`python3 "$H" --session <id> convoy sail <n> --ok --level changed|all --reason "<files that decided>"`.
-`changed` unless the convoy touches what Keelokit's routing can't bound (verify tooling, test config,
+`python3 "$H" --session <id> convoy sail <n> --ok [--reason "<files that decided>"]`. Harbor asks
+Keelokit for the scoped plan and the `--all` plan of the convoy head: when the scoped one has every step
+of `--all` and at least `[harbor] all_when_covered` (0.9) of its packages, the level is `all` (the scoped
+run would be the whole suite anyway, so it runs once, at `all`); otherwise `changed`. The reason records
+the plans. Pass `--level changed|all --reason …` to decide it yourself: yours wins. `changed` unless the
+convoy touches what Keelokit's routing can't bound (verify tooling, test config,
 CI, `.keelokit/`, `scripts/`, root manifests, the lockfile): then `all`. Money, permissions and
-migrations don't force `all`. It refuses if main is red, moved, or the convoy isn't `ready`. When the convoy is critical (a
+migrations don't force `all`. With no Keelokit plan (no `verify_tools.py`, `own_verify`, no `pnpm`)
+`--level` is required, as before. It refuses if main is red, moved, or the convoy isn't `ready`;
+`ALREADY_COVERED` when the convoy's head already has a green run that covers the level asked: sail
+it, never verify the same head twice. When the convoy is critical (a
 full-tier vessel or a critical area, per `[harbor] gatekeeper_ok` (formerly `person_ok`); with `"areas"`, only a critical area), the ok says it also needs the
 gatekeeper's yes: the verify runs meanwhile, and only the sail waits.
 
@@ -92,8 +99,8 @@ gatekeeper's yes: the verify runs meanwhile, and only the sail waits.
 `python3 "$H" --session <id> convoy verify <n>`, in the background with a log, then one `until` on
 its exit. A one-vessel convoy whose seal already covers the ok's level runs nothing. Red: the fix is
 a commit on `convoy/<n>` — a failing test first by Keelokit's verifier, then the builder — pushed,
-then verify again: it reruns only what failed plus what the fix touches, and Keelokit seals it when
-that completes the plan. Don't run vessel seals on this machine while it verifies.
+then verify again: at `changed` it reruns only what failed plus what the fix touches, and Keelokit
+seals it when that completes the plan; at `all` it runs the whole `--all` again, once. Don't run vessel seals on this machine while it verifies.
 
 ## sail (integrator)
 

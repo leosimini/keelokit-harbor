@@ -39,7 +39,9 @@ The ok, and anything else that needs judgment, stays in this session, on `harbor
 line per open convoy with what it waits for. Act on each line:
 - `waiting for the gatekeeper's yes`: remind the gatekeeper once, with what to review; don't approve.
 - `waiting for the ok`: read the convoy (`git show origin/harbor/log:harbor/convoys/<n>.md`, its diff
-  against main) and give the ok with its level and reason (`/harbor:convoy`, "The ok"), or say why not.
+  against main) and give the ok (`/harbor:convoy`, "The ok"), or say why not. Keelokit's plans pick the
+  level (`all` when the scoped plan already covers `--all`); pass `--level` only to overrule them, with the
+  reason. `ALREADY_COVERED` means the head already has a green run at that level: it sails, nothing reruns.
 - `main moved`: tell the convoy's integrator to assemble again.
 - `skipper … is lost/ended`: tell the gatekeeper; reassigning is theirs to approve.
 - `verify started … with no result`: the run was cut on that machine; the integrator runs it again.
