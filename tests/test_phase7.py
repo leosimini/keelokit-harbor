@@ -7,6 +7,9 @@ the expected diff); the same stand-in answers `verify_tools.py wip-inside`.
 HRB-6: `convoy assemble` writes a seam report from the vessels' diffs against the base (shared files, exported
 names, CSS selectors and tokens, routes one vessel adds and another's tests use), and reaches `ready` only
 when the skipper has read every seam with `convoy seam N ID --note`.
+HRB-7: `convoy new --cutoff <UTC time> --optional STORY ...`; after the cutoff, `convoy assemble` defers every
+optional story not delivered (event `deferred-at-cutoff`), a mandatory one keeps the convoy `waiting`, and the
+harbormaster's control names it.
 Run: python3 -m unittest discover -s tests"""
 import json
 import os
@@ -15,7 +18,7 @@ import time
 import unittest
 from pathlib import Path
 
-from test_harbor import harbor, ok, sh
+from test_harbor import harbor, ok, sh, vessel
 from test_phase2 import Phase2
 
 # Keelokit's `verify_tools.py plan [--all] --base REF`, as far as Harbor sees it: one line of steps.
@@ -532,6 +535,145 @@ class TestHRB6Edges(Seams):
         ok(harbor(self.a, "worker", "register", "--role", "vessel", session="s2"))
         res = harbor(self.a, "convoy", "seam", "1", self.seams()[0]["id"], "--note", "fine", session="s2")
         self.assertIn("NOT_SKIPPER", res.stderr)
+
+
+# 2026-11-01T16:00:00Z is the tests' now (NOW); the cutoff is an hour later.
+CUTOFF = "2026-11-01T17:00Z"
+BEFORE = {"HARBOR_NOW": "2026-11-01T16:30:00Z"}
+AFTER = {"HARBOR_NOW": "2026-11-01T17:30:00Z"}
+
+
+class TestHRB7(Phase2):
+    def test_HRB_7_S1_after_the_cutoff_an_optional_late_vessel_is_deferred_automatically(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "--optional", "QA-3", "--cutoff", CUTOFF))
+        c = self.convoy()
+        self.assertEqual((c["cutoff"], c["expected"], c["optional"]), ("2026-11-01T17:00:00Z", ["QA-1"], ["QA-3"]))
+        self.deliver(1, "claude/qa-1", "apps/web/a.ts", "QA-1")
+        out = ok(harbor(self.a, "convoy", "assemble", "1", env=AFTER))
+        self.assertIn("QA-3 deferred at the cutoff", out)
+        c = self.convoy()
+        self.assertEqual(c["state"], "ready")
+        self.assertEqual((c["expected"], c.get("optional"), c["deferred"]), (["QA-1"], None, ["QA-3"]))
+        e = [e for e in c["events"] if e["what"] == "deferred-at-cutoff"]
+        self.assertEqual(len(e), 1)
+        self.assertIn("QA-3", e[0]["detail"])
+        self.assertIn("2026-11-01T17:00:00Z", e[0]["detail"])
+        self.assertEqual(e[0]["at"], "2026-11-01T17:30:00Z")
+
+    def test_HRB_7_S2_a_mandatory_late_vessel_keeps_the_convoy_waiting_and_shows_in_the_round(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3", "--cutoff", CUTOFF))
+        self.deliver(1, "claude/qa-1", "apps/web/a.ts", "QA-1")
+        out = ok(harbor(self.a, "convoy", "assemble", "1", env=AFTER))
+        c = self.convoy()
+        self.assertEqual(c["state"], "waiting")
+        self.assertEqual(c["expected"], ["QA-1", "QA-3"])
+        self.assertNotIn("deferred", c)
+        self.assertNotIn("deferred-at-cutoff", self.events())
+        self.assertIn("QA-3", out)
+        out = ok(harbor(self.a, "harbormaster", "control", env=AFTER))
+        line = next(l for l in out.splitlines() if l.startswith("convoy 1"))
+        self.assertIn("waiting", line)
+        self.assertIn("past its cutoff 2026-11-01T17:00:00Z", line)
+        self.assertIn("mandatory QA-3 not delivered", line)
+
+    def test_HRB_7_S3_before_the_cutoff_nothing_is_deferred(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "--optional", "QA-3", "--cutoff", CUTOFF))
+        self.deliver(1, "claude/qa-1", "apps/web/a.ts", "QA-1")
+        out = ok(harbor(self.a, "convoy", "assemble", "1", env=BEFORE))
+        c = self.convoy()
+        self.assertEqual(c["state"], "waiting", "an optional story is waited for until the cutoff")
+        self.assertEqual(c["optional"], ["QA-3"])
+        self.assertNotIn("deferred", c)
+        self.assertNotIn("deferred-at-cutoff", self.events())
+        self.assertIn("optional QA-3 until the cutoff 2026-11-01T17:00:00Z", out)
+        out = ok(harbor(self.a, "harbormaster", "control", env=BEFORE))
+        self.assertNotIn("cutoff", next(l for l in out.splitlines() if l.startswith("convoy 1")))
+
+
+class TestHRB7Edges(Phase2):
+    def test_an_optional_vessel_delivered_in_time_sails_with_the_rest(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "--optional", "QA-3", "--cutoff", CUTOFF))
+        self.deliver(1, "claude/qa-1", "apps/web/a.ts", "QA-1")
+        self.deliver(1, "claude/qa-3", "apps/web/b.ts", "QA-3")
+        ok(harbor(self.a, "convoy", "assemble", "1", env=AFTER))
+        c = self.convoy()
+        self.assertEqual((c["state"], c["optional"]), ("ready", ["QA-3"]))
+        self.assertNotIn("deferred-at-cutoff", self.events())
+
+    def test_the_cutoff_is_a_utc_time(self):
+        for bad in ("tomorrow", "2026-11-01T17:00", "2026-11-01T17:00+02:00x"):
+            res = harbor(self.a, "convoy", "new", "--cutoff", bad)
+            self.assertEqual(res.returncode, 2, bad)
+            self.assertIn("USAGE", res.stderr)
+        self.assertNotIn("harbor/convoys/1.toml", self.repo.log_files())
+        ok(harbor(self.a, "convoy", "new", "--cutoff", "2026-11-01T19:00+02:00"))
+        self.assertEqual(self.convoy()["cutoff"], "2026-11-01T17:00:00Z", "stored in UTC")
+
+    def test_without_a_cutoff_or_optional_stories_the_logbook_has_neither_key(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1"))
+        c = self.convoy()
+        self.assertNotIn("cutoff", c)
+        self.assertNotIn("optional", c)
+        self.assertEqual(c["schema"], 1)
+
+    def test_a_story_is_either_expected_or_optional(self):
+        res = harbor(self.a, "convoy", "new", "--expect", "QA-1", "--optional", "QA-1")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("USAGE", res.stderr)
+
+    def test_without_a_cutoff_an_optional_story_waits_until_the_skipper_defers_it(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "--optional", "QA-3"))
+        self.deliver(1, "claude/qa-1", "apps/web/a.ts", "QA-1")
+        ok(harbor(self.a, "convoy", "assemble", "1", env=AFTER))
+        self.assertEqual(self.convoy()["state"], "waiting")
+        ok(harbor(self.a, "convoy", "defer", "1", "QA-3"))
+        c = self.convoy()
+        self.assertEqual((c.get("optional"), c["deferred"]), (None, ["QA-3"]))
+        self.assertEqual(self.events()[-1], "deferred")
+        ok(harbor(self.a, "convoy", "assemble", "1", env=AFTER))
+        self.assertEqual(self.convoy()["state"], "ready")
+
+    def test_add_optional_marks_the_vessel_and_takes_its_story_out_of_expected(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3", "--cutoff", CUTOFF))
+        head = vessel_(self, "claude/qa-3", "apps/web/b.ts", "QA-3")
+        ok(harbor(self.a, "convoy", "add", "1", "claude/qa-3", "--optional"))
+        c = self.convoy()
+        self.assertEqual((c["expected"], c["optional"]), (["QA-1"], ["QA-3"]))
+        self.assertEqual([(v["head"], v.get("optional")) for v in c["vessels"]], [(head, True)])
+        self.assertIn("optional", ok(harbor(self.a, "convoy", "status", "1")))
+
+    def test_every_late_optional_story_goes_and_mandatory_ones_still_wait(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-2", "--optional", "QA-3", "QA-4", "--cutoff", CUTOFF))
+        self.deliver(1, "claude/qa-1", "apps/web/a.ts", "QA-1")
+        out = ok(harbor(self.a, "harbormaster", "control", env=AFTER))
+        line = next(l for l in out.splitlines() if l.startswith("convoy 1"))
+        self.assertIn("mandatory QA-2 not delivered", line)
+        self.assertIn("the next assemble defers QA-3, QA-4", line)
+        ok(harbor(self.a, "convoy", "assemble", "1", env=AFTER))
+        c = self.convoy()
+        self.assertEqual((c["state"], c["expected"], c["deferred"]), ("waiting", ["QA-1", "QA-2"], ["QA-3", "QA-4"]))
+        self.assertEqual(self.events().count("deferred-at-cutoff"), 2)
+        ok(harbor(self.a, "convoy", "assemble", "1", env=AFTER))
+        self.assertEqual(self.events().count("deferred-at-cutoff"), 2, "deferred once")
+        line = next(l for l in ok(harbor(self.a, "harbormaster", "control", env=AFTER)).splitlines()
+                    if l.startswith("convoy 1"))
+        self.assertNotIn("defers", line)
+        self.assertIn("mandatory QA-2 not delivered", line)
+
+    def test_the_view_shows_the_cutoff_and_the_optional_stories(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "--optional", "QA-3", "--cutoff", CUTOFF))
+        view = self.repo.log_files()["harbor/convoys/1.md"]
+        self.assertIn("Cutoff: 2026-11-01T17:00:00Z", view)
+        self.assertIn("Optional: QA-3", view)
+        out = ok(harbor(self.a, "convoy", "status", "1"))
+        self.assertIn("cutoff 2026-11-01T17:00:00Z", out)
+        self.assertIn("optional, not delivered: QA-3", out)
+
+
+def vessel_(t, branch: str, path: str, story: str) -> str:
+    head = vessel(t.a, branch, path, story=story)
+    ok(harbor(t.a, "seal"))
+    return head
 
 
 if __name__ == "__main__":

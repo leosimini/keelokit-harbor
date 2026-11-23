@@ -16,8 +16,8 @@ Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigni
 vessels that share commits, everything marked *(3)*, and phase 3's "Designed, not built". Phase 6, how Harbor fits Keelokit's ledger, is designed in
 [ledger-phase6.md](ledger-phase6.md) and not written yet. Phase 7, the lessons of the JOUNA fleet (the ok
 straight to `all`, a sail preflight, a seam report, cutoffs, a 30-minute round), is designed in
-[lessons-phase7.md](lessons-phase7.md); HRB-4, the ok straight to `all`, HRB-5, the sail preflight, and HRB-6,
-the seam report at assemble (`tests/test_phase7.py`), are written, the rest is not. The evidence is the survey of a week of convoys run by hand on
+[lessons-phase7.md](lessons-phase7.md); HRB-4, the ok straight to `all`, HRB-5, the sail preflight, HRB-6,
+the seam report at assemble, and HRB-7, a convoy's cutoff (`tests/test_phase7.py`), are written, the rest is not. The evidence is the survey of a week of convoys run by hand on
 the fleet Harbor was learned on (see the appendix; its finding ids, `n.m`, are cited as `§n.m`, its
 candidate rules as `R1`…`R26`). For how to use Harbor, see the [README](../README.md).
 
@@ -293,7 +293,10 @@ base = "a2becf56d…"              # origin/main at new; (2) the main last merge
 head = "60099ef60…"              # (2) tip of convoy/<n> after the last assembly or fix
 created = "2026-10-31T19:51:00Z"
 depends_on = [7]                 # convoys that must sail first (R15)
-expected = ["STORY-000", "STORY-001", "STORY-003"]
+expected = ["STORY-000", "STORY-001", "STORY-003"]   # the mandatory stories
+optional = ["STORY-004"]         # (7, HRB-7) taken if delivered by the cutoff; absent with none
+cutoff = "2026-11-01T18:00:00Z"  # (7, HRB-7) UTC; after it, assemble defers the optional stories not delivered; absent with none
+deferred = ["STORY-002"]         # (2) stories that left for the next convoy (convoy defer, or the cutoff)
 fixes = ["b71c0e2a4…"]           # (7) the integrator's fix commits on convoy/<n>, recorded by assemble and verify
 
 [ok]                             # (2) the harbormaster's ok (R19)
@@ -480,7 +483,7 @@ only from a description (§5.1); the tests use a board written from that descrip
 | State | Means |
 |---|---|
 | `assembling` | created; the skipper takes deliveries |
-| `waiting` | assembled with what was delivered; an expected vessel, or a convoy it depends on, is still missing, or a seam is unread *(7)* |
+| `waiting` | assembled with what was delivered; an expected vessel, an optional one before the cutoff *(7)*, or a convoy it depends on, is still missing, or a seam is unread *(7)* |
 | `ready` | every expected vessel merged in `convoy/<n>` with `main`; migrations in order, generated files regenerated: waiting for the ok |
 | `verifying` | the ok is given with its level; the integrator runs the convoy's one verify and fixes the combination |
 | `sailed` | pushed to `main`; hotspots released |
@@ -488,17 +491,17 @@ only from a description (§5.1); the tests use a board written from that descrip
 
 | From → to | Command | Who | When |
 |---|---|---|---|
-| — → assembling | `convoy new` | any active worker, who becomes its skipper | account not paused; every `--depends` convoy exists |
+| — → assembling | `convoy new` | any active worker, who becomes its skipper | account not paused; every `--depends` convoy exists; `--cutoff` a time with its zone *(7)* |
 | assembling, waiting → same | `convoy add` | the skipper | the vessel is pushed, sealed green on that exact commit, holds no hotspot another open vessel holds, is in no other open convoy |
 | assembling, waiting → waiting | `convoy assemble` *(2)* | the integrator | merged what was delivered; something expected or a dependency is missing |
-| assembling, waiting → ready | `convoy assemble` *(2)* | the integrator | every expected vessel merged, `main` merged in, every dependency sailed, migration check passed, every seam read *(7)* |
+| assembling, waiting → ready | `convoy assemble` *(2)* | the integrator | every expected vessel merged, every optional one merged or deferred at the cutoff *(7)*, `main` merged in, every dependency sailed, migration check passed, every seam read *(7)* |
 | waiting → same | `convoy seam N ID --note` *(7)* | the skipper or the integrator | one seam of the report read: fine, fixed in a commit, or a question |
 | ready, verifying → assembling | `convoy assemble` *(2)* | the integrator | `main` moved, a vessel was redelivered, or one was added: the ok is cleared |
 | ready → verifying | `convoy sail --ok` *(2)* | the harbormaster, holding an unexpired watch | the ok conditions below |
 | verifying → same | `convoy approve` *(2)* | the person, from their own terminal | only a critical convoy (`person_ok`); bound to the head |
 | verifying → verifying | `convoy verify` *(2)* | the integrator | a run, green or red; fixes in between |
 | verifying → sailed | `convoy sail` *(2)* | the integrator | green convoy seal on the exact head at the ok's level; `main` still the ok's base |
-| assembling, waiting → same | `convoy defer N STORY` *(2)* | the skipper | an expected vessel is late: it leaves `expected` and goes to the next convoy, so the rest don't wait for it. **Needs your ok:** not in the agreed command list |
+| assembling, waiting → same | `convoy defer N STORY` *(2)* | the skipper | an expected (or optional, *7*) vessel is late: it leaves `expected` and goes to the next convoy, so the rest don't wait for it. **Needs your ok:** not in the agreed command list |
 | any open → aborted | `convoy abort` *(2)* | the skipper or the harbormaster | with a reason. **Needs your ok:** `abort` is not in the agreed command list |
 
 "Sail = ok + push" is one verb in two halves: the harbormaster's `sail --ok` and the integrator's
@@ -532,8 +535,11 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   convoys exist and aren't aborted.
 - **Logbook:** `convoys/<n>.toml` with the next number (after imported ones), base = `origin/main`,
   skipper = this worker, integrator per `[harbor] integrator`; the worker's role becomes skipper.
-  Event `new`.
-- **Errors:** `NOT_REGISTERED`, `ACCOUNT_PAUSED`, `UNKNOWN_CONVOY`, `NO_MAIN`.
+  Event `new`. *(7, HRB-7)* `--expect` is the mandatory list; `--optional STORY …` the stories taken if
+  they come in time (`optional`); `--cutoff <UTC time>` (ISO 8601, like `2026-11-23T18:00Z`; another offset
+  is converted) is stored as `cutoff` in UTC and named in the event. Both keys are absent when not given.
+- **Errors:** `NOT_REGISTERED`, `ACCOUNT_PAUSED`, `UNKNOWN_CONVOY`, `NO_MAIN`; `USAGE` (exit 2) for a
+  cutoff that is not a time with a zone, or a story both expected and optional.
 
 ### `/harbor:convoy add N BRANCH`
 
@@ -542,7 +548,8 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   (from `git diff` against the merge base with `main`) not held by any vessel of an open convoy;
   the branch in no other open convoy.
 - **Logbook:** the vessel row (or replaces it: a redelivery after a fix), event `add` or
-  `redelivered`, the skipper's `last_seen`.
+  `redelivered`, the skipper's `last_seen`. *(7, HRB-7)* `--optional` marks the vessel `optional = true`
+  and moves its story from `expected` to `optional`.
 - **Errors:** `BRANCH_NOT_PUSHED`, `HEAD_MISMATCH`, `NO_SEAL`, `SEAL_RED`, `HOTSPOT_HELD`,
   `VESSEL_TAKEN`, `NOT_SKIPPER`, `CONVOY_CLOSED`, `UNKNOWN_CONVOY`, `SAILING` (an abort while the
   sail is pushing the trunk).
@@ -582,8 +589,14 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   20 seams listed, then `(+N more)`; every seam is kept in `[[seams]]`. The convoy reaches `ready` only
   when every seam has a `seam-read`; until then it is `waiting` for "N seam(s) to read". One vessel has
   no seams and no report.
+- **Cutoff** (HRB-7, phase 7): an optional story not delivered keeps the convoy `waiting` until the cutoff
+  (with no cutoff, until the skipper defers it). At or after the cutoff, assemble defers every optional
+  story not delivered, as `convoy defer` does by hand (it leaves `optional` and joins `deferred`), one
+  event `deferred-at-cutoff` each, and prints `convoy new --optional <STORY>` for the next convoy. A
+  mandatory story missing past the cutoff is never deferred: the convoy stays `waiting` and the round
+  names it.
 - **Logbook:** `head`, `base`, `vessels[].merged`, `[[seams]]` *(7)*, the state, events `assembled` /
-  `main-moved` / `seams` *(7)*; a move of `main` clears `[ok]`.
+  `main-moved` / `seams` *(7)* / `deferred-at-cutoff` *(7)*; a move of `main` clears `[ok]`.
 - **Errors:** `NOT_INTEGRATOR`, `DIRTY_TREE`, `VESSEL_MOVED`, `CONFLICT`, `GENERATED_FAILED`,
   `MIGRATION_COLLISION`, `MIGRATION_ORDER`, `DIVERGED` (local and remote `convoy/<n>` disagree),
   `CONVOY_PUSH_REJECTED`, `ASSEMBLE_STALE` (vessels changed meanwhile). An open dependency is not an
@@ -710,7 +723,9 @@ Read-only: fetches and prints `LOGBOOK.md`, or `convoys/<n>.md`.
   is recorded as `loose`, R18); CI of `main`; per open convoy, `main` moved, vessels moved after
   delivery, skipper alive (its worker active and seen within the expiry, its account not paused),
   ready convoys waiting for the ok; workers not seen within the expiry marked `lost` (which frees
-  their account's places); verifies started with no result (a cut run on another machine).
+  their account's places); verifies started with no result (a cut run on another machine); past a
+  convoy's cutoff *(7, HRB-7)*, `past its cutoff <time>: mandatory <STORY> not delivered, it waits` and
+  `the next assemble defers <STORY>` for optional ones not yet deferred.
 - **Logbook:** `harbormaster.toml`, `main.toml`, workers marked lost, events. Reassigning a convoy
   whose skipper is gone (`harbor.py convoy skipper N WORKER`) is the harbormaster's call in a
   control. **Needs your ok:** neither the command nor the expiry for workers was in the agreement;

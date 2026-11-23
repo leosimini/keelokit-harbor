@@ -80,6 +80,9 @@ produces a seam; [S3] a route added by one vessel and asserted closed in another
 
 ## HRB-7 · A cutoff time for a convoy
 
+*Built: `tests/test_phase7.py`; how it works is the cutoff of `/harbor:convoy assemble N` and
+`/harbor:convoy new` in [design.md](design.md#harborconvoy-assemble-n-phase-2).*
+
 JOUNA's hour cutoffs with a clear rule of what is mandatory kept nine finished pieces from waiting on one.
 Harbor has `convoy defer` by hand.
 

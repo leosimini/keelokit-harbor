@@ -20,8 +20,9 @@ the change is replayed on the new tip (its preconditions checked again), never f
                          [--worktree PATH] [--log PATH]
     harbor.py seal [--rerun]                 record the vessel verify of HEAD by hash: Keelokit's own run of
                                              this commit against today's main if it passed, else run it
-    harbor.py convoy new [--title T] [--expect STORY ...] [--depends N ...]
-    harbor.py convoy add N BRANCH [--head SHA] [--story ID] [--tier trivial|light|full]
+    harbor.py convoy new [--title T] [--expect STORY ...] [--optional STORY ...] [--depends N ...]
+                         [--cutoff UTC]      after the cutoff, assemble defers the optional stories not delivered
+    harbor.py convoy add N BRANCH [--head SHA] [--story ID] [--tier trivial|light|full] [--optional]
     harbor.py convoy status [N]
     harbor.py convoy assemble N              merge main and the vessels into convoy/<n>, check migrations, push it
     harbor.py convoy sail N --ok [--level changed|all] [--reason TEXT]    the harbormaster's ok (Keelokit's plans pick the level)
@@ -29,7 +30,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py convoy approve N [--note TEXT] the gatekeeper's yes for a critical convoy, from their own terminal
     harbor.py convoy sail N                  push the verified head to main (fast-forward, no force)
     harbor.py convoy abort N --reason TEXT
-    harbor.py convoy defer N STORY           a late expected story leaves this convoy for the next one
+    harbor.py convoy defer N STORY           a late expected (or optional) story leaves this convoy for the next one
     harbor.py harbormaster takeover [--relieve REASON]
     harbor.py harbormaster control           the round: heartbeat, main, convoys, workers
     harbor.py msg send --to TARGET [--kind message|question|answer] [--re ID] TEXT
@@ -667,7 +668,8 @@ def render_convoy(c: dict, files: dict) -> str:
     meta = [("State", c.get("state")), ("Skipper", c.get("skipper") or c.get("imported_skipper")),
             ("Integrator", c.get("integrator")), ("Branch", f"`{c.get('branch')}`"), ("Base", short(c.get("base"))),
             ("Depends on", ", ".join(str(d) for d in c.get("depends_on") or []) or None),
-            ("Expected", ", ".join(c.get("expected") or []) or None)]
+            ("Expected", ", ".join(c.get("expected") or []) or None),
+            ("Optional", ", ".join(c.get("optional") or []) or None), ("Cutoff", c.get("cutoff"))]
     if c.get("imported"):
         meta.append(("Imported", "from BOARD.md; no vessel entered through Harbor yet"))
     if c.get("head"):
@@ -683,7 +685,7 @@ def render_convoy(c: dict, files: dict) -> str:
                                f"{short(sail.get('main_after'))}"))
     if c.get("deferred"):
         meta.append(("Deferred", ", ".join(c["deferred"])))
-    out += [f"- {k}: {cell(v)}" for k, v in meta]
+    out += [f"- {k}: {cell(v)}" for k, v in meta if v is not None or k not in ("Optional", "Cutoff")]
     out += ["", "## Vessels", ""]
     vs = c.get("vessels") or []
     if vs:
@@ -1167,10 +1169,13 @@ def cmd_convoy(args) -> int:
         return w
 
     if args.action == "new":
+        cutoff = parse_cutoff(args.cutoff) if args.cutoff is not None else None
+        optional = list(dict.fromkeys(args.optional or []))
+        if both := sorted(set(optional) & set(args.expect or [])):
+            raise HarborError("USAGE", f"{', '.join(both)} can't be both expected (mandatory) and optional")
         base = fetch(TRUNK)
         if not base:
             raise HarborError("NO_MAIN", f"{REMOTE} has no {TRUNK}")
-
 
         def mutate(files, head):
             w = registered(files)
@@ -1184,7 +1189,9 @@ def cmd_convoy(args) -> int:
                 "schema": SCHEMA, "number": n, "title": args.title, "state": "assembling", "branch": f"convoy/{n}",
                 "skipper": me["id"], "integrator": me["id"] if integrator == "any" else f"account:{integrator}",
                 "base": base, "created": now(), "depends_on": args.depends or [], "expected": args.expect or [],
-                "vessels": [], "events": [event(me["id"], "new", f"base {short(base)}")]})
+                **({"optional": optional} if optional else {}), **({"cutoff": cutoff} if cutoff else {}),
+                "vessels": [], "events": [event(me["id"], "new", f"base {short(base)}"
+                                                + (f", cutoff {cutoff}" if cutoff else ""))]})
             w.update(role="skipper", convoy=n, last_seen=now())
             if title := session_title("skipper", n, None, me["account"]):
                 w["title"] = title
@@ -1192,7 +1199,8 @@ def cmd_convoy(args) -> int:
             return n
 
         n = transact(f"convoy new by {me['id']}", me["id"], mutate)
-        print(f"harbor: convoy {n} assembling on base {short(base)}; skipper {me['id']}")
+        print(f"harbor: convoy {n} assembling on base {short(base)}; skipper {me['id']}"
+              + (f"; cutoff {cutoff}: then assemble defers the optional stories not delivered" if cutoff else ""))
         if title := session_title("skipper", n, None, me["account"]):
             print(f"harbor: session title: {title}")
         return 0
@@ -1250,8 +1258,13 @@ def cmd_convoy(args) -> int:
         vessels = [v for v in c.get("vessels") or [] if v["branch"] != args.branch]
         again = len(vessels) != len(c.get("vessels") or [])
         vessels.append({"branch": args.branch, "head": tip, "story": story, "tier": args.tier, "hotspots": spots,
-                        "critical": crit, "seal_base": seal.get("base"), "added": now(), "added_by": me["id"]})
+                        "critical": crit, "seal_base": seal.get("base"), "added": now(), "added_by": me["id"],
+                        **({"optional": True} if args.optional else {})})
         c["vessels"] = vessels
+        if args.optional:  # its story is no longer mandatory: `expected` stays the mandatory list
+            mine = stories_of(story)
+            c["expected"] = [s for s in c.get("expected") or [] if s not in mine]
+            c["optional"] = list(dict.fromkeys((c.get("optional") or []) + mine))
         c.setdefault("events", []).append(event(me["id"], "redelivered" if again else "add", f"{args.branch}@{short(tip)}"))
         save(files, f"harbor/convoys/{args.number}.toml", c)
         w["last_seen"] = now()
@@ -1260,6 +1273,7 @@ def cmd_convoy(args) -> int:
 
     again = transact(f"convoy {args.number} add {args.branch}@{short(tip)}", me["id"], mutate)
     print(f"harbor: {args.branch}@{short(tip)} {'redelivered to' if again else 'added to'} convoy {args.number}"
+          + (" as optional" if args.optional else "")
           + (f" (hotspots: {', '.join(spots)})" if spots else ""))
     return 0
 
@@ -1277,17 +1291,20 @@ def convoy_status(args) -> int:
     for n, c in pick.items():
         vs = c.get("vessels") or []
         print(f"convoy {n} · {c.get('state')} · skipper {c.get('skipper') or c.get('imported_skipper') or '—'} · "
-              f"{len(vs)} vessel(s) · base {short(c.get('base'))}")
+              f"{len(vs)} vessel(s) · base {short(c.get('base'))}" + (f" · cutoff {c['cutoff']}" if c.get("cutoff") else ""))
         if c.get("state") in OPEN and c.get("base") and main_tip and c["base"] != main_tip:
             print(f"  {TRUNK} moved: {short(c['base'])} → {short(main_tip)}")
         for v in vs:
             tip = fetch(v["branch"]) if c.get("state") in OPEN else v["head"]
             note = "" if tip == v["head"] else (" · branch gone from the remote" if tip is None
                                                   else f" · moved to {short(tip)} after delivery: the delivery is void")
-            print(f"  {v['branch']}@{short(v['head'])} {v.get('story') or ''}{note}".rstrip())
+            print(f"  {v['branch']}@{short(v['head'])} {v.get('story') or ''}{' (optional)' if v.get('optional') else ''}"
+                  f"{note}".rstrip())
         missing = [s for s in c.get("expected") or [] if s not in {v.get("story") for v in vs}]
         if missing:
             print(f"  expected, not delivered: {', '.join(missing)}")
+        if late := late_optional(c):
+            print(f"  optional, not delivered: {', '.join(late)}")
         for s in c.get("seams") or []:
             print(f"  seam {s['id']} " + (f"read ({s.get('read_kind')}): {s['note']}" if s.get("note") else "to read")
                   + f" · {s['kind']} {s['key']} ({', '.join(s['vessels'])})")
@@ -1580,6 +1597,12 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         missing = [s for s in c2.get("expected") or [] if s not in {v.get("story") for v in c2["vessels"]}]
         deps = [d for d in c2.get("depends_on") or [] if (cs.get(d) or {}).get("state") != "sailed"]
         events = c2.setdefault("events", [])
+        cut = past_cutoff(c2)
+        deferred = late_optional(c2) if cut else []
+        for s in deferred:
+            defer_story(c2, s, me, "deferred-at-cutoff", f"{s} goes to the next convoy: optional, not delivered by the "
+                                                         f"cutoff {c2['cutoff']}")
+        optional = late_optional(c2)
         if changed and c2.pop("ok", None):
             events.append(event(me["id"], "ok-cleared", f"the head or {TRUNK} changed: the ok is void"))
         for what, detail in notes:
@@ -1590,13 +1613,17 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         if report and ([s["id"] for s in seams] != before_ids or not any(e["what"] == "seams" for e in events)):
             events.append(event(me["id"], "seams", "; ".join(report)))
         unread = [s["id"] for s in c2["seams"] or [] if not s.get("note")]
-        if missing or deps or unread:
+        if missing or optional or deps or unread:
             c2["state"] = "waiting"
         elif c2.get("state") == "verifying" and not changed:
             pass
         else:
             c2["state"] = "ready"
-        waits = ([f"stories {', '.join(missing)}"] if missing else []) + ([f"convoy {', '.join(map(str, deps))}"] if deps else []) \
+        waits = ([f"stories {', '.join(missing)}" + (f" (mandatory, past the cutoff {c2['cutoff']})" if cut else "")]
+                 if missing else []) \
+            + ([f"optional {', '.join(optional)}" + (f" until the cutoff {c2['cutoff']}" if c2.get("cutoff") else
+                                                     " (no cutoff: convoy defer takes one out)")] if optional else []) \
+            + ([f"convoy {', '.join(map(str, deps))}"] if deps else []) \
             + ([f"{len(unread)} seam(s) to read (harbor.py convoy seam {args.number} <id> --note ...)"] if unread else [])
         events.append(event(me["id"], "assembled", f"head {short(head)}, {len(vessels)} vessel(s)"
                             + (f"; waiting for {' and '.join(waits)}" if waits else "")))
@@ -1604,9 +1631,12 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         if pre_seal and not run_of(files, head):
             save_run(files, pre_seal, main_tip)
         touch(files, w)
-        return c2["state"], waits, report
+        return c2["state"], waits, report, deferred
 
-    state, waits, report = transact(f"convoy {args.number} assemble at {short(head)}", me["id"], mutate)
+    state, waits, report, deferred = transact(f"convoy {args.number} assemble at {short(head)}", me["id"], mutate)
+    for s in deferred:
+        print(f"harbor: {s} deferred at the cutoff (optional, not delivered); expect it in the next convoy "
+              f"(convoy new --optional {s})")
     for line in report:
         print(f"harbor: seams: {line}")
     print(f"harbor: convoy {args.number} assembled at {short(head)} on {TRUNK} {short(main_tip)}: {state}"
@@ -2346,19 +2376,69 @@ def convoy_abort(args, cfg: dict, me: dict) -> int:
     return 0
 
 
+# --- HRB-7: a cutoff time ----------------------------------------------------------------------------
+# JOUNA's hour cutoffs, with a clear rule of what is mandatory, kept nine finished pieces from waiting on one.
+# `expected` is the mandatory list; `optional` the stories the convoy takes if they come in time. After the
+# cutoff, assemble defers every optional story not delivered, as `convoy defer` does by hand; a mandatory one
+# keeps the convoy waiting, and the round names it.
+
+def parse_cutoff(text: str) -> str:
+    try:
+        return fmt_ts(parse_ts(text))
+    except ValueError:
+        raise HarborError("USAGE", f"--cutoff '{text}' is not a time: write it in UTC, like 2026-11-23T18:00Z") from None
+
+
+def stories_of(story: str | None) -> list[str]:
+    return [s.strip() for s in (story or "").split(",") if s.strip()]
+
+
+def delivered_stories(c: dict) -> set[str]:
+    return {s for v in c.get("vessels") or [] for s in [v.get("story"), *stories_of(v.get("story"))] if s}
+
+
+def late_optional(c: dict) -> list[str]:
+    got = delivered_stories(c)
+    return [s for s in c.get("optional") or [] if s not in got]
+
+
+def past_cutoff(c: dict) -> bool:
+    return bool(c.get("cutoff")) and parse_ts(now()) >= parse_ts(c["cutoff"])
+
+
+def defer_story(c: dict, story: str, me: dict, what: str, detail: str) -> None:
+    """What `convoy defer` does: the story leaves this convoy's lists and is recorded as deferred."""
+    c["expected"] = [s for s in c.get("expected") or [] if s != story]
+    if "optional" in c:
+        c["optional"] = [s for s in c["optional"] if s != story]
+        if not c["optional"]:
+            del c["optional"]
+    c.setdefault("deferred", []).append(story)
+    c.setdefault("events", []).append(event(me["id"], what, detail))
+
+
+def cutoff_flags(c: dict) -> list[str]:
+    if not past_cutoff(c):
+        return []
+    got = {v.get("story") for v in c.get("vessels") or []}
+    missing = [s for s in c.get("expected") or [] if s not in got]
+    late = late_optional(c)
+    return ([f"past its cutoff {c['cutoff']}: " + "; ".join(
+        ([f"mandatory {', '.join(missing)} not delivered, it waits"] if missing else [])
+        + ([f"the next assemble defers {', '.join(late)}"] if late else []))] if missing or late else [])
+
+
 def convoy_defer(args, cfg: dict, me: dict) -> int:
     def mutate(files, h):
         c = convoy_of(files, args.number)
         require_open(c, "assembling", "waiting")
         if c.get("skipper") != me["id"]:
             raise HarborError("NOT_SKIPPER", f"convoy {args.number}'s skipper is {c.get('skipper')}")
-        if args.story not in (c.get("expected") or []):
+        if args.story not in (c.get("expected") or []) + (c.get("optional") or []):
             raise HarborError("NOT_EXPECTED", f"{args.story} is not expected in convoy {args.number}")
         if args.story in {v.get("story") for v in c.get("vessels") or []}:
             raise HarborError("ALREADY_DELIVERED", f"{args.story} is delivered already")
-        c["expected"] = [s for s in c["expected"] if s != args.story]
-        c.setdefault("deferred", []).append(args.story)
-        c.setdefault("events", []).append(event(me["id"], "deferred", f"{args.story} goes to the next convoy"))
+        defer_story(c, args.story, me, "deferred", f"{args.story} goes to the next convoy")
         save_convoy(files, c)
         touch(files, active_worker(files, me))
 
@@ -3066,6 +3146,7 @@ def cmd_harbormaster(args) -> int:
                 flags.append(f"skipper {c['skipper']} is {(sk or {}).get('state', 'unknown')}: reassign")
             if c.get("state") == "ready":
                 flags.append("waiting for the ok")
+            flags += cutoff_flags(c)
             ok_ = c.get("ok") or {}
             if ok_.get("needs_person") and (ok_.get("person") or {}).get("head") != c.get("head"):
                 flags.append(f"waiting for the gatekeeper's yes ({ok_['needs_person']})")
@@ -4065,7 +4146,9 @@ def parser() -> argparse.ArgumentParser:
     csub = cv.add_subparsers(dest="action", required=True)
     s = csub.add_parser("new")
     s.add_argument("--title")
-    s.add_argument("--expect", nargs="*")
+    s.add_argument("--expect", nargs="*", help="the mandatory stories")
+    s.add_argument("--optional", nargs="*", metavar="STORY", help="stories taken if delivered by the cutoff")
+    s.add_argument("--cutoff", metavar="UTC", help="an ISO 8601 UTC time, like 2026-11-23T18:00Z")
     s.add_argument("--depends", nargs="*", type=int)
     s = csub.add_parser("add")
     s.add_argument("number", type=int)
@@ -4073,6 +4156,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--head")
     s.add_argument("--story")
     s.add_argument("--tier", choices=TIERS)
+    s.add_argument("--optional", action="store_true", help="the vessel's story is optional, not mandatory")
     s = csub.add_parser("status")
     s.add_argument("number", type=int, nargs="?")
     for name in ("assemble", "verify"):

@@ -45,6 +45,9 @@ line per open convoy with what it waits for. Act on each line:
 - `main moved`: tell the convoy's integrator to assemble again.
 - `skipper … is lost/ended`: tell the gatekeeper; reassigning is theirs to approve.
 - `verify started … with no result`: the run was cut on that machine; the integrator runs it again.
+- `past its cutoff …: mandatory <STORY> not delivered, it waits`: ask the story's vessel (or the skipper)
+  when it lands; deferring a mandatory story is the gatekeeper's call (`convoy defer`), never automatic.
+  `the next assemble defers <STORY>`: tell the integrator to assemble; the optional ones go by themselves.
 - a loose push: tell the gatekeeper what landed outside a convoy.
 - `orphan: …`: a session still running whose owner ended, got lost or is paused. Tell the gatekeeper;
   its result is either taken over by its owner's replacement or ended.
