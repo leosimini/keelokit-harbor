@@ -17,9 +17,13 @@ say so and stop; don't start another session to get around it.
 
 ## new
 
-`python3 "$H" --session <id> convoy new --title "<what>" --expect <STORY> … [--depends N …]`. The
-stories come from one Keelokit wave or from the person; a convoy that needs another to land first
-names it in `--depends`. Report the number and the base.
+`python3 "$H" --session <id> convoy new --title "<what>" --expect <STORY> … [--optional <STORY> …]
+[--cutoff <UTC time>] [--depends N …]`. The stories come from one Keelokit wave or from the person; a
+convoy that needs another to land first names it in `--depends`. `--expect` is what the convoy can't sail
+without; `--optional` what it takes if it comes in time. `--cutoff` is an ISO 8601 UTC time
+(`2026-11-23T18:00Z`): after it, `assemble` defers every optional story not delivered by itself
+(`deferred-at-cutoff`), and a mandatory one still keeps the convoy waiting. `convoy add <n> <branch>
+--optional` marks a delivered vessel optional. Report the number, the base and the cutoff.
 
 ## Launching vessels (skipper)
 
@@ -76,7 +80,9 @@ a void delivery.
 - `MIGRATION_COLLISION` / `MIGRATION_ORDER`, `VESSEL_MOVED`: back to the vessel, which fixes, seals
   and is added again.
 - A late expected story: `convoy defer <n> <STORY>` takes it out; the next convoy expects it. Don't
-  hold the rest for it.
+  hold the rest for it. A late optional story goes by itself at the cutoff (`<STORY> deferred at the
+  cutoff`); before it, or with no cutoff, `convoy defer` takes it out too. Put each deferred story in the
+  next convoy (`convoy new --optional <STORY>` or `--expect`).
 
 ### The seam report (skipper)
 

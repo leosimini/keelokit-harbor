@@ -43,6 +43,14 @@
   `fixed in <commit>` (on `convoy/<n>`) or a question (ends in `?`). `assemble` keeps the convoy `waiting`
   until every seam is read, then reaches `ready`. `convoy status` and the convoy page show the seams. The
   logbook stays schema 1.
+- **HRB-7: a cutoff time for a convoy.** `convoy new --cutoff <UTC time>` (ISO 8601, like
+  `2026-11-23T18:00Z`, stored in UTC) and `--optional STORY …`; `convoy add N BRANCH --optional` marks a
+  vessel optional and moves its story out of `expected`, which stays the mandatory list. An optional story
+  not delivered keeps the convoy `waiting` until the cutoff; at or after it, `convoy assemble` defers each
+  one as `convoy defer` does (event `deferred-at-cutoff`). A mandatory story missing past the cutoff keeps the
+  convoy `waiting`, and `harbormaster control` names it (`past its cutoff …: mandatory … not delivered`).
+  `convoy defer` also takes an optional story. `convoy status` and the convoy page show the cutoff and the
+  optional stories. New optional keys `cutoff`, `optional` and `vessels[].optional`; the logbook stays schema 1.
 
 ## 0.5.1 — 2026-11-18
 
