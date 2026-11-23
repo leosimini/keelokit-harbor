@@ -100,7 +100,7 @@ gatekeeper's yes: the verify runs meanwhile, and only the sail waits.
 its exit. A one-vessel convoy whose seal already covers the ok's level runs nothing. Red: the fix is
 a commit on `convoy/<n>` — a failing test first by Keelokit's verifier, then the builder — pushed,
 then verify again: at `changed` it reruns only what failed plus what the fix touches, and Keelokit
-seals it when that completes the plan; at `all` it runs the whole `--all` again, once. Don't run vessel seals on this machine while it verifies.
+seals it when that completes the plan; at `all` the rerun is `--all --rerun-failed`, which keeps level `all`. Don't run vessel seals on this machine while it verifies.
 
 ## sail (integrator)
 

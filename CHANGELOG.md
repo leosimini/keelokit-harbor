@@ -13,7 +13,8 @@
   `verify_tools.py`, `own_verify`, no `pnpm`), the ok needs `--level` as before.
 - **One run per head.** An ok asked again on a verifying convoy whose head already has a green run covering
   that level is refused with `ALREADY_COVERED`. `convoy verify` at `all` no longer follows a red with the
-  scoped `convoy_rerun`: it runs the whole `--all` again, once.
+  scoped `convoy_rerun` (which can't seal at `all`): it runs the new `[harbor] convoy_rerun_all`
+  (default `pnpm verify --all --rerun-failed --keep-going`), so a red costs one fix round at `all` too.
 
 ## 0.5.1 — 2026-11-18
 

@@ -119,6 +119,9 @@ DEFAULTS = {
     "convoy_verify": "pnpm verify --keep-going",
     "convoy_verify_all": "pnpm verify --all --keep-going",
     "convoy_rerun": "pnpm verify --rerun-failed --keep-going",
+    # HRB-4: after a red at level `all`. Keelokit narrows a rerun only within the level it ran at, and with
+    # --all the rerun keeps level `all`: a red costs one fix round there too, not a second whole --all.
+    "convoy_rerun_all": "pnpm verify --all --rerun-failed --keep-going",
     "ci_check": None,  # None: Keelokit's `ci.py health` when the project has it; "" turns it off
     # When a convoy also needs the gatekeeper's yes before it sails: "critical" (a full-tier vessel or one that
     # touches an area of .keelokit/critical.toml), "areas", "always" or "never". The playbook's rule: humans
@@ -1787,10 +1790,12 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
     # A rerun counts as a whole verify only through Keelokit's record of what it completed. The project's
     # own commands leave none, so with own_verify a red is followed by the level's command again.
     own = cfg.get("own_verify") is True
-    # At `all` nothing partial is reused: the rerun command is a scoped one and Keelokit narrows a rerun only
-    # within the level it ran at, so after a red the next run is the whole --all again, once (HRB-4).
-    rerun = red_before and not own and level == "changed"
-    template = cfg["convoy_rerun"] if rerun else cfg["convoy_verify_all" if level == "all" else "convoy_verify"]
+    # After a red, the rerun of the ok's level: Keelokit narrows a rerun only within the level it ran at, so at
+    # `all` it is convoy_rerun_all (--all --rerun-failed), which keeps level `all` (HRB-4, rule 3).
+    if red_before and not own:
+        template = cfg["convoy_rerun_all" if level == "all" else "convoy_rerun"]
+    else:
+        template = cfg["convoy_verify_all" if level == "all" else "convoy_verify"]
 
     def start(files, h):
         c2 = convoy_of(files, args.number)

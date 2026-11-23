@@ -94,6 +94,7 @@ convoy_preflight = "pnpm verify --preflight"        # (2) before every convoy ve
 convoy_verify = "pnpm verify --keep-going"          # (2) level "changed": scoped by the convoy's diff against main
 convoy_verify_all = "pnpm verify --all --keep-going" # (2) level "all": only what the routing can't bound
 convoy_rerun = "pnpm verify --rerun-failed --keep-going"   # (2) after a red; Keelokit seals it when it completes the plan
+convoy_rerun_all = "pnpm verify --all --rerun-failed --keep-going"   # (7) after a red at level "all"; keeps level all
 own_verify = false                 # true: the verify commands are the project's own, not Keelokit's ("A level without Keelokit's record")
 all_when_covered = 0.9             # (7) the ok's level is `all` when the scoped plan has every step of --all and this share of its packages
 ci_check = "python3 .keelokit/bin/ci.py health"     # (2) the ok needs it green (exit 1 = red); default when ci.py exists
@@ -808,9 +809,10 @@ time as the scarce resource. Six rules:
    - If the head already has a whole green `changed` run against today's main (a one-vessel convoy's
      seal, or the verify of the pre-push at assemble) and the plans say `all`, the level stays `changed`:
      that run already ran the plan, and nothing runs twice.
-   - `convoy verify` at `all` reuses nothing partial and runs once: after a red, the next run is the
-     whole `--all` again, never the scoped rerun (Keelokit narrows a rerun only within the level it ran
-     at). At `changed` it runs once, and a red is followed by the narrowed rerun of rule 3.
+   - `convoy verify` runs once at the ok's level: at `all` it never starts with a scoped run. A red
+     costs one fix round at either level (rule 3): at `changed` the next run is `convoy_rerun`, at `all`
+     `convoy_rerun_all` (`pnpm verify --all --rerun-failed`), which Keelokit narrows within level `all`
+     and seals at `all` when it completes the plan. Never a second whole `--all`.
    - Once the ok's run is green, an ok asked again for a level that run covers is refused with
      `ALREADY_COVERED`: the convoy sails, and nobody starts a second run on that head.
    - No plan (no `.keelokit/bin/verify_tools.py` in the head, `own_verify`, the plan or `pnpm` failing):

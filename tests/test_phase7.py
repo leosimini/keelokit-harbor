@@ -163,7 +163,7 @@ class TestHRB4Edges(Phase7):
         self.assertIn("nothing to run", ok(harbor(self.a, "convoy", "verify", "1")))
         self.assertEqual(self.runs(), before)
 
-    def test_at_level_all_a_red_is_followed_by_a_whole_all_run_not_a_partial_rerun(self):
+    def test_HRB_4_S5_at_level_all_a_red_is_followed_by_the_all_level_rerun_not_a_second_whole_all(self):
         self.two_vessels_ready()
         ok(harbor(self.a, "convoy", "sail", "1", "--ok", env=self.plans("all")))
         res = harbor(self.a, "convoy", "verify", "1", env={"HARBOR_FAKE": json.dumps(
@@ -174,7 +174,8 @@ class TestHRB4Edges(Phase7):
         sh(self.a, "git", "commit", "--quiet", "-m", "fix: the seam")
         sh(self.a, "git", "push", "--quiet", "origin", "convoy/1")
         ok(harbor(self.a, "convoy", "verify", "1"))
-        self.assertEqual(self.runs()[-2:], ["convoy-all", "convoy-all"])
+        self.assertEqual(self.runs()[-2:], ["convoy-all", "rerun-all"], "one fix round, at level all")
+        self.assertEqual(self.repo.log_toml(f"harbor/runs/{self.convoy()['head']}.toml")["level"], "all")
         ok(harbor(self.a, "convoy", "sail", "1"))
 
     def test_the_plan_leaves_no_worktree_behind(self):
