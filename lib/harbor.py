@@ -24,7 +24,7 @@ the change is replayed on the new tip (its preconditions checked again), never f
     harbor.py convoy add N BRANCH [--head SHA] [--story ID] [--tier trivial|light|full]
     harbor.py convoy status [N]
     harbor.py convoy assemble N              merge main and the vessels into convoy/<n>, check migrations, push it
-    harbor.py convoy sail N --ok --level changed|all --reason TEXT    the harbormaster's ok
+    harbor.py convoy sail N --ok [--level changed|all] [--reason TEXT]    the harbormaster's ok (Keelokit's plans pick the level)
     harbor.py convoy verify N                the convoy's one verify on its exact head (or its seal, reused)
     harbor.py convoy approve N [--note TEXT] the gatekeeper's yes for a critical convoy, from their own terminal
     harbor.py convoy sail N                  push the verified head to main (fast-forward, no force)
@@ -119,6 +119,9 @@ DEFAULTS = {
     "convoy_verify": "pnpm verify --keep-going",
     "convoy_verify_all": "pnpm verify --all --keep-going",
     "convoy_rerun": "pnpm verify --rerun-failed --keep-going",
+    # HRB-4: after a red at level `all`. Keelokit narrows a rerun only within the level it ran at, and with
+    # --all the rerun keeps level `all`: a red costs one fix round there too, not a second whole --all.
+    "convoy_rerun_all": "pnpm verify --all --rerun-failed --keep-going",
     "ci_check": None,  # None: Keelokit's `ci.py health` when the project has it; "" turns it off
     # When a convoy also needs the gatekeeper's yes before it sails: "critical" (a full-tier vessel or one that
     # touches an area of .keelokit/critical.toml), "areas", "always" or "never". The playbook's rule: humans
@@ -135,6 +138,9 @@ DEFAULTS = {
     # true: the verify commands above are the project's own, not Keelokit's. No history line says what a
     # run covered, so Harbor gives a green convoy run its level itself; it never becomes a shared seal.
     "own_verify": False,
+    # HRB-4: the ok's level is `all` when Keelokit's scoped plan has every step of --all and at least this
+    # share of its packages: the scoped run would be the whole suite anyway, so it runs once, at `all`.
+    "all_when_covered": 0.9,
 }
 # Harbor's own roles. The story roles (verifier, builder, reviewer, breaker) follow Keelokit's model table
 # in .keelokit/harness/agent-brief.md, by role and tier; Harbor doesn't keep a second one.
@@ -341,6 +347,10 @@ def project(hook: bool = False) -> dict:
     name = harbor.get("project")
     if not has_keelokit() and name is not None and not (isinstance(name, str) and len(name.strip()) <= 60 and name.strip().isprintable()):
         raise HarborError("BAD_CONFIG", f"[harbor] project = {name!r} in {CONFIG_PATH}: one line of at most 60 characters")
+    share = harbor.get("all_when_covered", DEFAULTS["all_when_covered"])
+    if isinstance(share, bool) or not isinstance(share, (int, float)) or not 0 < share <= 1:
+        raise HarborError("BAD_CONFIG", f"[harbor] all_when_covered = {share!r} in {CONFIG_PATH}: "
+                          "a share of the packages, above 0 and at most 1 (0.9 by default)")
     if not isinstance(harbor.get("own_verify", False), bool):
         raise HarborError("BAD_CONFIG", f"[harbor] own_verify = {harbor['own_verify']!r} in {CONFIG_PATH}: "
                           "it is true or false")
@@ -1581,15 +1591,134 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
     return 0
 
 
+# --- HRB-4: the ok's level from Keelokit's two plans -----------------------------------------------
+# Keelokit's `verify_tools.py plan` prints the steps a change calls for ("all" for every step); `plan --all`
+# prints every step. It says nothing of packages, so Harbor asks pnpm for them with the selectors Keelokit's
+# verify.sh uses for a scoped run (`...[base]` without the root; every package when a root manifest changed).
+
+PLAN_TOOL = ".keelokit/bin/verify_tools.py"
+ROOT_MANIFESTS = ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json")
+PLAN_SECONDS = 300
+
+
+def _plan_steps(wt: Path, *args: str) -> set[str] | None:
+    try:
+        res = subprocess.run([sys.executable, PLAN_TOOL, "plan", *args], cwd=wt, capture_output=True, text=True,
+                             timeout=PLAN_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = res.stdout.strip().splitlines()
+    if res.returncode != 0 or not lines:
+        return None
+    steps = lines[-1].split()
+    if not steps or not all(re.fullmatch(r"[a-z][a-z0-9-]*", x) for x in steps):
+        return None
+    return set() if steps == ["none"] else set(steps)
+
+
+def _packages(wt: Path, *selector: str) -> set[str] | None:
+    try:
+        res = subprocess.run(["pnpm", *selector, "ls", "--depth", "-1", "--parseable"], cwd=wt, capture_output=True,
+                             text=True, timeout=PLAN_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if res.returncode != 0:
+        return None
+    root, out = wt.resolve(), set()
+    for line in filter(None, (l.strip() for l in res.stdout.splitlines())):
+        try:
+            rel = Path(line).resolve().relative_to(root).as_posix()
+        except ValueError:
+            continue
+        if rel != ".":
+            out.add(rel)
+    return out
+
+
+def ok_plans(cfg: dict, base: str, head: str) -> tuple[dict | None, str]:
+    """Keelokit's scoped plan (against `base`) and --all plan for `head`, with the packages each covers.
+    (plans, "") or (None, why there is none). Run in a throwaway worktree, so the session's checkout is untouched."""
+    if cfg.get("own_verify") is True:
+        return None, "with own_verify the verify is the project's own, and Keelokit's plan doesn't describe it"
+    if run("git", "cat-file", "-e", f"{head}:{PLAN_TOOL}", check=False).returncode != 0:
+        return None, f"{short(head)} has no {PLAN_TOOL} (Keelokit's plan)"
+    wt = Path(tempfile.mkdtemp(prefix="harbor-plan-"))
+    try:
+        # No hooks: a project's post-checkout hook has nothing to do in a worktree that only reads two plans.
+        if run("git", "-c", f"core.hooksPath={os.devnull}", "worktree", "add", "--quiet", "--detach", str(wt), head,
+               check=False).returncode != 0:
+            return None, "no worktree for the convoy's head"
+        scoped, every = _plan_steps(wt, "--base", base), _plan_steps(wt, "--all")
+        if scoped is None or every is None:
+            return None, f"Keelokit's `{PLAN_TOOL} plan` gave no answer"
+        if not (wt / "pnpm-workspace.yaml").exists():
+            in_scope, packages = {"."}, {"."}  # one package: every scoped run covers all of it
+        else:
+            packages = _packages(wt, "-r")
+            manifests = subprocess.run(["git", "diff", "--quiet", base, "--", *ROOT_MANIFESTS], cwd=wt,
+                                       capture_output=True).returncode
+            in_scope = packages if manifests == 1 else _packages(wt, "--filter", f"...[{base}]", "--filter", "!{.}")
+            if packages is None or in_scope is None:
+                return None, "pnpm couldn't list the packages each plan covers"
+            if not packages:
+                in_scope, packages = {"."}, {"."}
+    finally:
+        run("git", "worktree", "remove", "--force", str(wt), check=False)
+        shutil.rmtree(wt, ignore_errors=True)
+    every_step = "all" in scoped or ("all" not in every and every <= scoped)
+    return {"scoped": scoped, "all": every, "every_step": every_step, "covered": len(in_scope & packages),
+            "packages": len(packages)}, ""
+
+
+def plan_level(plans: dict, threshold: float) -> tuple[str, str]:
+    """(level, why) from the two plans: `all` when the scoped one has every step and enough of the packages."""
+    pct, need = round(100 * plans["covered"] / plans["packages"]), round(100 * threshold)
+    pkgs = f"{plans['covered']} of {plans['packages']} packages ({pct}%"
+    if plans["every_step"] and plans["covered"] >= threshold * plans["packages"]:
+        return "all", f"the scoped plan covers --all: every step and {pkgs} ≥ {need}%)"
+    if not plans["every_step"]:
+        return "changed", f"the scoped plan is narrower than --all: steps {' '.join(sorted(plans['scoped'])) or 'none'}, {pkgs})"
+    return "changed", f"the scoped plan is narrower than --all: every step but {pkgs} < {need}%)"
+
+
+def whole_green(record: dict | None, base: str | None) -> bool:
+    return bool(record) and record.get("exit") == 0 and record.get("level") in ("changed", "all") \
+        and record.get("base") == base
+
+
 def convoy_ok(args, cfg: dict, me: dict) -> int:
-    if args.level not in ("changed", "all"):
-        raise HarborError("USAGE", "--ok needs --level changed|all")
-    if not (args.reason or "").strip():
+    if args.level not in (None, "changed", "all"):
+        raise HarborError("USAGE", "--ok takes --level changed|all")
+    if args.level and not (args.reason or "").strip():
         raise HarborError("USAGE", "--ok needs --reason: the files that decided the level")
     _, files = snapshot()
     c = convoy_of(files, args.number)
     main_tip = fetch(TRUNK)
     tip = fetch(c["branch"])
+    # A convoy never runs a scoped verify and then --all on the same head: once the ok's run is green, asking
+    # for a level it already covers is refused, so nobody starts a second run on that head.
+    if c.get("state") == "verifying" and tip:
+        want = args.level or (c.get("ok") or {}).get("level")
+        record = run_of(files, tip)
+        if want and whole_green(record, main_tip) and covers(record.get("level"), want):
+            raise HarborError("ALREADY_COVERED", f"{short(tip)} already has a green {level_text(record)} run against "
+                              f"{short(main_tip)}, which covers {want}: sail it (convoy sail {args.number})")
+    plans, why_not, level, by, reason, plan_line = None, "", args.level, "harbormaster", (args.reason or "").strip(), None
+    if c.get("state") == "ready" and tip and tip == c.get("head") and c.get("base") == main_tip:
+        plans, why_not = ok_plans(cfg, main_tip, tip)
+    if plans:
+        chosen, plan_line = plan_level(plans, float(cfg["all_when_covered"]))
+        seal = run_of(files, tip)
+        if chosen == "all" and whole_green(seal, main_tip) and seal.get("level") == "changed":
+            chosen, plan_line = "changed", (f"{plan_line}, and its {level_text(seal)} seal against {short(main_tip)} "
+                                            "already ran that plan: no second run")
+        if not level:
+            level, by = chosen, "plan"
+            reason = f"{reason}; {plan_line}" if reason else plan_line
+        elif level != chosen:
+            print(f"harbor: Keelokit's plans would give {chosen} ({plan_line}); the harbormaster's {level} wins")
+    elif not level and c.get("state") == "ready":
+        raise HarborError("USAGE", f"--ok needs --level changed|all: {why_not or 'no Keelokit plan to decide it'}")
     ci, line = ci_health(cfg)
     if ci == "red":
         raise HarborError("MAIN_RED", f"{line}: {TRUNK} gets fixed before any convoy sails")
@@ -1607,15 +1736,20 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
         if not c2.get("head") or tip != c2["head"]:
             raise HarborError("CONVOY_MOVED", f"{c2['branch']} is at {short(tip)}, the logbook says {short(c2.get('head'))}: "
                               "assemble again")
-        c2["ok"] = {"by": me["id"], "at": now(), "level": args.level, "reason": args.reason.strip(), "base": main_tip,
+        if not level:
+            raise HarborError("USAGE", "--ok needs --level changed|all: no Keelokit plan to decide it")
+        c2["ok"] = {"by": me["id"], "at": now(), "level": level, "reason": reason, "base": main_tip,
                     "head": tip, "ci": line, "needs_person": needs_person(c2, cfg)}
+        if plans:
+            c2["ok"].update(level_by=by, plan=plan_line)
         c2["state"] = "verifying"
-        c2.setdefault("events", []).append(event(me["id"], "ok", f"{args.level}: {args.reason.strip()}"))
+        c2.setdefault("events", []).append(event(me["id"], "ok", f"{level}: {reason}"))
         save_convoy(files, c2)
         touch(files, active_worker(files, me))
 
-    transact(f"convoy {args.number} ok ({args.level})", me["id"], mutate)
-    print(f"harbor: ok for convoy {args.number} at {short(tip)}, level {args.level}; {line}")
+    transact(f"convoy {args.number} ok ({level})", me["id"], mutate)
+    print(f"harbor: ok for convoy {args.number} at {short(tip)}, level {level}"
+          + (f" (from Keelokit's plans: {plan_line})" if by == "plan" else "") + f"; {line}")
     if why := needs_person(convoy_of(snapshot()[1], args.number), cfg):
         print(f"harbor: it also needs the gatekeeper's yes before it sails ({why}): they review it and run, in their own "
               f"terminal, python3 <harbor.py> convoy approve {args.number}. The verify can run meanwhile")
@@ -1656,7 +1790,12 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
     # A rerun counts as a whole verify only through Keelokit's record of what it completed. The project's
     # own commands leave none, so with own_verify a red is followed by the level's command again.
     own = cfg.get("own_verify") is True
-    template = cfg["convoy_rerun"] if red_before and not own else cfg["convoy_verify_all" if level == "all" else "convoy_verify"]
+    # After a red, the rerun of the ok's level: Keelokit narrows a rerun only within the level it ran at, so at
+    # `all` it is convoy_rerun_all (--all --rerun-failed), which keeps level `all` (HRB-4, rule 3).
+    if red_before and not own:
+        template = cfg["convoy_rerun_all" if level == "all" else "convoy_rerun"]
+    else:
+        template = cfg["convoy_verify_all" if level == "all" else "convoy_verify"]
 
     def start(files, h):
         c2 = convoy_of(files, args.number)
@@ -3556,7 +3695,7 @@ def parser() -> argparse.ArgumentParser:
         csub.add_parser(name).add_argument("number", type=int)
     s = csub.add_parser("sail")
     s.add_argument("number", type=int)
-    s.add_argument("--ok", action="store_true", help="the harbormaster's ok, with --level and --reason")
+    s.add_argument("--ok", action="store_true", help="the harbormaster's ok; Keelokit's plans pick the level unless --level")
     s.add_argument("--level", choices=("changed", "all"))
     s.add_argument("--reason")
     s = csub.add_parser("approve")

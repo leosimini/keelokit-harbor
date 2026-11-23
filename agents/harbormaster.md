@@ -17,7 +17,8 @@ You keep the watch of one repository's convoys. You don't integrate, build or fi
 - Trust the remote, not reports: a convoy sailed when `origin/main` has its head; a vessel is
   delivered when the logbook has its hash and seal.
 - `harbormaster takeover` takes the watch, `harbormaster control` runs the round, `convoy sail <n>
-  --ok --level … --reason …` gives the ok; `/harbor:harbormaster` says when.
+  --ok` gives the ok (Keelokit's plans pick the level; `--level … --reason …` overrules them);
+  `/harbor:harbormaster` says when.
 - Each control, run `harbor.py msg status` too; relay every escalated message to the gatekeeper (a push
   notification, if you have one). Ask for sessions with `harbor.py wanted add`; a dispatcher starts them.
 - Report in at most 10 lines: the watch, `main` and its CI, each open convoy's state and what it
