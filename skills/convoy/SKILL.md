@@ -61,7 +61,7 @@ convoy.
 ## status
 
 `python3 "$H" convoy status [n]`: state, vessels, "main moved", deliveries void because the branch
-moved after delivery, expected stories not delivered. Report it as it prints; don't summarize away
+moved after delivery, expected stories not delivered, seams to read or read. Report it as it prints; don't summarize away
 a void delivery.
 
 ## assemble (integrator)
@@ -69,7 +69,7 @@ a void delivery.
 `python3 "$H" --session <id> convoy assemble <n>` switches this checkout to `convoy/<n>`, merges
 `main` and every delivered vessel into it (merge, never rebase), rebuilds conflicts that are only in
 `[harbor.generated]` files, checks migration timestamps, and pushes `convoy/<n>`. It ends `ready`, or
-`waiting` with what is missing. Refusals:
+`waiting` with what is missing (stories, a dependency, or seams to read). Refusals:
 - `CONFLICT`: you merge that vessel's head by hand on `convoy/<n>`, resolve only what the merge
   needs, commit, and run assemble again (it takes your local branch). A conflict only in formatting
   follows Keelokit's FMT-1: keep the content, `pnpm format`.
@@ -77,6 +77,25 @@ a void delivery.
   and is added again.
 - A late expected story: `convoy defer <n> <STORY>` takes it out; the next convoy expects it. Don't
   hold the rest for it.
+
+### The seam report (skipper)
+
+With two or more vessels, assemble prints a seam report (HRB-6) and keeps the convoy `waiting` until
+every seam is read: files two vessels changed, exported names (TS `export …`, Python module-level
+`def`/`class`) two vessels defined or changed, CSS selectors and tokens two vessels changed, and route
+paths one vessel adds that another vessel's tests use. Read each one, in the merged code on `convoy/<n>`
+(`git diff origin/main...origin/convoy/<n> -- <file>`, and each vessel's side), not in the list: the
+reds of a joined train are almost all here — a test asserting a route closed that another vessel opens,
+two vessels adding their own navigation to one screen, one name exported twice, one style rule edited
+twice. Then record it, one line per seam:
+`python3 "$H" --session <id> convoy seam <n> <seam-id> --note "<line>"`, where the line is
+- `fine: <why>` — they meet without trouble;
+- `fixed in <commit>` — you fixed the combination in a commit on `convoy/<n>`, pushed first (a fix as
+  in verify: a failing test first when the seam is behaviour);
+- a question ending in `?` — for the vessel or the harbormaster; send it with `harbor.py msg send` too.
+`convoy status <n>` lists the seams and their reads; the report lists 20 and counts the rest, so read
+from `status`. Never mark a seam you did not open. A redelivered vessel's seams are new and read again.
+When the last one is read, run assemble again: it ends `ready`.
 
 ## The ok (harbormaster)
 

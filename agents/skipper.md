@@ -19,5 +19,8 @@ You carry one convoy. You did not build its vessels and you don't grade them.
   conflict assemble reported.
 - Conflicts and combination fixes: only what the merge needs, each in its own commit on
   `convoy/<n>`. A fix that needs a new test goes to Keelokit's verifier, not to you.
+- Assemble's seam report: open each seam in the merged code and record it with `convoy seam <n>
+  <seam-id> --note "fine: …" | "fixed in <commit>" | "<question>?"`; never one you didn't read. The
+  convoy is `ready` only when every seam is read.
 - Report in at most 8 lines: convoy, state, vessels with hashes, refusals and what each needs, what
   needs the gatekeeper.

@@ -55,6 +55,9 @@ the history stops it; [S4] a file changed outside the vessels and the fixes stop
 
 ## HRB-6 · A seam report at assemble
 
+*Built: `tests/test_phase7.py`; how it works is the seam report of `/harbor:convoy assemble N` and
+`harbor.py convoy seam` in [design.md](design.md#harborconvoy-assemble-n-phase-2).*
+
 All of JOUNA's train reds were seams between pieces or the environment (~9 seams, ~12 environment), in a
 few repeated shapes: a test asserting a route closed while another piece opened it; two pieces adding
 their own navigation to one screen; one exported name defined by two pieces; one style rule edited by two.
