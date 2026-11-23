@@ -14,7 +14,9 @@ This is the design. **Phases 1 to 5 are implemented** in `lib/harbor.py`.
 Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigning a skipper
 (`convoy skipper N WORKER`), the early hotspot warning from stories' `touches`, the warning for
 vessels that share commits, everything marked *(3)*, and phase 3's "Designed, not built". Phase 6, how Harbor fits Keelokit's ledger, is designed in
-[ledger-phase6.md](ledger-phase6.md) and not written yet. The evidence is the survey of a week of convoys run by hand on
+[ledger-phase6.md](ledger-phase6.md) and not written yet. Phase 7, the lessons of the JOUNA fleet (the ok
+straight to `all`, a sail preflight, a seam report, cutoffs, a 30-minute round), is designed in
+[lessons-phase7.md](lessons-phase7.md) and not written yet. The evidence is the survey of a week of convoys run by hand on
 the fleet Harbor was learned on (see the appendix; its finding ids, `n.m`, are cited as `§n.m`, its
 candidate rules as `R1`…`R26`). For how to use Harbor, see the [README](../README.md).
 
