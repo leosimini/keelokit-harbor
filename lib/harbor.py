@@ -699,6 +699,10 @@ def render_convoy(c: dict, files: dict) -> str:
     missing = [s for s in c.get("expected") or [] if s not in delivered]
     if missing:
         out += ["", "## Expected, not delivered", ""] + [f"- {s}" for s in missing]
+    if seams := c.get("seams"):
+        out += ["", "## Seams", "", "| Seam | Kind | What | Vessels | Read |", "|---|---|---|---|---|"]
+        out += [f"| {s['id']} | {s['kind']} | {cell(s['key'])} | {cell(', '.join(s['vessels']))} | "
+                f"{cell(s.get('note') or 'to read')} |" for s in seams]
     out += ["", "## Events", "", "| At | By | What | Detail |", "|---|---|---|---|"]
     out += [f"| {e.get('at')} | {cell(e.get('by'))} | {e.get('what')} | {cell(e.get('detail'))} |" for e in c.get("events") or []]
     return "\n".join(out) + "\n"
@@ -1284,6 +1288,9 @@ def convoy_status(args) -> int:
         missing = [s for s in c.get("expected") or [] if s not in {v.get("story") for v in vs}]
         if missing:
             print(f"  expected, not delivered: {', '.join(missing)}")
+        for s in c.get("seams") or []:
+            print(f"  seam {s['id']} " + (f"read ({s.get('read_kind')}): {s['note']}" if s.get("note") else "to read")
+                  + f" · {s['kind']} {s['key']} ({', '.join(s['vessels'])})")
     return 0
 
 
@@ -1556,6 +1563,7 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
                     "by": me["id"], **steps_from(entry)}
     delivered = [(v["branch"], v["head"]) for v in vessels]
     found = fix_commits(main_tip, head, vessels)
+    seams = seams_of(main_tip, vessels, cfg["generated"])
 
     def mutate(files, h):
         c2 = convoy_of(files, args.number)
@@ -1576,25 +1584,262 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
             events.append(event(me["id"], "ok-cleared", f"the head or {TRUNK} changed: the ok is void"))
         for what, detail in notes:
             events.append(event(me["id"], what, detail))
-        if missing or deps:
+        before_ids = [s["id"] for s in c2.get("seams") or []]
+        c2["seams"] = merge_seams(c2.get("seams") or [], [dict(s) for s in seams]) or None
+        report = seam_report(c2["seams"] or [], len(vessels)) if len(vessels) > 1 else []
+        if report and ([s["id"] for s in seams] != before_ids or not any(e["what"] == "seams" for e in events)):
+            events.append(event(me["id"], "seams", "; ".join(report)))
+        unread = [s["id"] for s in c2["seams"] or [] if not s.get("note")]
+        if missing or deps or unread:
             c2["state"] = "waiting"
         elif c2.get("state") == "verifying" and not changed:
             pass
         else:
             c2["state"] = "ready"
-        waits = ([f"stories {', '.join(missing)}"] if missing else []) + ([f"convoy {', '.join(map(str, deps))}"] if deps else [])
+        waits = ([f"stories {', '.join(missing)}"] if missing else []) + ([f"convoy {', '.join(map(str, deps))}"] if deps else []) \
+            + ([f"{len(unread)} seam(s) to read (harbor.py convoy seam {args.number} <id> --note ...)"] if unread else [])
         events.append(event(me["id"], "assembled", f"head {short(head)}, {len(vessels)} vessel(s)"
                             + (f"; waiting for {' and '.join(waits)}" if waits else "")))
         save_convoy(files, c2)
         if pre_seal and not run_of(files, head):
             save_run(files, pre_seal, main_tip)
         touch(files, w)
-        return c2["state"], waits
+        return c2["state"], waits, report
 
-    state, waits = transact(f"convoy {args.number} assemble at {short(head)}", me["id"], mutate)
+    state, waits, report = transact(f"convoy {args.number} assemble at {short(head)}", me["id"], mutate)
+    for line in report:
+        print(f"harbor: seams: {line}")
     print(f"harbor: convoy {args.number} assembled at {short(head)} on {TRUNK} {short(main_tip)}: {state}"
           + (f" (waiting for {' and '.join(waits)})" if waits else "") + ("" if head == before else f"; {branch} pushed")
           + (f"; its pre-push verify ({pre_seal['level']}) is recorded as the convoy's seal" if pre_seal else ""))
+    return 0
+
+
+# --- HRB-6: the seam report -----------------------------------------------------------------------
+# Every red of a combined train in the JOUNA fleet was a seam between pieces: one file, one exported name,
+# one style rule or one route that two pieces both touched. `assemble` lists them mechanically from each
+# vessel's diff against its merge base with main; the skipper reads each one (`convoy seam`) before `ready`.
+
+SEAM_LIST = 20                       # the report lists at most this many; the rest are counted
+SEAM_KINDS = ("file", "name", "selector", "token", "route")
+SEAM_MAX_BYTES = 1_000_000           # bigger files are compared as files only
+TS_EXT = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+PY_EXT = (".py",)
+CSS_EXT = (".css", ".scss", ".sass", ".less")
+CODE_EXT = TS_EXT + PY_EXT + (".vue", ".svelte")
+TS_DEF = re.compile(r"export\s+(?:default\s+)?(?:declare\s+)?(?:async\s+)?(?:abstract\s+)?"
+                    r"(?:const|function\*?|class|type|interface)\s+([A-Za-z_$][\w$]*)")
+PY_DEF = re.compile(r"(?:async\s+)?def\s+([A-Za-z_]\w*)|class\s+([A-Za-z_]\w*)")
+CSS_TOKEN = re.compile(r"(?:^|[\s;{])(--[A-Za-z0-9_-]+|\$[A-Za-z0-9_-]+)\s*:")
+ROUTE = re.compile(r"""["'`](/[A-Za-z0-9_\-.:/\[\]{}$*]*[A-Za-z][A-Za-z0-9_\-.:/\[\]{}$*]*)["'`]""")
+TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|e2e|spec)/|\.(test|spec)\.[^/]+$|(^|/)test_[^/]*\.py$|_test\.py$")
+SEAM_NOTE = "fine, fixed in <commit>, or a question"
+
+
+def _blob(ref: str, path: str) -> str:
+    res = subprocess.run(["git", "show", f"{ref}:{path}"], cwd=ROOT, capture_output=True)
+    if res.returncode != 0 or len(res.stdout) > SEAM_MAX_BYTES or b"\0" in res.stdout[:8000]:
+        return ""
+    return res.stdout.decode("utf-8", "replace")
+
+
+def _changed_lines(base: str, head: str, path: str) -> tuple[list[int], list[int]]:
+    """(lines removed on the base side, lines added on the head side), 1-based, from `git diff -U0`."""
+    old, new = [], []
+    diff = run("git", "diff", "--no-renames", "--no-color", "-U0", base, head, "--", path, check=False).stdout
+    for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M):
+        a, b, c, d = int(m[1]), int(m[2] if m[2] is not None else 1), int(m[3]), int(m[4] if m[4] is not None else 1)
+        old += range(a, a + b)
+        new += range(c, c + d)
+    return old, new
+
+
+def _defs(text: str, lines: list[int], pattern: re.Pattern) -> set[str]:
+    """Module-level definitions `lines` define or sit inside: a changed definition line, or an indented
+    (or closing) line under the nearest unindented line, when that one is a definition."""
+    src, out = text.splitlines(), set()
+    for n in lines:
+        if not 0 < n <= len(src) or not src[n - 1].strip():
+            continue
+        j = n - 1
+        while j >= 0 and (not src[j].strip() or src[j][0] in " \t)]}"):
+            j -= 1
+        if j >= 0 and (m := pattern.match(src[j])):
+            out.add(next(g for g in m.groups() if g))
+    return out
+
+
+def _css_rules(text: str) -> list[set[str]]:
+    """For each line, the selectors of the rules it opens or sits in (innermost)."""
+    text = re.sub(r"/\*.*?\*/", lambda m: re.sub(r"[^\n]", " ", m.group()), text, flags=re.S)
+    stack: list[list[str]] = []
+    buf, out = "", []
+    for line in text.splitlines():
+        hits = set(stack[-1]) if stack else set()
+        for ch in line:
+            if ch == "{":
+                sels = [" ".join(x.split()) for x in buf.split(",") if x.strip()]
+                stack.append(sels)
+                hits.update(sels)
+                buf = ""
+            elif ch == "}":
+                if stack:
+                    stack.pop()
+                buf = ""
+            elif ch == ";":
+                buf = ""
+            else:
+                buf += ch
+        buf += " "
+        out.append(hits)
+    return out
+
+
+def _css(text: str, lines: list[int]) -> tuple[set[str], set[str]]:
+    rules, src = _css_rules(text), text.splitlines()
+    sels, tokens = set(), set()
+    for n in lines:
+        if 0 < n <= len(src):
+            sels |= rules[n - 1]
+            tokens |= set(CSS_TOKEN.findall(src[n - 1]))
+    return sels, tokens
+
+
+def vessel_surface(main_tip: str, v: dict, generated: dict) -> dict:
+    """What one vessel changed against its merge base with main: files, exported names, CSS selectors and
+    tokens, route paths its code adds, and the text of the test files it changed."""
+    mb = git("merge-base", main_tip, v["head"], check=False) or main_tip
+    files = sorted(p for p in changed_files(mb, v["head"]) if not generated_hits(p, generated))
+    out = {"files": set(files), "name": set(), "selector": set(), "token": set(), "routes": set(), "tests": {}}
+    for path in files:
+        test = bool(TEST_PATH.search(path))
+        if not (path.endswith(TS_EXT + PY_EXT + CSS_EXT) or (test and path.endswith(CODE_EXT))
+                or path.endswith(CODE_EXT)):
+            continue
+        old_lines, new_lines = _changed_lines(mb, v["head"], path)
+        old, new = (_blob(mb, path) if old_lines else ""), _blob(v["head"], path)
+        if path.endswith(TS_EXT + PY_EXT):
+            pat = PY_DEF if path.endswith(PY_EXT) else TS_DEF
+            out["name"] |= _defs(old, old_lines, pat) | _defs(new, new_lines, pat)
+        if path.endswith(CSS_EXT):
+            for text, lines in ((old, old_lines), (new, new_lines)):
+                sels, tokens = _css(text, lines)
+                out["selector"] |= sels
+                out["token"] |= tokens
+        if test:
+            out["tests"][path] = new
+        elif path.endswith(CODE_EXT):
+            src = new.splitlines()
+            for n in new_lines:
+                if 0 < n <= len(src):
+                    out["routes"] |= {r for r in ROUTE.findall(src[n - 1]) if not r.startswith("//")}
+    return out
+
+
+def _route_in(route: str, text: str) -> bool:
+    return re.search(r"(?<![\w/.-])" + re.escape(route) + r"(?![\w/-])", text) is not None
+
+
+def seams_of(main_tip: str, vessels: list[dict], generated: dict) -> list[dict]:
+    """The seams between the vessels, in a fixed order. A seam's id is bound to the vessels' heads, so a
+    redelivery makes it a new seam to read."""
+    if len(vessels) < 2:
+        return []
+    heads = {v["branch"]: v["head"] for v in vessels}
+    surf = {v["branch"]: vessel_surface(main_tip, v, generated) for v in vessels}
+    found: dict[tuple[str, str], dict] = {}
+    for kind, field in (("file", "files"), ("name", "name"), ("selector", "selector"), ("token", "token")):
+        who: dict[str, list[str]] = {}
+        for b, s in surf.items():
+            for key in s[field]:
+                who.setdefault(key, []).append(b)
+        for key, bs in who.items():
+            if len(bs) > 1:
+                found[(kind, key)] = {"vessels": sorted(bs)}
+    for b, s in surf.items():
+        for route in sorted(s["routes"]):
+            for b2, s2 in surf.items():
+                tests = [p for p, text in sorted(s2["tests"].items()) if b2 != b and _route_in(route, text)]
+                if tests:
+                    seam = found.setdefault(("route", route), {"vessels": [], "notes": []})
+                    seam["vessels"] = sorted(set(seam["vessels"]) | {b, b2})
+                    seam["notes"].append(f"added by {b}, in {b2}'s tests ({', '.join(tests)})")
+    out = []
+    for (kind, key), seam in sorted(found.items(), key=lambda kv: (SEAM_KINDS.index(kv[0][0]), kv[0][1])):
+        bound = "\0".join([kind, key] + [f"{b}@{heads[b]}" for b in seam["vessels"]])
+        out.append({"id": "s-" + hashlib.sha1(bound.encode()).hexdigest()[:7], "kind": kind, "key": key,
+                    "vessels": seam["vessels"], "detail": "; ".join(seam.get("notes") or []) or None})
+    return out
+
+
+def seam_line(s: dict) -> str:
+    return (f"{s['id']} {s['kind']} {s['key']} ({', '.join(s['vessels'])})" + (f": {s['detail']}" if s.get("detail") else "")
+            + (f" — read: {s['note']}" if s.get("note") else ""))
+
+
+def seam_report(seams: list[dict], vessels: int) -> list[str]:
+    """The report, bounded: at most SEAM_LIST seams listed, then how many more."""
+    if not seams:
+        return [f"no seams between the {vessels} vessels"]
+    unread = sum(1 for s in seams if not s.get("note"))
+    lines = [f"{len(seams)} seam(s), {unread} to read"] + [seam_line(s) for s in seams[:SEAM_LIST]]
+    return lines + ([f"(+{len(seams) - SEAM_LIST} more)"] if len(seams) > SEAM_LIST else [])
+
+
+def merge_seams(old: list[dict], new: list[dict]) -> list[dict]:
+    """The new seams, keeping the reads of those that are still the same seam (same id)."""
+    reads = {s["id"]: s for s in old if s.get("note")}
+    for s in new:
+        if r := reads.get(s["id"]):
+            s.update({k: r[k] for k in ("note", "read_kind", "read_by", "read_at") if r.get(k)})
+    return new
+
+
+def seam_kind(note: str) -> tuple[str, str | None]:
+    """('fine' | 'fixed' | 'question', the commit of a fix)."""
+    if m := re.match(r"fixed in ([0-9a-fA-F]{7,40})\b", note, re.I):
+        return "fixed", m.group(1)
+    if re.match(r"fine\b", note, re.I):
+        return "fine", None
+    if note.endswith("?"):
+        return "question", None
+    raise HarborError("USAGE", f"--note says what the seam is: {SEAM_NOTE} (a line ending in ?)")
+
+
+def convoy_seam(args, cfg: dict, me: dict) -> int:
+    note = " ".join((args.note or "").split())
+    if not note or len(note) > 500:
+        raise HarborError("USAGE", f"--note is one line of at most 500 characters: {SEAM_NOTE}")
+    kind, commit = seam_kind(note)
+    _, files = snapshot()
+    c = convoy_of(files, args.number)
+    if commit:
+        tip = fetch(c["branch"])
+        sha = rev(commit)
+        if not tip or not sha or not ancestor(sha, tip):
+            raise HarborError("NOT_ON_CONVOY", f"{commit} is not a commit on {REMOTE}/{c['branch']}: push the fix first")
+
+    def mutate(files, h):
+        c2 = convoy_of(files, args.number)
+        require_open(c2)
+        who = c2.get("integrator") or ""
+        if me["id"] not in (c2.get("skipper"), who) and not (who.startswith("account:") and who[8:] == me["account"]):
+            raise HarborError("NOT_SKIPPER", f"convoy {args.number}'s seams are read by its skipper "
+                              f"({c2.get('skipper') or 'nobody'}) or its integrator")
+        w = active_worker(files, me)
+        seam = next((s for s in c2.get("seams") or [] if s["id"] == args.seam_id), None)
+        if not seam:
+            raise HarborError("UNKNOWN_SEAM", f"convoy {args.number} has no seam {args.seam_id}: "
+                              f"harbor.py convoy status {args.number} lists them")
+        seam.update(note=note, read_kind=kind, read_by=me["id"], read_at=now())
+        c2.setdefault("events", []).append(event(me["id"], "seam-read", f"{seam['id']} {seam['kind']} {seam['key']}: {note}"))
+        save_convoy(files, c2)
+        touch(files, w)
+        return seam, sum(1 for s in c2["seams"] if not s.get("note"))
+
+    seam, left = transact(f"convoy {args.number} seam {args.seam_id} read", me["id"], mutate)
+    print(f"harbor: seam {seam['id']} ({seam['kind']} {seam['key']}) read as {kind}; "
+          + (f"{left} seam(s) left" if left else f"every seam is read: convoy assemble {args.number} reaches ready"))
     return 0
 
 
@@ -2703,7 +2948,7 @@ def cmd_sync(args, root: Path | None = None) -> int:
 
 
 PHASE2 = {"assemble": convoy_assemble, "approve": convoy_approve, "verify": convoy_verify, "sail": convoy_sail, "abort": convoy_abort,
-          "defer": convoy_defer}
+          "defer": convoy_defer, "seam": convoy_seam}
 
 
 def cmd_harbormaster(args) -> int:
@@ -3840,6 +4085,10 @@ def parser() -> argparse.ArgumentParser:
     s = csub.add_parser("approve")
     s.add_argument("number", type=int)
     s.add_argument("--note")
+    s = csub.add_parser("seam", help="record that the skipper read one seam of the assemble's seam report")
+    s.add_argument("number", type=int)
+    s.add_argument("seam_id", metavar="SEAM_ID")
+    s.add_argument("--note", required=True, help=SEAM_NOTE)
     s = csub.add_parser("abort")
     s.add_argument("number", type=int)
     s.add_argument("--reason", required=True)

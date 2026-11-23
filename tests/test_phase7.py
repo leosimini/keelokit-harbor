@@ -4,6 +4,9 @@ scoped one already covers it, so a convoy never runs a scoped verify and then --
 A stand-in for Keelokit's `verify_tools.py plan` and for `pnpm ls` say what each plan holds.
 HRB-5: `convoy sail` runs a mechanical preflight before its push to main (history, authors, wip tips,
 the expected diff); the same stand-in answers `verify_tools.py wip-inside`.
+HRB-6: `convoy assemble` writes a seam report from the vessels' diffs against the base (shared files, exported
+names, CSS selectors and tokens, routes one vessel adds and another's tests use), and reaches `ready` only
+when the skipper has read every seam with `convoy seam N ID --note`.
 Run: python3 -m unittest discover -s tests"""
 import json
 import os
@@ -314,6 +317,221 @@ class TestHRB5(Phase7):
         self.verified()
         out = ok(harbor(self.a, "convoy", "sail", "1", env=self.env))
         self.assertIn("wip tips not checked", out)
+
+
+class Seams(Phase2):
+    """The seam report: what two vessels both touch, found mechanically, read by the skipper one by one."""
+
+    def on_main(self, files: dict[str, str]) -> None:
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        sh(self.a, "git", "pull", "--quiet", "origin", "main")
+        for path, text in files.items():
+            (self.a / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.a / path).write_text(text)
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "base for the seams")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+
+    def vessel(self, branch: str, story: str, files: dict[str, str]) -> str:
+        """A sealed vessel from origin/main that writes `files`, added to convoy 1."""
+        sh(self.a, "git", "fetch", "--quiet", "origin", "main")
+        sh(self.a, "git", "checkout", "--quiet", "-B", branch, "origin/main")
+        for path, text in files.items():
+            (self.a / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.a / path).write_text(text)
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", f"feat: {branch}\n\nStory: {story}")
+        sh(self.a, "git", "push", "--quiet", "-u", "origin", branch)
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", "1", branch))
+        return sh(self.a, "git", "rev-parse", "HEAD")
+
+    def seams(self) -> list[dict]:
+        return self.convoy().get("seams") or []
+
+    def seam(self, kind: str, key: str) -> dict:
+        found = [s for s in self.seams() if (s["kind"], s["key"]) == (kind, key)]
+        self.assertEqual(len(found), 1, self.seams())
+        return found[0]
+
+    def report(self) -> str:
+        return [e for e in self.convoy()["events"] if e["what"] == "seams"][-1]["detail"]
+
+    LINES = "".join(f"line {i}\n" for i in range(1, 21))
+
+
+class TestHRB6(Seams):
+    def test_HRB_6_S1_two_vessels_changing_one_file_produce_a_seam(self):
+        self.on_main({"apps/web/page.ts": self.LINES})
+        ok(harbor(self.a, "convoy", "new"))
+        self.vessel("claude/qa-1", "QA-1", {"apps/web/page.ts": self.LINES.replace("line 1\n", "one\n")})
+        self.vessel("claude/qa-3", "QA-3", {"apps/web/page.ts": self.LINES.replace("line 20\n", "twenty\n")})
+        out = ok(harbor(self.a, "convoy", "assemble", "1"))
+        s = self.seam("file", "apps/web/page.ts")
+        self.assertEqual(s["vessels"], ["claude/qa-1", "claude/qa-3"])
+        self.assertRegex(s["id"], r"^s-[0-9a-f]{7}$")
+        self.assertEqual(len(self.seams()), 1, "nothing else is shared")
+        self.assertIn(f"{s['id']} file apps/web/page.ts", self.report())
+        self.assertIn("claude/qa-1, claude/qa-3", self.report())
+        self.assertLess(self.events().index("seams"), self.events().index("assembled"))
+        self.assertIn(s["id"], out, "assemble prints the report")
+        self.assertEqual(self.convoy()["state"], "waiting")
+
+    def test_HRB_6_S2_one_exported_name_in_two_vessels_produces_a_seam(self):
+        ok(harbor(self.a, "convoy", "new"))
+        self.vessel("claude/qa-1", "QA-1", {
+            "apps/web/date.ts": "import x from 'y'\n\nexport function formatDate(d: Date) {\n  return d\n}\n",
+            "tools/a.py": "def build():\n    return 1\n"})
+        self.vessel("claude/qa-3", "QA-3", {
+            "apps/api/format.ts": "export const formatDate = (d: Date) => d\nconst local = 1\n",
+            "tools/b.py": "class Thing:\n    def build(self):\n        return 2\n"})
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        s = self.seam("name", "formatDate")
+        self.assertEqual(s["vessels"], ["claude/qa-1", "claude/qa-3"])
+        self.assertEqual([x["kind"] for x in self.seams()], ["name"],
+                         "different files; a method named like a module-level def is not a seam; `local` isn't exported")
+        self.assertIn("name formatDate", self.report())
+
+    def test_HRB_6_S3_a_route_added_by_one_vessel_and_asserted_closed_in_anothers_test_produces_a_seam(self):
+        ok(harbor(self.a, "convoy", "new"))
+        self.vessel("claude/qa-1", "QA-1", {
+            "apps/api/routes.ts": "router.get('/admin/reports', reports)\nimport a from './local'\n"})
+        self.vessel("claude/qa-3", "QA-3", {
+            "apps/web/nav.test.ts": "it('keeps admin closed', async () => {\n"
+                                    "  expect((await get(\"/admin/reports\")).status).toBe(404)\n})\n"})
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        s = self.seam("route", "/admin/reports")
+        self.assertEqual(s["vessels"], ["claude/qa-1", "claude/qa-3"])
+        self.assertIn("added by claude/qa-1", s["detail"])
+        self.assertIn("claude/qa-3's tests (apps/web/nav.test.ts)", s["detail"])
+        self.assertEqual(len(self.seams()), 1, "./local is an import, not a route")
+
+    def test_HRB_6_S4_ready_waits_until_every_seam_is_read(self):
+        self.on_main({"apps/web/page.ts": self.LINES})
+        ok(harbor(self.a, "convoy", "new"))
+        self.vessel("claude/qa-1", "QA-1", {"apps/web/page.ts": self.LINES.replace("line 1\n", "one\n"),
+                                            "apps/web/a.ts": "export type Shared = 1\n"})
+        self.vessel("claude/qa-3", "QA-3", {"apps/web/page.ts": self.LINES.replace("line 20\n", "twenty\n"),
+                                            "apps/web/b.ts": "export interface Shared {}\n"})
+        out = ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.assertIn("2 seam(s) to read", out)
+        self.assertEqual(self.convoy()["state"], "waiting")
+        res = self.ok_changed()
+        self.assertEqual(res.returncode, 1, "no ok before the seams are read")
+        f, n = self.seam("file", "apps/web/page.ts")["id"], self.seam("name", "Shared")["id"]
+        res = harbor(self.a, "convoy", "seam", "1", f, "--note", "looks ok")
+        self.assertEqual(res.returncode, 2)
+        self.assertIn("fine, fixed in <commit>, or a question", res.stderr)
+        res = harbor(self.a, "convoy", "seam", "1", "s-0000000", "--note", "fine")
+        self.assertIn("UNKNOWN_SEAM", res.stderr)
+        self.assertIn("1 seam(s) left", ok(harbor(self.a, "convoy", "seam", "1", f, "--note", "fine: different lines")))
+        self.assertEqual(self.events()[-1], "seam-read")
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.assertEqual(self.convoy()["state"], "waiting", "one seam is still unread")
+        # The skipper fixes the seam on convoy/1 and says so.
+        sh(self.a, "git", "checkout", "--quiet", "convoy/1")
+        (self.a / "apps/web/b.ts").write_text("export interface SharedProps {}\n")
+        sh(self.a, "git", "commit", "--quiet", "-am", "fix: one Shared")
+        sh(self.a, "git", "push", "--quiet", "origin", "convoy/1")
+        fix = sh(self.a, "git", "rev-parse", "HEAD")
+        res = harbor(self.a, "convoy", "seam", "1", n, "--note", "fixed in 1234567")
+        self.assertIn("NOT_ON_CONVOY", res.stderr)
+        out = ok(harbor(self.a, "convoy", "seam", "1", n, "--note", f"fixed in {fix[:9]}"))
+        self.assertIn("every seam is read", out)
+        self.assertEqual(self.seam("name", "Shared")["note"], f"fixed in {fix[:9]}")
+        self.assertEqual(self.seam("name", "Shared")["read_by"], "acct1/mbp/s1")
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        c = self.convoy()
+        self.assertEqual(c["state"], "ready")
+        self.assertEqual(self.events().count("seams"), 1, "the same seams are not reported twice")
+        self.assertIn("seam", self.repo.log_files()["harbor/convoys/1.md"].lower())
+        ok(self.ok_changed())
+
+
+class TestHRB6Edges(Seams):
+    def test_a_question_is_a_read_and_shows_in_status(self):
+        self.on_main({"apps/web/page.ts": self.LINES})
+        ok(harbor(self.a, "convoy", "new"))
+        self.vessel("claude/qa-1", "QA-1", {"apps/web/page.ts": self.LINES.replace("line 1\n", "one\n")})
+        self.vessel("claude/qa-3", "QA-3", {"apps/web/page.ts": self.LINES.replace("line 20\n", "twenty\n")})
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        sid = self.seams()[0]["id"]
+        self.assertIn(f"seam {sid} to read", ok(harbor(self.a, "convoy", "status", "1")))
+        ok(harbor(self.a, "convoy", "seam", "1", sid, "--note", "does qa-3 expect line 1 unchanged?"))
+        self.assertIn("question", ok(harbor(self.a, "convoy", "status", "1")))
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.assertEqual(self.convoy()["state"], "ready")
+
+    def test_css_selectors_and_tokens_changed_by_two_vessels(self):
+        css = ":root {\n  --brand: red;\n  --gap: 4px;\n}\n\n" + "".join(f".r{i} {{ color: red; }}\n" for i in range(8)) \
+              + "\n.button {\n  color: red;\n  padding: 0;\n  margin: 0;\n}\n"
+        self.on_main({"apps/web/a.css": css, "apps/web/b.css": ".other { color: blue; }\n"})
+        ok(harbor(self.a, "convoy", "new"))
+        self.vessel("claude/qa-1", "QA-1", {"apps/web/a.css": css.replace("--brand: red", "--brand: blue"),
+                                            "apps/web/c.scss": "/* .ghost { } */\n.button {\n  gap: 0;\n}\n"})
+        self.vessel("claude/qa-3", "QA-3", {"apps/web/a.css": css.replace("margin: 0", "margin: 1px"),
+                                            "apps/web/b.css": ".other { color: blue; }\n:root { --brand: green; }\n"
+                                                              ".button { border: 0; }\n"})
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        kinds = {(s["kind"], s["key"]) for s in self.seams()}
+        self.assertIn(("token", "--brand"), kinds)
+        self.assertIn(("selector", ".button"), kinds)
+        self.assertIn(("selector", ":root"), kinds)
+        self.assertIn(("file", "apps/web/a.css"), kinds)
+        self.assertNotIn(("token", "--gap"), kinds)
+        self.assertNotIn(("selector", ".other"), kinds, "untouched by qa-1")
+        self.assertNotIn(("selector", ".ghost"), kinds, "a comment is not a rule")
+
+    def test_the_report_lists_at_most_twenty_seams(self):
+        base = {f"apps/web/f{i:02}.ts": self.LINES for i in range(25)}
+        self.on_main(base)
+        ok(harbor(self.a, "convoy", "new"))
+        self.vessel("claude/qa-1", "QA-1", {p: self.LINES.replace("line 1\n", "one\n") for p in base})
+        self.vessel("claude/qa-3", "QA-3", {p: self.LINES.replace("line 20\n", "twenty\n") for p in base})
+        out = ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.assertEqual(len(self.seams()), 25, "every seam is kept and must be read")
+        report = self.report()
+        self.assertEqual(report.count(" file apps/web/"), 20)
+        self.assertIn("(+5 more)", report)
+        self.assertIn("(+5 more)", out)
+
+    def test_a_redelivered_vessel_makes_its_seams_unread_again(self):
+        self.on_main({"apps/web/page.ts": self.LINES})
+        ok(harbor(self.a, "convoy", "new"))
+        self.vessel("claude/qa-1", "QA-1", {"apps/web/page.ts": self.LINES.replace("line 1\n", "one\n")})
+        self.vessel("claude/qa-3", "QA-3", {"apps/web/page.ts": self.LINES.replace("line 20\n", "twenty\n")})
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        ok(harbor(self.a, "convoy", "seam", "1", self.seams()[0]["id"], "--note", "fine"))
+        sh(self.a, "git", "checkout", "--quiet", "claude/qa-3")
+        (self.a / "apps/web/page.ts").write_text(self.LINES.replace("line 19\n", "nineteen\n"))
+        sh(self.a, "git", "commit", "--quiet", "-am", "more")
+        sh(self.a, "git", "push", "--quiet", "origin", "claude/qa-3")
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", "1", "claude/qa-3"))
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.assertNotIn("note", self.seams()[0], "new code: read it again")
+        self.assertEqual(self.convoy()["state"], "waiting")
+
+    def test_generated_files_and_one_vessel_make_no_seams(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3"))
+        self.vessel("claude/qa-1", "QA-1", {"site/index.json": "one\n"})
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.assertNotIn("seams", self.events(), "one vessel has nobody to meet")
+        self.vessel("claude/qa-3", "QA-3", {"site/index.json": "three\n"})
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.assertEqual(self.seams(), [], "declared generated files are rebuilt, not read")
+        self.assertIn("no seams", self.report())
+        self.assertEqual(self.convoy()["state"], "ready")
+
+    def test_only_the_skipper_or_the_integrator_reads_a_seam(self):
+        self.on_main({"apps/web/page.ts": self.LINES})
+        ok(harbor(self.a, "convoy", "new"))
+        self.vessel("claude/qa-1", "QA-1", {"apps/web/page.ts": self.LINES.replace("line 1\n", "one\n")})
+        self.vessel("claude/qa-3", "QA-3", {"apps/web/page.ts": self.LINES.replace("line 20\n", "twenty\n")})
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", session="s2"))
+        res = harbor(self.a, "convoy", "seam", "1", self.seams()[0]["id"], "--note", "fine", session="s2")
+        self.assertIn("NOT_SKIPPER", res.stderr)
 
 
 if __name__ == "__main__":

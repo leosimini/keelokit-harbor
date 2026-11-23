@@ -16,8 +16,8 @@ Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigni
 vessels that share commits, everything marked *(3)*, and phase 3's "Designed, not built". Phase 6, how Harbor fits Keelokit's ledger, is designed in
 [ledger-phase6.md](ledger-phase6.md) and not written yet. Phase 7, the lessons of the JOUNA fleet (the ok
 straight to `all`, a sail preflight, a seam report, cutoffs, a 30-minute round), is designed in
-[lessons-phase7.md](lessons-phase7.md); HRB-4, the ok straight to `all`, and HRB-5, the sail preflight
-(`tests/test_phase7.py`), are written, the rest is not. The evidence is the survey of a week of convoys run by hand on
+[lessons-phase7.md](lessons-phase7.md); HRB-4, the ok straight to `all`, HRB-5, the sail preflight, and HRB-6,
+the seam report at assemble (`tests/test_phase7.py`), are written, the rest is not. The evidence is the survey of a week of convoys run by hand on
 the fleet Harbor was learned on (see the appendix; its finding ids, `n.m`, are cited as `§n.m`, its
 candidate rules as `R1`…`R26`). For how to use Harbor, see the [README](../README.md).
 
@@ -320,6 +320,17 @@ main_before = "a2becf56d…"
 main_after = "60099ef60…"
 ci = "green"                     # (2) recorded by the next control from ci.py health
 
+[[seams]]                        # (7, HRB-6) written by assemble from the vessels' diffs; absent with none
+id = "s-3fa21c0"                 # bound to the kind, the key and the heads of its vessels: a redelivery is a new seam
+kind = "file"                    # file | name | selector | token | route
+key = "apps/web/nav.tsx"         # the path, exported name, CSS selector, token or route path
+vessels = ["claude/carga-001", "claude/carga-003"]
+detail = "added by claude/carga-001, in claude/carga-003's tests (apps/web/nav.test.ts)"   # routes only
+note = "fixed in 9d2e41b07"      # convoy seam: fine…, fixed in <commit>, or a question (ends in ?)
+read_kind = "fixed"              # fine | fixed | question
+read_by = "acct1/mbp/session_01Abc"
+read_at = "2026-11-01T12:40:00Z"
+
 [[vessels]]
 branch = "claude/carga-001"
 head = "4d44fdd8…"               # the delivered commit; the remote tip must still be it
@@ -336,6 +347,7 @@ at = "2026-11-01T11:10:00Z"
 by = "acct1/mbp/session_01Abc"
 what = "add"                     # new add redelivered assembled main-moved ok verify-start verify-pass
 detail = "claude/carga-001@4d44fdd8"   # verify-fail fix preflight-failed sailing sailed aborted skipper-changed imported
+                                       # seams seam-read (7, HRB-6)
 ```
 
 Imported convoys carry `imported = true`, `imported_skipper` (the board's text) and `handoff`, and no
@@ -468,7 +480,7 @@ only from a description (§5.1); the tests use a board written from that descrip
 | State | Means |
 |---|---|
 | `assembling` | created; the skipper takes deliveries |
-| `waiting` | assembled with what was delivered; an expected vessel, or a convoy it depends on, is still missing |
+| `waiting` | assembled with what was delivered; an expected vessel, or a convoy it depends on, is still missing, or a seam is unread *(7)* |
 | `ready` | every expected vessel merged in `convoy/<n>` with `main`; migrations in order, generated files regenerated: waiting for the ok |
 | `verifying` | the ok is given with its level; the integrator runs the convoy's one verify and fixes the combination |
 | `sailed` | pushed to `main`; hotspots released |
@@ -479,7 +491,8 @@ only from a description (§5.1); the tests use a board written from that descrip
 | — → assembling | `convoy new` | any active worker, who becomes its skipper | account not paused; every `--depends` convoy exists |
 | assembling, waiting → same | `convoy add` | the skipper | the vessel is pushed, sealed green on that exact commit, holds no hotspot another open vessel holds, is in no other open convoy |
 | assembling, waiting → waiting | `convoy assemble` *(2)* | the integrator | merged what was delivered; something expected or a dependency is missing |
-| assembling, waiting → ready | `convoy assemble` *(2)* | the integrator | every expected vessel merged, `main` merged in, every dependency sailed, migration check passed |
+| assembling, waiting → ready | `convoy assemble` *(2)* | the integrator | every expected vessel merged, `main` merged in, every dependency sailed, migration check passed, every seam read *(7)* |
+| waiting → same | `convoy seam N ID --note` *(7)* | the skipper or the integrator | one seam of the report read: fine, fixed in a commit, or a question |
 | ready, verifying → assembling | `convoy assemble` *(2)* | the integrator | `main` moved, a vessel was redelivered, or one was added: the ok is cleared |
 | ready → verifying | `convoy sail --ok` *(2)* | the harbormaster, holding an unexpired watch | the ok conditions below |
 | verifying → same | `convoy approve` *(2)* | the person, from their own terminal | only a critical convoy (`person_ok`); bound to the head |
@@ -550,12 +563,44 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   check: two vessels adding migrations with the same timestamp, or one that sorts before `main`'s
   last, fail with `MIGRATION_COLLISION` / `MIGRATION_ORDER` and the rename to make (R16). Pushes
   `convoy/<n>` without force; a rejection means another integrator pushed and it stops.
-- **Logbook:** `head`, `base`, `vessels[].merged`, the state, events `assembled` / `main-moved`; a
-  move of `main` clears `[ok]`.
+- **Seam report** (HRB-6, phase 7): with two or more vessels, from each vessel's diff against its merge
+  base with `main` (`[harbor.generated]` paths left out, since they are rebuilt), mechanically:
+  1. *file:* a file changed by two or more vessels;
+  2. *name:* an exported name defined or changed by two or more vessels, in any file: TypeScript and
+     JavaScript `export [default] [async] const|function|class|type|interface <Name>`, Python `def` /
+     `class` at module level. A changed line counts for the definition it is, or for the unindented
+     definition it sits under;
+  3. *selector* / *token:* a CSS selector (the rule a changed line opens or sits in) or a design token
+     (a custom property `--name:` or an SCSS `$name:` defined on a changed line) in `.css`, `.scss`,
+     `.sass`, `.less` changed by two or more vessels;
+  4. *route:* a route path (a quoted literal starting with `/`, with a letter in it) on a line one
+     vessel's code adds that appears in a test file another vessel changed (`tests/`, `__tests__/`,
+     `e2e/`, `*.test.*`, `*.spec.*`, `test_*.py`, `*_test.py`).
+  Each seam gets an id bound to its kind, key and the heads of its vessels (`s-` and 7 hex), so a
+  redelivered vessel makes its seams new seams to read, and the same vessels keep their reads across
+  assemblies. The report goes into the event `seams` (when the list changed) and to the output: at most
+  20 seams listed, then `(+N more)`; every seam is kept in `[[seams]]`. The convoy reaches `ready` only
+  when every seam has a `seam-read`; until then it is `waiting` for "N seam(s) to read". One vessel has
+  no seams and no report.
+- **Logbook:** `head`, `base`, `vessels[].merged`, `[[seams]]` *(7)*, the state, events `assembled` /
+  `main-moved` / `seams` *(7)*; a move of `main` clears `[ok]`.
 - **Errors:** `NOT_INTEGRATOR`, `DIRTY_TREE`, `VESSEL_MOVED`, `CONFLICT`, `GENERATED_FAILED`,
   `MIGRATION_COLLISION`, `MIGRATION_ORDER`, `DIVERGED` (local and remote `convoy/<n>` disagree),
   `CONVOY_PUSH_REJECTED`, `ASSEMBLE_STALE` (vessels changed meanwhile). An open dependency is not an
   error: the convoy waits.
+
+### `harbor.py convoy seam N SEAM_ID --note TEXT` *(phase 7, HRB-6)*
+
+- **Before:** the convoy's skipper or integrator, an active worker; the convoy open; `SEAM_ID` in its
+  `[[seams]]`. The note is one line (at most 500 characters) and says what the seam is: `fine…` (the two
+  vessels meet without trouble), `fixed in <commit>` (a commit on `origin/convoy/<n>`: the fix is pushed
+  first), or a question (ends in `?`; it counts as read, and shows in `convoy status` and the convoy page
+  for the harbormaster before the ok).
+- **Logbook:** the seam's `note`, `read_kind`, `read_by`, `read_at`; event `seam-read` with the seam
+  and the note. Reading a seam again replaces the note. When the last one is read, the next `assemble`
+  reaches `ready`.
+- **Errors:** `USAGE` (a note that is none of the three), `UNKNOWN_SEAM`, `NOT_ON_CONVOY` (the fix
+  commit isn't on the convoy branch), `NOT_SKIPPER`, `CONVOY_CLOSED`.
 
 ### `/harbor:convoy sail N --ok [--level changed|all] [--reason TEXT]` *(phase 2; the level from the plans, phase 7)*
 

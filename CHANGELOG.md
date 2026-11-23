@@ -25,6 +25,17 @@
   as the event `preflight-failed`; a pass is in the `sailing` event, with its time (seconds). A fix is a
   commit the integrator makes on `convoy/<n>` itself (first parent, not a merge, in no vessel): `assemble`
   and `verify` record it in the convoy's new optional `fixes` list (event `fix`); the schema stays 1.
+- **HRB-6: a seam report at assemble.** With two or more vessels, `convoy assemble` lists, from each vessel's
+  diff against its merge base with main, the files two or more vessels changed, the exported names
+  (TypeScript `export const|function|class|type|interface`, Python module-level `def`/`class`) two or more
+  defined or changed, the CSS selectors and design tokens two or more changed, and the route paths one
+  vessel adds that appear in another vessel's tests. `[harbor.generated]` paths are left out. The report
+  goes to the output and the new event `seams` (at most 20 listed, then `(+N more)`); every seam is kept in
+  the convoy's new optional `[[seams]]`, with an id bound to the vessels' heads. New command
+  `harbor.py convoy seam N <seam-id> --note TEXT` (the skipper or the integrator) records `seam-read`: `fine…`,
+  `fixed in <commit>` (on `convoy/<n>`) or a question (ends in `?`). `assemble` keeps the convoy `waiting`
+  until every seam is read, then reaches `ready`. `convoy status` and the convoy page show the seams. The
+  logbook stays schema 1.
 
 ## 0.5.1 — 2026-11-18
 
