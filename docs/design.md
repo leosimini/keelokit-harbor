@@ -16,8 +16,8 @@ Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigni
 vessels that share commits, everything marked *(3)*, and phase 3's "Designed, not built". Phase 6, how Harbor fits Keelokit's ledger, is designed in
 [ledger-phase6.md](ledger-phase6.md) and not written yet. Phase 7, the lessons of the JOUNA fleet (the ok
 straight to `all`, a sail preflight, a seam report, cutoffs, a 30-minute round), is designed in
-[lessons-phase7.md](lessons-phase7.md); HRB-4, the ok straight to `all` (`tests/test_phase7.py`), is
-written, the rest is not. The evidence is the survey of a week of convoys run by hand on
+[lessons-phase7.md](lessons-phase7.md); HRB-4, the ok straight to `all`, and HRB-5, the sail preflight
+(`tests/test_phase7.py`), are written, the rest is not. The evidence is the survey of a week of convoys run by hand on
 the fleet Harbor was learned on (see the appendix; its finding ids, `n.m`, are cited as `§n.m`, its
 candidate rules as `R1`…`R26`). For how to use Harbor, see the [README](../README.md).
 
@@ -294,6 +294,7 @@ head = "60099ef60…"              # (2) tip of convoy/<n> after the last assemb
 created = "2026-10-31T19:51:00Z"
 depends_on = [7]                 # convoys that must sail first (R15)
 expected = ["STORY-000", "STORY-001", "STORY-003"]
+fixes = ["b71c0e2a4…"]           # (7) the integrator's fix commits on convoy/<n>, recorded by assemble and verify
 
 [ok]                             # (2) the harbormaster's ok (R19)
 by = "ana/linux/session_02Ab"
@@ -334,7 +335,7 @@ merged = "9c1e…"                 # (2) its merge commit on convoy/<n>
 at = "2026-11-01T11:10:00Z"
 by = "acct1/mbp/session_01Abc"
 what = "add"                     # new add redelivered assembled main-moved ok verify-start verify-pass
-detail = "claude/carga-001@4d44fdd8"   # verify-fail fix sailed aborted skipper-changed imported
+detail = "claude/carga-001@4d44fdd8"   # verify-fail fix preflight-failed sailing sailed aborted skipper-changed imported
 ```
 
 Imported convoys carry `imported = true`, `imported_skipper` (the board's text) and `handoff`, and no
@@ -611,11 +612,34 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
 
 - **Before:** the integrator; `[ok]` present; a green convoy seal for the exact head at the ok's
   level or above; `origin/main` is the ok's base, so the push is a fast-forward.
+- **Preflight** (HRB-5, phase 7), before anything is announced or pushed, from `main_before` (the ok's
+  base) to the head, with git alone, in seconds (JOUNA's coordinator did it by hand in about a minute):
+  1. *History:* every commit is a vessel's (`main_before..<vessel head>`), a recorded fix, a merge that
+     brings in a vessel's head (at most one per vessel; none when the vessel went in as a fast-forward)
+     or a merge of the trunk (every other parent already in `main_before`). Anything else is a stray
+     commit or merge, and every vessel head must be in the head. A *fix* is a commit the integrator made on
+     `convoy/<n>` itself: on the first-parent line, not a merge, in no vessel. `assemble` and `verify`
+     record each one they find in the convoy's `fixes` (event `fix`); a commit that came in through a merge
+     is never one.
+  2. *Authors:* no commit has a placeholder author: an empty name, an email without `@`, git's
+     `….(none)` and `@localhost`, or one of a short list of defaults (`Your Name`, `you@example.com`,
+     `root`, `unknown`…, `PLACEHOLDER_NAMES` / `PLACEHOLDER_EMAILS` in `harbor.py`). Keelokit's pre-push has
+     no such list of its own; `[harbor] placeholder_authors = [...]` adds names or emails.
+  3. *wip tips:* `python3 .keelokit/bin/verify_tools.py wip-inside origin <head>` (Keelokit 0.13; exit 0
+     names an unproven `wip/` tip inside the head). Without `verify_tools.py`, or with one that has no
+     `wip-inside`, it is skipped and the sail's line says so.
+  4. *Diff:* the files of `git diff main_before <head>` are the union of each vessel's
+     `git diff main_before...<vessel head>`, both ways, apart from the files the recorded fixes change and
+     the `[harbor.generated]` paths. A file outside them is named.
+
+  A failure stops the sail with `PREFLIGHT_FAILED` and the first failing line (the rest are printed),
+  recorded as the event `preflight-failed`; nothing is announced or pushed. A pass goes into the
+  `sailing` event (`preflight passed in 0.4 s`).
 - **Does:** `git push origin <head>:main` (`<head>:<trunk>`; no other branch is pushed) from the
   machine that ran the verify, so Keelokit's pre-push seal recognises the commit and doesn't repeat
   the run. Rejected: `MAIN_MOVED`, back to assemble.
 - **Logbook:** `[sail]`, state sailed, `main.toml`, event `sailed`; the next control records the CI.
-- **Errors:** `NO_OK`, `NEEDS_PERSON`, `NOT_SEALED`, `MAIN_MOVED`, `CONVOY_MOVED`, `NOT_INTEGRATOR`, `PUSH_FAILED`
+- **Errors:** `NO_OK`, `NEEDS_PERSON`, `NOT_SEALED`, `PREFLIGHT_FAILED`, `MAIN_MOVED`, `CONVOY_MOVED`, `NOT_INTEGRATOR`, `PUSH_FAILED`
   (the pre-push hook's own refusal included). If the push lands and the logbook write fails, the
   next control finds `main` at a verifying convoy's head and records the sail.
 

@@ -15,6 +15,16 @@
   that level is refused with `ALREADY_COVERED`. `convoy verify` at `all` no longer follows a red with the
   scoped `convoy_rerun` (which can't seal at `all`): it runs the new `[harbor] convoy_rerun_all`
   (default `pnpm verify --all --rerun-failed --keep-going`), so a red costs one fix round at `all` too.
+- **HRB-5: a mechanical preflight before the push to main.** `convoy sail` checks, before it announces or
+  pushes anything, that the head's history from `main_before` is exactly the vessels' commits, at most one
+  merge per vessel, merges of the trunk and the integrator's recorded fixes; that no commit has a placeholder
+  author (a short documented list, plus `[harbor] placeholder_authors`); that no unproven `wip/` tip is inside
+  the head (Keelokit's `verify_tools.py wip-inside`, skipped with a note when the project's Keelokit lacks
+  it); and that the head changes exactly the vessels' files, apart from the fixes' files and
+  `[harbor.generated]`. A failure stops the sail with `PREFLIGHT_FAILED` and the line that failed, recorded
+  as the event `preflight-failed`; a pass is in the `sailing` event, with its time (seconds). A fix is a
+  commit the integrator makes on `convoy/<n>` itself (first parent, not a merge, in no vessel): `assemble`
+  and `verify` record it in the convoy's new optional `fixes` list (event `fix`); the schema stays 1.
 
 ## 0.5.1 — 2026-11-18
 
