@@ -608,7 +608,7 @@ def render_logbook(files: dict, cs: dict) -> str:
     out += ["", "## Workers", ""]
     if live:
         # A tree: each session under the one that launched it (spawned_by), roots by convoy.
-        out += ["| Session | Worker | Role | Branch | Model | Last seen | State |", "|---|---|---|---|---|---|---|"]
+        out += ["| Session | Worker | Role | Story | Branch | Model | Last seen | State |", "|---|---|---|---|---|---|---|---|"]
         kids: dict[str, list[str]] = {}
         for wid, w in live.items():
             if w.get("spawned_by") in live:
@@ -629,7 +629,7 @@ def render_logbook(files: dict, cs: dict) -> str:
             branch = w.get("branch")
             if w.get("canonical_branch") and w.get("canonical_branch") != branch:
                 branch = f"{branch or '—'} ({w['canonical_branch']})"
-            out.append(f"| {name} | {wid} | {cell(w.get('role'))} | {cell(branch)} | {cell(w.get('model'))} | "
+            out.append(f"| {name} | {wid} | {cell(w.get('role'))} | {cell(w.get('story'))} | {cell(branch)} | {cell(w.get('model'))} | "
                        f"{cell(w.get('last_seen'))} | {w.get('state')} |")
     else:
         out.append("No active workers.")
@@ -929,6 +929,10 @@ def cmd_worker(args) -> int:
 
     if args.action == "register" and args.story:
         keelokit("a worker for a story")
+        story_id(args.story)
+    lock = args.action == "register" and bool(args.story) and has_ledger()  # HRB-2: the take, at registration
+    if lock:
+        refuse_on_trunk(args.story)
     title = session_title(args.role, args.convoy, args.story, me["account"]) if args.action == "register" else None
     if args.action == "register" and args.story and not title:
         raise HarborError("UNKNOWN_STORY", f"Keelokit's status.py title doesn't know {args.story} (or this Keelokit "
@@ -957,6 +961,13 @@ def cmd_worker(args) -> int:
                 raise HarborError("SPAWNER_UNKNOWN", f"{args.spawned_by} is not an active worker: a session that "
                                   "ended or is lost can't own new work")
             cur["spawned_by"] = args.spawned_by
+        if lock:
+            refuse_taken(files, args.story, but=me["id"])
+        elif not args.story and cur.get("state") in ("ended", "lost") and cur.get("story"):
+            # it released that story when it ended or was lost: registering again doesn't take it back
+            if cur.get("canonical_branch") == cur["story"].lower():
+                cur.pop("canonical_branch", None)
+            cur.pop("story", None)
         cur.pop("handover", None)
         cur.pop("ended", None)
         cur.update(role=args.role, convoy=args.convoy, branch=args.branch, model=args.model, state="active", last_seen=now())
@@ -1941,7 +1952,7 @@ def convoy_seam(args, cfg: dict, me: dict) -> int:
 
 LEDGER_TOOL = ".keelokit/bin/ledger.py"
 LEDGER_SECONDS = 60  # the ledger makes a fixed number of git calls; HARBOR_LEDGER_SECONDS overrides it
-_LEDGER: dict[str, bool] = {}
+_LEDGER: dict[str, dict | None] = {}  # ledger.py --json, once per run: the facts, or None (no ledger)
 
 
 def ledger_seconds() -> float:
@@ -1982,8 +1993,139 @@ def has_ledger() -> bool:
     """Keelokit's ledger answering schema 1 (0.15.0 on): the switch for every phase-6 behaviour. Asked once per run."""
     key = str(ROOT)
     if key not in _LEDGER:
-        _LEDGER[key] = run_ledger("--json")[0] is not None
-    return _LEDGER[key]
+        _LEDGER[key] = run_ledger("--json")[0]
+    return _LEDGER[key] is not None
+
+
+# --- HRB-2: taking a story is a lock in the logbook -----------------------------------------------------
+# A worker holds a story while it is `active` and its file says `story = "<ID>"`. Taking is one logbook
+# transaction (transact): two takes at once both build a commit, one push wins, the other is rejected and
+# replays on the new tip, where the story is held, so it is refused (first commit wins, as the watch). A worker
+# that ends or is marked lost holds nothing; its `story` stays in its file as the record of what it worked on.
+
+ON_TRUNK_STATES = ("on-trunk", "in-version", "in-staging", "in-production")  # Keelokit's states, from on-trunk on
+
+
+def story_state(sid: str) -> tuple[str | None, str]:
+    """The ledger's state of `sid`: (state, "") or (None, why). `ledger.py show <ID> --json` when the ledger answers
+    it; else (Keelokit 0.16.0 has `show <ID> [--full]` only) the story's row in `ledger.py --json`. ("", "") without
+    a ledger: nothing to ask."""
+    if not has_ledger():
+        return None, ""
+    data, _ = run_ledger("show", sid, "--json", answers=(0,))
+    rec = data.get("story") if data and isinstance(data.get("story"), dict) else data
+    if isinstance(rec, dict) and isinstance(rec.get("state"), str) \
+            and str(rec.get("id", sid)).casefold() == sid.casefold():
+        return rec["state"], ""
+    stories = (_LEDGER.get(str(ROOT)) or {}).get("stories")
+    for r in stories if isinstance(stories, list) else []:
+        if isinstance(r, dict) and isinstance(r.get("id"), str) and r["id"].casefold() == sid.casefold():
+            if isinstance(r.get("state"), str):
+                return r["state"], ""
+            break
+    return None, f"`ledger.py --json` gives no state for {sid}"
+
+
+def refuse_on_trunk(sid: str) -> None:
+    """STORY_ON_TRUNK when the ledger says the story is on the trunk or later; a ledger that can't say is one line,
+    never a refusal."""
+    state, why = story_state(sid)
+    if state in ON_TRUNK_STATES:
+        raise HarborError("STORY_ON_TRUNK", f"{sid} is {state} (ledger.py): it is already on the trunk; nothing to take")
+    if why:
+        print(f"harbor: ledger: {why}; {sid} not checked against the trunk")
+
+
+def story_id(sid: str) -> str:
+    if not NAME.fullmatch(sid or ""):
+        raise HarborError("USAGE", f"story '{sid}' is not one id: letters, digits, . _ -")
+    return sid
+
+
+def holders(files: dict, sid: str, but: str | None = None) -> list[str]:
+    """The active workers holding `sid` (an id compares without case), except `but`."""
+    return sorted(w["id"] for w in workers(files).values()
+                  if w.get("state") == "active" and w["id"] != but
+                  and sid.casefold() in (x.casefold() for x in stories_of(w.get("story"))))
+
+
+def refuse_taken(files: dict, sid: str, but: str | None = None) -> None:
+    if held := holders(files, sid, but):
+        raise HarborError("STORY_TAKEN", f"{sid} is held by {', '.join(held)} (active): harbor.py story release "
+                          f"{sid} is theirs; a lost or ended worker holds nothing")
+
+
+def answers_for(files: dict, me: dict, wid: str) -> bool:
+    """May `me` take or release a story for worker `wid`: itself, a session on its account and host, the session
+    that launched it, or the harbormaster."""
+    w = workers(files).get(wid) or {}
+    return wid == me["id"] or (w.get("account"), w.get("host")) == (me["account"], me["host"]) \
+        or w.get("spawned_by") == me["id"] or holds_watch(files, me)
+
+
+def cmd_story(args) -> int:
+    project()
+    sid = story_id(args.id)
+    me = identity(args.session)
+    wid = args.worker or me["id"]
+    if args.action == "take":
+        refuse_on_trunk(sid)
+
+    def keep(files: dict, w: dict) -> None:
+        """Write W; its last_seen is its own heartbeat, renewed only when W itself writes (a dead holder must go lost)."""
+        if w["id"] == me["id"]:
+            touch(files, w)
+        else:
+            save(files, worker_path(w["id"]), w)
+
+    def target(files: dict) -> dict | None:
+        w = workers(files).get(wid)
+        if args.worker and not answers_for(files, me, wid):
+            raise HarborError("NOT_YOURS", f"{me['id']} doesn't answer for {wid}: only itself, a session of its account "
+                              "and host, the one that launched it or the harbormaster")
+        return w
+
+    def take(files, head):
+        w = target(files)
+        if (w or args.worker) and (not w or w.get("state") != "active"):
+            raise HarborError("NOT_REGISTERED", f"{wid} is not an active worker" + (f" (it is {w.get('state')})" if w else "")
+                              + ": a lost or ended worker takes nothing; harbor.py worker register first")
+        refuse_taken(files, sid, but=wid)
+        if not w:
+            return "unregistered", None
+        was = w.get("story")
+        if was and was.casefold() == sid.casefold():
+            return "again", None
+        w.update(story=sid, canonical_branch=sid.lower())
+        keep(files, w)
+        return "taken", was
+
+    def release(files, head):
+        w = target(files)
+        mine = w and sid.casefold() in (x.casefold() for x in stories_of(w.get("story")))
+        if mine and w.get("state") == "active":
+            w.pop("story", None)
+            if w.get("canonical_branch") == sid.lower():
+                w.pop("canonical_branch", None)
+            keep(files, w)
+            return "released"
+        if held := holders(files, sid):
+            raise HarborError("NOT_HOLDER", f"{sid} is held by {', '.join(held)}, not {wid}: only its holder, someone "
+                              "who answers for it (--worker) or the harbormaster releases it")
+        return "free"
+
+    if args.action == "take":
+        what, was = transact(f"story take {sid} by {wid}", me["id"], take)
+        if what == "unregistered":
+            print(f"harbor: {sid} is free; nothing recorded: {wid} is not registered (worker register --story {sid} takes it)")
+        elif what == "again":
+            print(f"harbor: {sid} is already yours ({wid})")
+        else:
+            print(f"harbor: {wid} took {sid}" + (f" (was {was}: released)" if was else ""))
+    else:
+        what = transact(f"story release {sid} by {wid}", me["id"], release)
+        print(f"harbor: {sid} released by {wid}" if what == "released" else f"harbor: nobody holds {sid}: nothing to release")
+    return 0
 
 
 def ledger_attribution(base: str, tip: str, trunk_tip: str) -> tuple[list[str], list[tuple[str, str, str]]] | None:
@@ -3277,7 +3419,8 @@ def cmd_harbormaster(args) -> int:
             if wk.get("state") == "active" and wid != me["id"] and parse_ts(wk.get("last_seen") or now()) < limit:
                 wk.update(state="lost", lost=now())
                 save(files, worker_path(wid), wk)
-                lines.append(f"lost: {wid} (last seen {wk.get('last_seen')}): its account's place is free")
+                lines.append(f"lost: {wid} (last seen {wk.get('last_seen')}): its account's place is free"
+                             + (f"; {wk['story']} is released" if wk.get("story") else ""))
         ws = workers(files)
         for wid, wk in ws.items():
             owner_id = wk.get("spawned_by")
@@ -3870,6 +4013,14 @@ def request_of(files: dict, rid: str) -> dict:
 
 
 def wanted_take(args, cfg: dict, me: dict) -> int:
+    lock = has_ledger()  # HRB-2: a vessel request whose story is held or on the trunk is refused
+    if lock:
+        _, files = snapshot()
+        r = requests(files).get(args.id) or {}
+        if r.get("role") == "vessel" and r.get("state") == "open" and isinstance(r.get("story"), str) \
+                and NAME.fullmatch(r["story"]):
+            refuse_on_trunk(r["story"])
+
     def mutate(files, head):
         r = request_of(files, args.id)
         if r.get("state") == "taken" and r.get("taken_by") == me["id"]:
@@ -3892,6 +4043,8 @@ def wanted_take(args, cfg: dict, me: dict) -> int:
         n = active_count(files, me["account"])
         if n >= acc["max_sessions"]:
             raise HarborError("ACCOUNT_AT_CAP", f"account '{me['account']}' already runs {n} of {acc['max_sessions']} session(s)")
+        if lock and r.get("role") == "vessel" and r.get("story"):
+            refuse_taken(files, r["story"])
         r.update(state="taken", taken_by=me["id"], taken_at=now())
         save(files, f"harbor/wanted/{args.id}.toml", r)
         touch(files, w)
@@ -3922,6 +4075,8 @@ def wanted_prompt(args, cfg: dict, me: dict) -> int:
                 f"--role {role}" + (f" --story {story}" if story else "") + (f" --convoy {convoy}" if convoy else "")
                 + f" --spawned-by {me['id']} --model {model}")
     lines = [f"You are a Harbor {role} session on account {me['account']}, started by the dispatcher {me['id']}."]
+    if role == "vessel" and has_ledger():  # HRB-2: the story is taken first (LEDGER-013: ledger.py take calls story take)
+        lines.insert(0, f"python3 .keelokit/bin/ledger.py take {story}")
     if title:
         lines.append(f"Name this session: {title}")
     lines += [f"Run this model: {model}.",
@@ -4296,6 +4451,12 @@ def parser() -> argparse.ArgumentParser:
     s = wsub.add_parser("end")
     for f in ("--branch", "--head", "--verified", "--pending", "--worktree", "--log"):
         s.add_argument(f)
+    st = sub.add_parser("story", help="taking a story is a lock in the logbook")
+    ssub = st.add_subparsers(dest="action", required=True)
+    for name in ("take", "release"):
+        s = ssub.add_parser(name)
+        s.add_argument("id", metavar="ID")
+        s.add_argument("--worker", metavar="W", help="the worker that takes or releases it (default: this session)")
     s = sub.add_parser("seal")
     s.add_argument("--rerun", action="store_true", help="run the verify even if Keelokit already passed this commit")
     cv = sub.add_parser("convoy")
@@ -4401,7 +4562,7 @@ def parser() -> argparse.ArgumentParser:
 COMMANDS = {"check": cmd_check, "init": cmd_init, "account": cmd_account, "worker": cmd_worker, "seal": cmd_seal,
             "convoy": cmd_convoy, "log": cmd_log, "import-board": cmd_import_board, "harbormaster": cmd_harbormaster,
             "models": cmd_models, "doctor": cmd_doctor, "guard": cmd_guard, "sync": cmd_sync, "title": cmd_title,
-            "msg": cmd_msg, "wanted": cmd_wanted, "push-guard": cmd_push_guard}
+            "msg": cmd_msg, "wanted": cmd_wanted, "push-guard": cmd_push_guard, "story": cmd_story}
 
 
 def main(argv: list[str] | None = None, root: Path | None = None) -> int:
