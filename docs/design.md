@@ -1114,7 +1114,8 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   worker `W` (default: the calling session) in one logbook transaction. A worker **holds** a story while its
   `state` is `active` and its `story` names it; ids compare without case, and an id is one plain word
   (letters, digits, `. _ -`; anything else is `USAGE`, exit 2). Refused:
-  - `STORY_TAKEN: <ID> is held by <worker> (active)` when another active worker holds it;
+  - `STORY_TAKEN: <ID> is held by <worker>` when another active worker holds it, or a vessel request holds it
+    (below). This is the logbook's lock: it never depends on the ledger, in any project;
   - `STORY_ON_TRUNK: <ID> is <state>` when the ledger says it is `on-trunk`, `in-version`, `in-staging` or
     `in-production`. Harbor asks `ledger.py show <ID> --json` first and reads `state` from its answer (an object
     with schema 1, the state at the top or under `story`); Keelokit 0.16.0 has only `show <ID> [--full]`, so
@@ -1124,7 +1125,7 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   - `NOT_REGISTERED` when `W` is a worker that ended or is lost, or `--worker` names no worker;
   - `NOT_YOURS` when the caller doesn't answer for `W`: only `W` itself, a session of its account and host, the
     session that launched it (`spawned_by`) or the harbormaster.
-  Taking what `W` already holds changes nothing (no commit). Taking another story replaces the one it held
+  Taking what `W` already holds changes nothing (no commit), even beside a duplicate holder an older Harbor wrote. Taking another story replaces the one it held
   (`was X: released`). A session not registered yet is checked (both refusals) and nothing is written: its
   `worker register --story ID` is the take.
 - **Two takes at once.** Both build a commit on the same tip; one push wins; the other is rejected, fetches the
@@ -1139,13 +1140,23 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   round's `lost:` line names the story). Its `story` stays in its file as the record of what it worked on; a
   worker that registers again without `--story` after it ended or was lost starts with no story.
 - **`worker register --story ID`** takes the story at registration, with the same refusals, in the same
-  transaction as the registration. Like `wanted take`'s refusals and the prompt's first line, it runs only with
-  the ledger (feature detection); `story take` and `story release` work in any project, the lock being the
-  logbook's.
+  transaction as the registration. `STORY_TAKEN` runs in every project, with or without a ledger, and whatever
+  the ledger answers on that call; only `STORY_ON_TRUNK` asks the ledger. The prompt's first line needs the ledger.
+- **A vessel request holds its story** while it is `taken` or `started` by a dispatcher that is still active and
+  the session it spawned hasn't registered yet (no worker with its session, nor one launched by that dispatcher
+  holding the story since the take), for at most `watch_expiry_minutes` after its take (or its start): a session
+  that never registers is as gone as a lost worker. `wanted take` of another request for that story, and a take by any other
+  worker, get `STORY_TAKEN` naming the request. The spawned session itself is exempt (`--spawned-by` the taker):
+  its `worker register --story` takes over the hold. A session not registered yet is checked against workers
+  only. `wanted add --role vessel` refuses a second request for a story that already has one open or holding it:
+  `STORY_REQUESTED`, naming it (drop it first).
+- **Every clone must run Harbor 0.6.0.** The logbook stays schema 1, so an older Harbor can't tell the lock is
+  there: its `worker register --story` doesn't check it, and its re-registration of a lost worker keeps the old
+  story. The harbormaster's round repairs that: for each story two or more active workers hold, it keeps the one
+  whose hold began first (the oldest commit of the unbroken run in which its file says active and that story) and
+  releases it from the others, one line per story naming them all.
 - **`LOGBOOK.md`** shows each active worker's story in the Workers table.
-- **Not locked:** two open vessel requests for one story can both be taken by dispatchers; the second session is
-  refused at its `worker register --story` and ends. A story that reaches the trunk between the check and the
-  take is HRB-3's (`DONE_TWICE` at the ok).
+- **Not locked:** a story that reaches the trunk between the check and the take is HRB-3's (`DONE_TWICE` at the ok).
 
 ## Phase 5: the fleet layer without Keelokit *(0.5.0)*
 
@@ -1474,7 +1485,8 @@ started_at = ""
   not paused and its active workers are under `max_sessions`. Two dispatchers can race: the replay checks
   the request is still open, so only one wins (`WANTED_TAKEN`). *(6, HRB-2)* With Keelokit's ledger, a vessel
   request is refused with `STORY_ON_TRUNK` when the ledger says its story is on the trunk or later, and with
-  `STORY_TAKEN` (naming the holder) when an active worker holds it; the request stays open.
+  `STORY_TAKEN` (naming the holder) when an active worker or another request holds it, with or without the ledger;
+  the request stays open. `wanted add` refuses a second vessel request for one story (`STORY_REQUESTED`).
 - `wanted prompt ID` — prints the prompt the dispatcher sends to `create_session`. Harbor builds it from
   the request's fields only (role, story, convoy, title, model, the dispatcher's worker id for
   `--spawned-by`), never from free text: a request can only start what the project already describes.

@@ -25,10 +25,14 @@
   taking another story releases the first. `story release ID` clears it, only by its holder (`NOT_HOLDER`
   otherwise, so a lost or ended worker that comes back can't clear a new holder's lock) or the harbormaster with
   `--worker`. A worker that ends or is marked lost holds nothing (the round's `lost:` line names the story it
-  released), and registering again without `--story` doesn't take it back. With the ledger, `worker register
-  --story` takes the story with the same refusals, `wanted take` refuses a vessel request whose story is held or
-  on the trunk, and a vessel's prompt starts with `python3 .keelokit/bin/ledger.py take <ID>`. `LOGBOOK.md`
-  shows each worker's story.
+  released), and registering again without `--story` doesn't take it back. `worker register --story` takes the story with
+  the same refusals; `STORY_TAKEN` never depends on the ledger (only `STORY_ON_TRUNK` asks it). A taken vessel
+  request holds its story until its session registers, its dispatcher ends, or the watch's expiry passes: `wanted take` refuses a vessel
+  request whose story is held or on the trunk, and `wanted add` refuses a second request for one story
+  (`STORY_REQUESTED`). With the ledger, a vessel's prompt starts with `python3 .keelokit/bin/ledger.py take <ID>`.
+  `LOGBOOK.md` shows each worker's story. **Every clone of a project must run Harbor 0.6.0 for the lock to hold**
+  (the schema stays 1, so an older Harbor doesn't see it); the harbormaster's round repairs a story two active
+  workers hold, keeping the one whose hold began first.
 - **A vessel carrying several stories delivers each of them.** The round's cutoff line, `convoy assemble`,
   `convoy status`, the convoy page and `convoy defer` compared a vessel's `story` as one text, so a vessel with
   `QA-1, QA-3` left both "not delivered". They now match each story id (the HRB-7 nit).
