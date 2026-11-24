@@ -2403,13 +2403,13 @@ def own_commits(head: str, main_tip: str) -> list[dict]:
     """The commits `head` brings that main doesn't have, merges left out (the ledger attributes what a merge
     brings), each with its Story:, Part-of: and No-story: trailers as git reads them (the message's last paragraph)."""
     fmt = "%x1e%H%x1f%s" + "".join(f"%x1f%(trailers:key={k},valueonly,separator=%x2C)" for k in ("Story", "Part-of", "No-story"))
-    out = git("log", "--no-merges", f"--format={fmt}", head, f"^{main_tip}", "--")
-    commits = []
-    for rec in out.split("\x1e"):
-        parts = rec.strip("\n").split("\x1f")
-        if len(parts) != 5:
-            continue
-        sha, subject, story, part_of, no_story = parts
+    out = run("git", "log", "--no-merges", f"--format={fmt}%x1fend", head, f"^{main_tip}", "--").stdout  # unstripped:
+    commits = []  # \x1e and \x1f are whitespace to str.strip, and an empty last field must stay a field
+    for rec in out.split("\x1e")[1:]:
+        parts = rec.split("\x1f")
+        if len(parts) != 6 or parts[5].strip() != "end":
+            raise HarborError("GIT", f"git log of {short(head)} gave a record Harbor can't read")
+        sha, subject, story, part_of, no_story = parts[:5]
         ids = lambda v: [x.strip() for x in v.replace("\n", ",").split(",") if x.strip()]  # noqa: E731
         commits.append({"sha": sha, "subject": subject, "story": ids(story), "part_of": ids(part_of),
                         "no_story": bool(no_story.strip())})

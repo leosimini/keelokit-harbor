@@ -1306,11 +1306,12 @@ class TestHRB3(Phase6Ok):
     def test_HRB_3_S2_the_ok_for_a_convoy_with_a_vessel_whose_story_is_already_on_the_trunk_is_refused_with_LEDGER_DIFF(self):
         self.two_vessels_ready()
         self.stories(**{"QA-1": {"state": "on-trunk", "commit": "f" * 40}, "QA-3": "in-progress"})
+        runs = self.runs()
         err = self.refused(self.ok_changed(), "LEDGER_DIFF")
         self.assertIn("claude/qa-1", err)
         self.assertIn("DONE_TWICE: QA-1 is on-trunk", err)
         self.assertNotIn("claude/qa-3", err)
-        self.assertEqual(self.runs(), [], "no verify started")
+        self.assertEqual(self.runs(), runs, "no verify started")
 
     def test_HRB_3_S3_a_loose_move_lists_what_entered(self):
         before = self.repo.main_sha()
@@ -1333,7 +1334,7 @@ class TestHRB3(Phase6Ok):
         self.assertIn("stories that entered: QA-4", loose)
         self.assertNotIn("QA-1", loose, "a story that entered before is not this move's")
         self.assertIn(f"unattributed: {commits[1][:9]}", loose)
-        self.assertNotIn(before[:9], loose)
+        self.assertNotIn(before[:9], loose.split("unattributed:")[1], "an unattributed commit before the move")
         move = self.repo.log_toml("harbor/main.toml")["moves"][-1]
         self.assertEqual((move["cause"], move["stories"], move["unattributed"]), ("loose", ["QA-4"], [commits[1]]))
 
