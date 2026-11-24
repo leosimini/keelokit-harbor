@@ -68,6 +68,10 @@ The harbormaster is the one that asks for sessions: `python3 "$H" --session <id>
 [--convoy N] [--model M] [--account A]` (`--role skipper` or `dispatcher` too). A dispatcher takes it, starts the
 session and records it; `wanted list` shows where each request is, `wanted drop <id>` gives one up. A request starts
 only a role and story the project knows, on an allowed model, within the account's cap. `/harbor:dispatch` is the
-other side.
+other side. One vessel request per story at a time: `STORY_REQUESTED` names the one already open or
+taken (drop it first). The round repairs a story two active workers hold (a clone on a Harbor older than 0.6.0 can
+leave one): `double hold: …` names them and the one kept; tell the released one's owner. A started
+request nobody claimed holds its story: the round drops it when its taker is gone and names it once it is older
+than the watch's expiry; `wanted drop <id>` (or `story release <ID>`) lifts it earlier.
 
 Report in ten lines at most, as control prints them, plus what needs the gatekeeper.

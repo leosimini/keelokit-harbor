@@ -75,6 +75,8 @@ Harbor depends on Keelokit and copies none of its code. It uses these as interfa
 | the `Story:` trailer | which story a vessel carries, read from its commits (without the ledger, below) |
 | `ledger.py --json` answering `"schema": 1` *(6)* | the switch for every phase-6 behaviour; any other answer, a timeout, an exit other than 0 or 1, or no `ledger.py`: Harbor behaves as 0.5 |
 | `ledger.py attribution <seal_base>..<head> --json` *(6)* | `convoy add`: `NO_STORY` for a vessel's unattributed commit, and the vessel's story. The contract is in "Phase 6: Keelokit's ledger"; Keelokit builds it in LEDGER-013 (in its docs/ledger.md, not in its 0.16.0 code): until it answers, `convoy add` notes it and reads the `Story:` trailers |
+| `ledger.py show <ID> --json`, else the story's `state` in `ledger.py --json` *(6)* | `story take`, `worker register --story`, `wanted take`: `STORY_ON_TRUNK` from `on-trunk` on (HRB-2). Keelokit 0.16.0 has `show <ID> [--full]` only, so the facts of `--json` answer; a ledger that can't say is a note, never a refusal |
+| `ledger.py take <ID>` *(6)* | the first line of a vessel's prompt (`wanted prompt`); with LEDGER-013 it calls `harbor.py story take` |
 | the `Convoy: <n>` trailer *(6)* | ends each vessel's merge into `convoy/<n>`; the ledger reads from it which convoy sailed a commit (Keelokit 0.15 already reads it) |
 
 Harbor needs **Keelokit 0.12.0** or later: the landing policy, shared seals, the pre-push that lets the
@@ -273,6 +275,8 @@ ended = "2026-11-01T16:48:00Z"
 spawned_by = "acct1/mbp/session_01Sk"   # the session that launched this one, and owns its result
 title = "vessel C8 · acme-a · Acme · wave 1 · STORY-001"   # (3) the session title (see "Names")
 canonical_branch = "carga-001"   # (3) the story id in lower case; `branch` is the one the session really uses
+story = "CARGA-001"              # (6, HRB-2) optional: the story it took (`story take`, `worker register --story`).
+                                 # Held while state = "active"; kept after it ends or is lost, as the record, holding nothing
 children_at_end = ["acct1/mbp/session_01Ve"]   # sessions it launched that were still running when it ended
 
 [handover]                       # on a budget cut or any early end (R22)
@@ -750,6 +754,8 @@ Read-only: fetches and prints `LOGBOOK.md`, or `convoys/<n>.md`.
 ### `harbor.py` without a slash command
 
 `account set|pause|resume`, `worker register|end`, `seal`, `import-board` are run by the skills.
+*(6, HRB-2)* `story take|release ID [--worker W]` is run by a vessel (with Keelokit's LEDGER-013, by
+`ledger.py take`), and by the harbormaster to release a stuck lock ("HRB-2: taking a story is a lock in the logbook").
 `sync --hook` is the entry of every Claude Code hook (§"Fresh reads"); `check --hook` is its SessionStart
 part, never fails the session and prints one to three lines.
 
@@ -1052,7 +1058,8 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   from this checkout, answers a JSON object whose `schema` is the integer 1 (exit 0, or 1: the ledger found
   differences). No `ledger.py`, another schema (or `true`), text that is not UTF-8 JSON, any other exit, or no
   answer in `LEDGER_SECONDS` (60; `HARBOR_LEDGER_SECONDS` overrides it): Harbor behaves exactly as 0.5. It is
-  asked once per command, and only by `convoy add` and `convoy assemble`. Keelokit 0.15.0 already answers
+  asked once per command, and only by `convoy add`, `convoy assemble`, *(HRB-2)* `story take`, `worker register
+  --story`, `wanted take` and `wanted prompt` (a vessel's). Keelokit 0.15.0 already answers
   schema 1, so it gets the trailer too, which its ledger already reads.
 - **The ledger is project code**, like `vessel_verify`: run with `sys.executable`, from the checkout, stdin
   closed, with the timeout; Harbor copies none of its code.
@@ -1098,7 +1105,76 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   it brings is (`via` `own` when it carries a trailer itself). `stories` is the union of `story` and `part_of` over
   the range, sorted. Harbor reads `commits` (`sha`, `subject`, `story`, `part_of`, `attributed`) and checks merges
   itself with git; it ignores other keys, and matches a `sha` by prefix.
-- **The logbook keeps `schema = 1`.** HRB-1 adds no key: a vessel's `story` is the key it always had.
+- **The logbook keeps `schema = 1`.** HRB-1 adds no key: a vessel's `story` is the key it always had. HRB-2 adds
+  one optional key, `story` on a worker, omitted when absent.
+
+### HRB-2: taking a story is a lock in the logbook
+
+- **`harbor.py story take ID [--worker W]`** writes `story = "ID"` (and `canonical_branch`, the id in lower case) on
+  worker `W` (default: the calling session) in one logbook transaction. A worker **holds** a story while its
+  `state` is `active` and its `story` names it; ids compare without case, and an id is one plain word
+  (letters, digits, `. _ -`; anything else is `USAGE`, exit 2). Refused:
+  - `STORY_TAKEN: <ID> is held by <worker>` when another active worker holds it, or a vessel request holds it
+    (below). This is the logbook's lock: it never depends on the ledger, in any project;
+  - `STORY_ON_TRUNK: <ID> is <state>` when the ledger says it is `on-trunk`, `in-version`, `in-staging` or
+    `in-production`. Harbor asks `ledger.py show <ID> --json` first and reads `state` from its answer (an object
+    with schema 1, the state at the top or under `story`); Keelokit 0.16.0 has only `show <ID> [--full]`, so
+    Harbor falls back to the story's row in `ledger.py --json` (the facts the feature detection already read).
+    A ledger that can't say (no row for the id, no state) is one line, `harbor: ledger: … not checked against
+    the trunk`, never a refusal; without the ledger nothing is asked;
+  - `NOT_REGISTERED` when `W` is a worker that ended or is lost, or `--worker` names no worker;
+  - `NOT_YOURS` when the caller doesn't answer for `W`: only `W` itself, a session of its account and host, the
+    session that launched it (`spawned_by`) or the harbormaster.
+  Taking what `W` already holds changes nothing (no commit), even beside a duplicate holder an older Harbor wrote. Taking another story replaces the one it held
+  (`was X: released`). A session not registered yet is checked (both refusals) and nothing is written: its
+  `worker register --story ID` is the take.
+- **Two takes at once.** Both build a commit on the same tip; one push wins; the other is rejected, fetches the
+  new tip and replays its change, whose precondition now finds the story held: `STORY_TAKEN`. First commit wins,
+  as the watch and `wanted take`. A take that dies before its push leaves nothing; one that dies after holds the
+  story until its worker ends or the harbormaster's control marks it lost.
+- **`harbor.py story release ID [--worker W]`** clears the story on its holder `W`. A worker that doesn't hold it
+  is refused with `NOT_HOLDER` naming the holder, so a worker that was lost or ended and comes back can never
+  clear the lock of whoever took the story since; releasing a story nobody holds is a no-op (exit 0). The
+  harbormaster releases a stuck lock with `--worker <holder>`.
+- **A worker that ends or is marked lost releases its story**: it is no longer active, so it holds nothing (the
+  round's `lost:` line names the story). Its `story` stays in its file as the record of what it worked on; a
+  worker that registers again without `--story` after it ended or was lost starts with no story.
+- **`worker register --story ID`** takes the story at registration, with the same refusals, in the same
+  transaction as the registration. `STORY_TAKEN` runs in every project, with or without a ledger, and whatever
+  the ledger answers on that call; only `STORY_ON_TRUNK` asks the ledger. The prompt's first line needs the ledger.
+- **A vessel request holds its story** while it is `taken` or `started` by a dispatcher that is still active and
+  no session has claimed it, for at most `watch_expiry_minutes` after its take (`wanted started` never extends it):
+  a session that never registers is as gone as a lost worker. `wanted take` of another request for that story, and a take or a
+  `worker register --story` by any worker, get `STORY_TAKEN` naming the request, other children of the same
+  dispatcher included.
+- **The claim ties a request to one session.** The vessel's prompt registers with `worker register --story <ID>
+  --spawned-by <dispatcher> --request <id>`. In the same transaction the registration records `claimed_by = <worker
+  id>` on the request, and from then on the request holds nothing: the claimant's own hold is the lock (so it ends
+  when the claimant releases the story, ends or is lost, with no clock compared). Refused: `REQUEST_NOT_YOURS` when
+  the request is not a taken or started vessel request for that story whose taker is the declared `--spawned-by`;
+  `REQUEST_CLAIMED`, naming the claimant, when another active worker claimed it first (first commit wins). A session
+  not registered yet (`ledger.py take`, the prompt's first line) is checked against workers only; its register
+  claims.
+- **An unclaimed request can always be lifted**, before the expiry too: `wanted drop` takes a started request
+  nobody claimed (no `claimed_by`, or its claimant ended or is lost), from its taker or the harbormaster; a claimed
+  request whose claimant is active stays (its hold is the claimant's). `story release ID`, when only a request
+  holds the story, drops that request for its taker or the harbormaster and says so; anyone else gets
+  `NOT_HOLDER` naming the request and its `wanted drop`. The harbormaster's round drops a started, unclaimed
+  request whose taker is no longer active, and names each one older than the watch's expiry with its
+  `wanted drop`. Mixed versions are unsupported (an old vessel doesn't know `--request`; an old dispatcher's prompt
+  lacks it, so the new vessel is refused by its own request), and they end in this same state, lifted the same ways.
+- **Identity is self-declared**, as everywhere in Harbor: account and host come from the clone's local file and
+  `--spawned-by` is the session's word. The claim stops an accidental steal and a double holder; a session that lies
+  can still claim first, but then exactly one holder exists and the real spawn gets `REQUEST_CLAIMED` naming it, in
+  the logbook for anyone to see. `wanted add --role vessel` refuses a second request for a story that already has one open or holding it:
+  `STORY_REQUESTED`, naming it (drop it first).
+- **Every clone must run Harbor 0.6.0.** The logbook stays schema 1, so an older Harbor can't tell the lock is
+  there: its `worker register --story` doesn't check it, and its re-registration of a lost worker keeps the old
+  story. The harbormaster's round repairs that: for each story two or more active workers hold, it keeps the one
+  whose hold began first (the oldest commit of the unbroken run in which its file says active and that story) and
+  releases it from the others, one line per story naming them all.
+- **`LOGBOOK.md`** shows each active worker's story in the Workers table.
+- **Not locked:** a story that reaches the trunk between the check and the take is HRB-3's (`DONE_TWICE` at the ok).
 
 ## Phase 5: the fleet layer without Keelokit *(0.5.0)*
 
@@ -1106,7 +1182,7 @@ Harbor adapts to the project it finds. Up to 0.4 every command stopped unless th
 `.keelokit/state.toml` with `[landing] policy = "convoy"`, so even a message between two accounts needed
 Keelokit. 0.5 splits Harbor in two layers.
 
-- **The fleet layer runs in any git repository with a remote:** `init`, `account`, `worker register|end`,
+- **The fleet layer runs in any git repository with a remote:** `init`, `account`, `worker register|end`, `story take|release` *(6)*,
   `msg *`, `wanted *`, `title`, `doctor`, `models`, `log`, `harbormaster takeover|control`, the hooks (the
   logbook delta and the note about what the trunk changed) and `push-guard`.
 - **The convoy layer needs Keelokit, as before:** `convoy *`, `seal`, `import-board`. Without Keelokit they
@@ -1418,6 +1494,7 @@ taken_by = ""                        # the dispatcher's worker id; the first com
 taken_at = ""
 session = ""                         # the session it started
 started_at = ""
+claimed_by = "acct1/mbp/session_01Ve"  # (6, HRB-2) optional: the vessel session that claimed it (register --request)
 ```
 
 - `wanted add --role R [--story ID] [--convoy N] [--model M] [--account A] [--note TEXT]` — only the watch
@@ -1425,12 +1502,19 @@ started_at = ""
   must be in `[harbor] allowed_models` (default `haiku`, `sonnet`, `opus`).
 - `wanted take ID` — a `dispatcher` worker of an eligible account takes an open request, if the account is
   not paused and its active workers are under `max_sessions`. Two dispatchers can race: the replay checks
-  the request is still open, so only one wins (`WANTED_TAKEN`).
+  the request is still open, so only one wins (`WANTED_TAKEN`). *(6, HRB-2)* With Keelokit's ledger, a vessel
+  request is refused with `STORY_ON_TRUNK` when the ledger says its story is on the trunk or later, and with
+  `STORY_TAKEN` (naming the holder) when an active worker or another request holds it, with or without the ledger;
+  the request stays open. `wanted add` refuses a second vessel request for one story (`STORY_REQUESTED`).
 - `wanted prompt ID` — prints the prompt the dispatcher sends to `create_session`. Harbor builds it from
   the request's fields only (role, story, convoy, title, model, the dispatcher's worker id for
   `--spawned-by`), never from free text: a request can only start what the project already describes.
+  *(6, HRB-2)* With Keelokit's ledger, a vessel's prompt starts with the line
+  `python3 .keelokit/bin/ledger.py take <ID>` (with LEDGER-013 it calls `harbor.py story take`); its
+  `worker register --story <ID>` is the take in the logbook.
 - `wanted started ID --session S` — the taker records the session it started.
-- `wanted drop ID` — the requester or the watch holder gives it up.
+- `wanted drop ID` — the requester or the watch holder gives it up. *(6, HRB-2)* A started request nobody claimed
+  is dropped by its taker or the harbormaster.
 - `wanted list [--all]` — open and taken by default.
 
 ### The dispatcher: one per account

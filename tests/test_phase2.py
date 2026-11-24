@@ -226,7 +226,7 @@ class TestTitles(Phase2):
         self.assertEqual((w["title"], w["story"], w["canonical_branch"]), ("vessel C1 · acct1 · Demo · wave 2 · QA-1", "QA-1", "qa-1"))
         view = self.repo.log_files()["harbor/LOGBOOK.md"]
         self.assertIn("| skipper C1 · acct1 · Demo | acct1/mbp/sk |", view)
-        self.assertIn("| ↳ vessel C1 · acct1 · Demo · wave 2 · QA-1 | acct1/mbp/v1 | vessel | claude/keen-x (qa-1) |", view)
+        self.assertIn("| ↳ vessel C1 · acct1 · Demo · wave 2 · QA-1 | acct1/mbp/v1 | vessel | QA-1 | claude/keen-x (qa-1) |", view)
 
     def test_the_title_before_the_session_exists(self):
         self.assertEqual(ok(harbor(self.a, "title", "--role", "vessel", "--convoy", "3", "--story", "QA-3")).strip(),

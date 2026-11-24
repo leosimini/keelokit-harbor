@@ -16,7 +16,10 @@
 #     convoy/<n> is the convoy's verify, so `convoy verify` runs nothing;
 #   - with Keelokit's ledger (`ledger.py --json` answers schema 1, 0.15.0 on): each vessel's merge into convoy/<n>
 #     ends with `Convoy: <n>` and reaches main; `convoy add` takes the vessel's story from `ledger.py attribution`,
-#     or, with a Keelokit that doesn't answer it yet (0.16.0), says so and reads the Story: trailers.
+#     or, with a Keelokit that doesn't answer it yet (0.16.0), says so and reads the Story: trailers;
+#   - taking a story is a lock in the logbook (HRB-2): two machines take one story, the second gets STORY_TAKEN
+#     with the holder; once the story is on main, Keelokit's real ledger makes a take STORY_ON_TRUNK (0.16.0 has
+#     no `show <ID> --json`: the state comes from `ledger.py --json`).
 # In a container whose Playwright browsers don't match the template's, point PLAYWRIGHT_BROWSERS_PATH
 # at a folder with the right version name linked to the browser you have.
 set -euo pipefail
@@ -158,6 +161,16 @@ git -C "$b" checkout -q -B claude/demo-1 origin/claude/demo-1
 out=$(cd "$b" && timeout 300 pnpm verify --use-seal 2>&1) || { echo "$out" | tail -20; fail "the shared seal was not accepted on the other clone"; }
 echo "$out" | grep "shared seal" || { echo "$out" | tail -20; fail "the other clone ran the verify instead of using the shared seal"; }
 
+step "Taking a story is a lock in the logbook (HRB-2)"
+H va worker register --role vessel --model sonnet
+(cd "$b" && H vb worker register --role vessel --model sonnet)
+H va story take DEMO-001
+out=$(cd "$b" && H vb story take DEMO-001 2>&1) && fail "a second machine took DEMO-001 while va held it: $out"
+echo "$out"
+grep -q "STORY_TAKEN: DEMO-001 is held by acct1/mbp/va" <<<"$out" || fail "the refusal doesn't name the holder: $out"
+(cd "$b" && H vb worker end)
+H va worker end
+
 step "The convoy: new, add, assemble, ok, one verify, sail"
 H s1 convoy new --title "Harbor on Keelokit $tag" --expect DEMO-001 DEMO-002
 ledger=$(cd "$a" && timeout 120 python3 .keelokit/bin/ledger.py --json 2>/dev/null \
@@ -205,6 +218,18 @@ for m in $merges; do
   git -C "$work/remote.git" merge-base --is-ancestor "$m" main || fail "the convoy's merge ${m:0:9} is not on main"
 done
 seal_of "$a" "$head" | grep -q '^level = "changed"' || fail "the convoy's seal has no level"
+
+step "A story on the trunk can't be taken (HRB-2)"
+git -C "$a" fetch -q origin main
+H vc worker register --role vessel --model sonnet
+if [ -n "$ledger" ]; then
+  out=$(H vc story take DEMO-001 2>&1) && fail "DEMO-001 is on main and was taken: $out"
+  echo "$out"
+  grep -q "STORY_ON_TRUNK: DEMO-001 is on-trunk" <<<"$out" || fail "not STORY_ON_TRUNK from the ledger: $out"
+else
+  H vc story take DEMO-001
+fi
+H vc worker end
 
 step "A logbook write from unverified work runs no verify"
 git -C "$a" checkout -q -b scratch

@@ -36,6 +36,12 @@ prompt says who:
 `Read .keelokit/harness/agent-brief.md. Register with harbor.py worker register --role vessel
 --convoy <n> --story <ID> --spawned-by <your worker id>, then /keelokit:build-story <ID>. You are a
 vessel of convoy <n>: land on your pushed branch, never on main, then deliver as /harbor:convoy says.`
+Taking a story is a lock in the logbook: `worker register --story <ID>` (and `python3 "$H" --session <id> story
+take <ID>`) refuses with `STORY_TAKEN` when another active worker, or a vessel request no session has claimed yet,
+holds it (the line names the holder; two takes at once, the first commit wins) and, with Keelokit's ledger, with `STORY_ON_TRUNK` when it is already
+on the trunk. Either way, don't launch or build it: tell the harbormaster. A vessel that ends (`worker end`) or
+is marked lost releases its story; `story release <ID>` gives it up earlier (only its holder, or the harbormaster
+with `--worker <holder>`).
 `convoy new` prints your own title as skipper (`skipper C8 · acme-a · Acme`); set it on this session
 with `set_session_title` right away. Before this session ends,
 every session it launched is delivered, ended or handed over: `worker end` lists the ones still
