@@ -992,8 +992,9 @@ class TestHRB2F2Requests(Forge, Phase6Lock):
         self.assertIn("not registered", out)
         ok(harbor(self.a, "wanted", "started", "w-0001", "--session", "spawn", session="d1"))
         ok(harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-1", "--spawned-by", "acct1/mbp/d1",
-                  session="spawn"))
+                  "--request", "w-0001", session="spawn"))
         self.assertEqual(self.holders("QA-1"), ["acct1/mbp/spawn"])
+        self.assertEqual(self.repo.log_toml("harbor/wanted/w-0001.toml")["claimed_by"], "acct1/mbp/spawn")
         ok(harbor(self.a, "worker", "end", session="spawn"))
         ok(self.take(self.b, "other", "QA-1"))  # its session ended: the request holds nothing any more
 
@@ -1049,3 +1050,88 @@ class TestHRB2F3Repair(Forge, Phase6Lock):
         self.forge({"harbor/workers/acct1/linux/vb.toml": lambda w: {**w, "story": "QA-1"}})
         out = ok(self.take(self.a, "va", "QA-1"))
         self.assertIn("already yours", out)
+
+
+class TestHRB2N(Phase6Lock):
+    """Third breaker round: a request belongs to exactly one session, the one that claims it with
+    `worker register --request` (its prompt's register line). No other child of the dispatcher, and no clock."""
+
+    def setUp(self):
+        super().setUp()
+        for c in (self.a, self.b):
+            (c / ".keelokit/bin/status.py").write_text(STATUS)
+        ok(harbor(self.a, "account", "set", "acct1", "--max-sessions", "9"))
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1"))
+
+    def request(self, take_env: dict | None = None):
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1", env=take_env))
+
+    def spawn(self, clone, session: str, *extra: str, env: dict | None = None):
+        return harbor(clone, "worker", "register", "--role", "vessel", "--story", "QA-1", "--spawned-by", "acct1/mbp/d1",
+                      *extra, session=session, env=env)
+
+    def test_N1_an_earlier_child_of_the_dispatcher_cannot_take_a_requested_story(self):
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-3", "--spawned-by", "acct1/mbp/d1",
+                  session="v1"))
+        self.request()
+        res = self.take(self.a, "v1", "QA-1")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("STORY_TAKEN", res.stderr)
+        self.assertIn("w-0001", res.stderr)
+        ok(self.spawn(self.a, "spawn", "--request", "w-0001"))
+        self.assertEqual(self.holders("QA-1"), ["acct1/mbp/spawn"])
+
+    def test_N1_a_register_without_the_claim_gets_STORY_TAKEN(self):
+        self.request()
+        res = self.spawn(self.b, "stranger")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("STORY_TAKEN", res.stderr)
+        self.assertEqual(self.holders("QA-1"), [])
+
+    def test_N1_a_claim_from_a_session_the_taker_did_not_launch_is_REQUEST_NOT_YOURS(self):
+        self.request()
+        res = harbor(self.b, "worker", "register", "--role", "vessel", "--story", "QA-1", "--spawned-by", "acct1/mbp/s1",
+                     "--request", "w-0001", session="stranger")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("REQUEST_NOT_YOURS", res.stderr)
+        res = harbor(self.b, "worker", "register", "--role", "vessel", "--story", "QA-1", "--request", "w-0001",
+                     session="stranger")
+        self.assertIn("REQUEST_NOT_YOURS", res.stderr)
+        self.assertNotIn("claimed_by", self.repo.log_toml("harbor/wanted/w-0001.toml"))
+
+    def test_N1_the_first_claim_wins_and_the_next_gets_REQUEST_CLAIMED(self):
+        self.request()
+        ok(self.spawn(self.b, "stranger", "--request", "w-0001"))  # declares the dispatcher as its launcher: first claim
+        res = self.spawn(self.a, "spawn", "--request", "w-0001")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("REQUEST_CLAIMED", res.stderr)
+        self.assertIn("acct1/linux/stranger", res.stderr)
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/stranger"])
+
+    def test_N1_a_claim_for_another_story_is_refused(self):
+        self.request()
+        res = harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-3", "--spawned-by", "acct1/mbp/d1",
+                     "--request", "w-0001", session="spawn")
+        self.assertIn("REQUEST_NOT_YOURS", res.stderr)
+
+    def test_N2_a_claimed_request_holds_nothing_whatever_the_dispatchers_clock(self):
+        self.request(take_env=later(30))  # the dispatcher's clock runs 30 minutes ahead
+        ok(self.spawn(self.b, "spawn", "--request", "w-0001", env=later(1)))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="x", env=later(2)))
+        self.assertIn("STORY_TAKEN", self.take(self.b, "x", "QA-1", env=later(2)).stderr, "the claimant holds it")
+        ok(harbor(self.b, "worker", "end", session="spawn", env=later(3)))
+        ok(self.take(self.b, "x", "QA-1", env=later(4)))
+
+    def test_N2_a_release_before_started_frees_the_story(self):
+        self.request()
+        ok(self.spawn(self.a, "spawn", "--request", "w-0001"))
+        ok(harbor(self.a, "story", "release", "QA-1", session="spawn"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="x"))
+        ok(self.take(self.b, "x", "QA-1"))
+
+    def test_N_the_prompt_registers_with_the_claim(self):
+        self.request()
+        prompt = ok(harbor(self.a, "wanted", "prompt", "w-0001", session="d1"))
+        self.assertIn("--story QA-1", prompt)
+        self.assertIn("--request w-0001", prompt)
