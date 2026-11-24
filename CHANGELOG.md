@@ -27,7 +27,10 @@
   `--worker`. A worker that ends or is marked lost holds nothing (the round's `lost:` line names the story it
   released), and registering again without `--story` doesn't take it back. `worker register --story` takes the story with
   the same refusals; `STORY_TAKEN` never depends on the ledger (only `STORY_ON_TRUNK` asks it). A taken vessel
-  request holds its story until its session registers, its dispatcher ends, or the watch's expiry passes: `wanted take` refuses a vessel
+  request holds its story until the session started for it claims it (`worker register --request <id>`, which the
+  vessel prompt passes; it records `claimed_by` on the request, and the claimant's hold is the lock from then on:
+  `REQUEST_NOT_YOURS` for a session its taker didn't launch, `REQUEST_CLAIMED` after the first claim), its
+  dispatcher ends, or the watch's expiry passes; no other child of the dispatcher is exempt: `wanted take` refuses a vessel
   request whose story is held or on the trunk, and `wanted add` refuses a second request for one story
   (`STORY_REQUESTED`). With the ledger, a vessel's prompt starts with `python3 .keelokit/bin/ledger.py take <ID>`.
   `LOGBOOK.md` shows each worker's story. **Every clone of a project must run Harbor 0.6.0 for the lock to hold**

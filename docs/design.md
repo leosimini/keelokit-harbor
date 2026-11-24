@@ -1143,12 +1143,22 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   transaction as the registration. `STORY_TAKEN` runs in every project, with or without a ledger, and whatever
   the ledger answers on that call; only `STORY_ON_TRUNK` asks the ledger. The prompt's first line needs the ledger.
 - **A vessel request holds its story** while it is `taken` or `started` by a dispatcher that is still active and
-  the session it spawned hasn't registered yet (no worker with its session, nor one launched by that dispatcher
-  holding the story since the take), for at most `watch_expiry_minutes` after its take (or its start): a session
-  that never registers is as gone as a lost worker. `wanted take` of another request for that story, and a take by any other
-  worker, get `STORY_TAKEN` naming the request. The spawned session itself is exempt (`--spawned-by` the taker):
-  its `worker register --story` takes over the hold. A session not registered yet is checked against workers
-  only. `wanted add --role vessel` refuses a second request for a story that already has one open or holding it:
+  no session has claimed it, for at most `watch_expiry_minutes` after its take (or its start): a session that
+  never registers is as gone as a lost worker. `wanted take` of another request for that story, and a take or a
+  `worker register --story` by any worker, get `STORY_TAKEN` naming the request, other children of the same
+  dispatcher included.
+- **The claim ties a request to one session.** The vessel's prompt registers with `worker register --story <ID>
+  --spawned-by <dispatcher> --request <id>`. In the same transaction the registration records `claimed_by = <worker
+  id>` on the request, and from then on the request holds nothing: the claimant's own hold is the lock (so it ends
+  when the claimant releases the story, ends or is lost, with no clock compared). Refused: `REQUEST_NOT_YOURS` when
+  the request is not a taken or started vessel request for that story whose taker is the declared `--spawned-by`;
+  `REQUEST_CLAIMED`, naming the claimant, when another active worker claimed it first (first commit wins). A session
+  not registered yet (`ledger.py take`, the prompt's first line) is checked against workers only; its register
+  claims.
+- **Identity is self-declared**, as everywhere in Harbor: account and host come from the clone's local file and
+  `--spawned-by` is the session's word. The claim stops an accidental steal and a double holder; a session that lies
+  can still claim first, but then exactly one holder exists and the real spawn gets `REQUEST_CLAIMED` naming it, in
+  the logbook for anyone to see. `wanted add --role vessel` refuses a second request for a story that already has one open or holding it:
   `STORY_REQUESTED`, naming it (drop it first).
 - **Every clone must run Harbor 0.6.0.** The logbook stays schema 1, so an older Harbor can't tell the lock is
   there: its `worker register --story` doesn't check it, and its re-registration of a lost worker keeps the old
@@ -1476,6 +1486,7 @@ taken_by = ""                        # the dispatcher's worker id; the first com
 taken_at = ""
 session = ""                         # the session it started
 started_at = ""
+claimed_by = "acct1/mbp/session_01Ve"  # (6, HRB-2) optional: the vessel session that claimed it (register --request)
 ```
 
 - `wanted add --role R [--story ID] [--convoy N] [--model M] [--account A] [--note TEXT]` — only the watch
