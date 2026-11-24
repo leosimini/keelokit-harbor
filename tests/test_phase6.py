@@ -1135,3 +1135,92 @@ class TestHRB2N(Phase6Lock):
         prompt = ok(harbor(self.a, "wanted", "prompt", "w-0001", session="d1"))
         self.assertIn("--story QA-1", prompt)
         self.assertIn("--request w-0001", prompt)
+
+
+class TestHRB2A2(Phase6Lock):
+    """Fourth breaker round: a started request whose session never claims it can always be lifted, and
+    `wanted started` never extends a lock. Mixed versions are unsupported, but they reduce to this same state: m1, an
+    old vessel that never registers (it doesn't know --request); m2, an old dispatcher's prompt without --request, so
+    the new vessel is refused by its own request."""
+
+    def setUp(self):
+        super().setUp()
+        for c in (self.a, self.b):
+            (c / ".keelokit/bin/status.py").write_text(STATUS)
+        ok(harbor(self.a, "account", "set", "acct1", "--max-sessions", "9"))
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1"))
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1"))
+        ok(harbor(self.a, "wanted", "started", "w-0001", "--session", "died", session="d1"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="x"))
+
+    def state(self) -> str:
+        return self.repo.log_toml("harbor/wanted/w-0001.toml")["state"]
+
+    def test_A2_m1_the_taker_drops_a_started_unclaimed_request(self):
+        self.assertIn("STORY_TAKEN", self.take(self.b, "x", "QA-1").stderr)
+        out = ok(harbor(self.a, "wanted", "drop", "w-0001", session="d1"))
+        self.assertIn("unclaimed", out)
+        self.assertEqual(self.state(), "dropped")
+        ok(self.take(self.b, "x", "QA-1"))
+
+    def test_A2_m2_the_harbormaster_drops_it_and_the_refused_vessel_registers(self):
+        res = harbor(self.b, "worker", "register", "--role", "vessel", "--story", "QA-1", "--spawned-by",
+                     "acct1/mbp/d1", session="died")  # an old dispatcher's prompt: no --request
+        self.assertIn("STORY_TAKEN", res.stderr)
+        ok(harbor(self.a, "wanted", "drop", "w-0001"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", "--story", "QA-1", "--spawned-by", "acct1/mbp/d1",
+                  session="died"))
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/died"])
+
+    def test_A2_nobody_else_drops_it_and_a_claimed_request_stays(self):
+        res = harbor(self.b, "wanted", "drop", "w-0001", session="x")
+        self.assertIn("NOT_YOURS", res.stderr)
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-1", "--spawned-by", "acct1/mbp/d1",
+                  "--request", "w-0001", session="died"))
+        res = harbor(self.a, "wanted", "drop", "w-0001")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("WRONG_STATE", res.stderr)
+        self.assertIn("claimed", res.stderr)
+        ok(harbor(self.a, "worker", "end", session="died"))
+        ok(harbor(self.a, "wanted", "drop", "w-0001"))  # its claimant ended: unclaimed again
+
+    def test_A2_story_release_by_the_harbormaster_drops_the_holding_request(self):
+        out = ok(harbor(self.a, "story", "release", "QA-1"))
+        self.assertNotIn("nobody holds", out)
+        self.assertIn("w-0001", out)
+        self.assertEqual(self.state(), "dropped")
+        ok(self.take(self.b, "x", "QA-1"))
+
+    def test_A2_story_release_by_the_taker_drops_it_too(self):
+        ok(harbor(self.a, "story", "release", "QA-1", session="d1"))
+        self.assertEqual(self.state(), "dropped")
+
+    def test_A2_story_release_by_anyone_else_names_the_request_and_the_drop(self):
+        res = harbor(self.b, "story", "release", "QA-1", session="x")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("NOT_HOLDER", res.stderr)
+        self.assertIn("w-0001", res.stderr)
+        self.assertIn("wanted drop w-0001", res.stderr)
+        self.assertEqual(self.state(), "started")
+
+    def test_A2_the_round_drops_a_started_unclaimed_request_whose_taker_is_gone(self):
+        ok(harbor(self.a, "worker", "end", session="d1"))
+        out = ok(harbor(self.a, "harbormaster", "control"))
+        self.assertIn("w-0001", out)
+        self.assertEqual(self.state(), "dropped")
+
+    def test_A2_the_round_names_a_started_unclaimed_request_older_than_the_expiry(self):
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1", env=later(170)))  # alive
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="x", env=later(170)))
+        out = ok(harbor(self.a, "harbormaster", "control", env=later(181)))
+        self.assertIn("w-0001", out)
+        self.assertIn("wanted drop w-0001", out)
+
+    def test_A2_wanted_started_does_not_extend_the_hold(self):
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-3"))
+        ok(harbor(self.a, "wanted", "take", "w-0002", session="d1"))
+        ok(harbor(self.a, "wanted", "started", "w-0002", "--session", "late", session="d1", env=later(100)))
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1", env=later(170)))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="x", env=later(170)))
+        ok(self.take(self.b, "x", "QA-3", env=later(181)))
