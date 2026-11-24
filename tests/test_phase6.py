@@ -4,15 +4,24 @@ the trailer `Convoy: <n>`; `convoy add` asks `ledger.py attribution <seal_base>.
 with an unattributed non-merge commit (`NO_STORY`); the vessel's story comes from the ledger. Without that ledger,
 Harbor behaves as 0.5. A stand-in for Keelokit's ledger.py reads the trailers the way the real one does.
 Also the HRB-7 nit: a vessel carrying several stories delivers each of them.
+HRB-2: taking a story is a lock in the logbook: `story take|release`, `worker register --story`, `wanted take`'s
+refusals and the vessel prompt that starts with `ledger.py take`.
 Every git subprocess here runs with no GIT_* variable from the caller (a hook or a worktree exports GIT_DIR).
 Run: python3 -m unittest discover -s tests"""
+import contextlib
+import datetime as dt
+import io
 import json
 import os
+import subprocess
+import sys
+import threading
+import tomllib
 import unittest
 from unittest import mock
 
-from test_harbor import harbor, ok, sh
-from test_phase2 import Phase2
+from test_harbor import GIT_ENV, HARBOR, NOW, harbor, load_module, ok, sh
+from test_phase2 import STATUS, Phase2
 
 # Keelokit's ledger.py, as far as Harbor sees it.
 # `--json`: HARBOR_FAKE_LEDGER = the JSON value of "schema" (default 1), or bad | sleep | exit2 | binary (not UTF-8).
@@ -22,6 +31,9 @@ from test_phase2 import Phase2
 #   its own trailer (the worst a ledger may say: Harbor ignores merges itself). HARBOR_FAKE_ATTRIBUTION = usage
 #   (Keelokit 0.16.0: no such command, usage and exit 2) | exit3 (history incomplete) | bad | sleep
 #   | no-attributed (`attributed` is not a boolean) | short (abbreviated shas).
+#   HARBOR_FAKE_STORIES = {"ID": "state", ...}: the stories `--json` lists (default none).
+# `show ID --json`: Keelokit 0.16.0 has no such command (usage, exit 2); HARBOR_FAKE_SHOW = {"ID": "state", ...}
+#   makes it answer {"schema": 1, "id", "state"} (exit 1 for an id it doesn't list).
 # Every call is logged to HARBOR_FAKE_LEDGER_LOG.
 FAKE_LEDGER = """\
 import json, os, subprocess, sys, time
@@ -43,8 +55,16 @@ if sys.argv[1:] == ["--json"]:
     if mode == "binary":
         sys.stdout.buffer.write(b'{"schema": 1, "x": "' + bytes([255, 254]) + b'"}')
         sys.exit(0)
-    print(json.dumps({"schema": json.loads(mode), "trunk": "main", "stories": [], "diffs": [{"level": "warning"}]}))
+    stories = [{"id": k, "state": v} for k, v in json.loads(os.environ.get("HARBOR_FAKE_STORIES") or "{}").items()]
+    print(json.dumps({"schema": json.loads(mode), "trunk": "main", "stories": stories, "diffs": [{"level": "warning"}]}))
     sys.exit(1)
+if sys.argv[1:2] == ["show"] and len(sys.argv) == 4 and sys.argv[3] == "--json" and os.environ.get("HARBOR_FAKE_SHOW"):
+    states = json.loads(os.environ["HARBOR_FAKE_SHOW"])
+    if sys.argv[2] not in states:
+        print("Keelokit: no such story", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({"schema": 1, "id": sys.argv[2], "state": states[sys.argv[2]]}))
+    sys.exit(0)
 if sys.argv[1:2] == ["attribution"] and len(sys.argv) == 4 and sys.argv[3] == "--json":
     mode = os.environ.get("HARBOR_FAKE_ATTRIBUTION", "")
     if mode == "usage":
@@ -486,3 +506,367 @@ class TestHRB7MultiStory(Phase2):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- HRB-2: taking a story is a lock in the logbook -------------------------------------------------
+
+def later(minutes: float) -> dict:
+    t = dt.datetime.strptime(NOW, "%Y-%m-%dT%H:%M:%SZ") + dt.timedelta(minutes=minutes)
+    return {"HARBOR_NOW": t.strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+
+class Phase6Lock(Phase6):
+    """Clone `a` (acct1/mbp: s1 holds the watch) and clone `b` (acct1/linux), both with the ledger."""
+
+    def setUp(self):
+        super().setUp()
+        self.b = self.repo.clone("b", host="linux")
+
+    def worker(self, wid: str) -> dict:
+        return self.repo.log_toml(f"harbor/workers/{wid}.toml")
+
+    def holders(self, story: str) -> list[str]:
+        out = []
+        for path, text in self.repo.log_files().items():
+            if path.startswith("harbor/workers/") and path.endswith(".toml"):
+                w = tomllib.loads(text)
+                if w.get("state") == "active" and w.get("story") == story:
+                    out.append(w["id"])
+        return out
+
+    def log_tip(self) -> str:
+        return sh(self.repo.remote, "git", "rev-parse", "harbor/log")
+
+    def take(self, clone, session: str, story: str, *extra: str, env: dict | None = None):
+        return harbor(clone, "story", "take", story, *extra, session=session, env=env)
+
+    def in_process(self, clone, argv: list[str], meanwhile) -> tuple[int, str]:
+        saved = {k: os.environ.get(k) for k in {**GIT_ENV, "HARBOR_NOW": NOW}}
+        os.environ.update({**GIT_ENV, "HARBOR_NOW": NOW})
+        try:
+            mod = load_module()
+            mod.BEFORE_PUSH = meanwhile
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                rc = mod.main(argv, root=clone)
+            return rc, err.getvalue()
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+class TestHRB2(Phase6Lock):
+    def test_HRB_2_S1_two_sessions_take_the_same_story_at_once_one_wins_the_other_gets_STORY_TAKEN(self):
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", session="va"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb"))
+        ids = {"va": "acct1/mbp/va", "vb": "acct1/linux/vb"}
+        for story in ("QA-1", "QA-3", "QA-4", "QA-5"):
+            go = threading.Barrier(2)
+            results: dict[str, subprocess.CompletedProcess] = {}
+
+            def race(clone, session):
+                go.wait()
+                results[session] = self.take(clone, session, story)
+            threads = [threading.Thread(target=race, args=(self.a, "va")), threading.Thread(target=race, args=(self.b, "vb"))]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            won = [s for s, r in results.items() if r.returncode == 0]
+            lost = [s for s, r in results.items() if r.returncode != 0]
+            self.assertEqual(len(won), 1, {s: r.stdout + r.stderr for s, r in results.items()})
+            self.assertEqual(results[lost[0]].returncode, 1)
+            self.assertIn("STORY_TAKEN", results[lost[0]].stderr)
+            self.assertIn(ids[won[0]], results[lost[0]].stderr, "the refusal names the holder")
+            self.assertEqual(self.holders(story), [ids[won[0]]], "exactly one holder in the logbook")
+
+    def test_HRB_2_S1_the_rejected_push_replays_and_finds_the_story_held(self):
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", session="va"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb"))
+
+        def b_takes_first():
+            ok(self.take(self.b, "vb", "QA-1"))
+
+        rc, err = self.in_process(self.a, ["--session", "va", "story", "take", "QA-1"], b_takes_first)
+        self.assertEqual(rc, 1)
+        self.assertIn("STORY_TAKEN", err)
+        self.assertIn("acct1/linux/vb", err)
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/vb"], "first commit wins, as the watch")
+        self.assertNotIn("story", self.worker("acct1/mbp/va"))
+
+    def test_HRB_2_S2_a_worker_marked_lost_releases_its_story(self):
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", session="s2"))
+        ok(self.take(self.a, "s2", "QA-1"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="s3", env=later(1)))
+        self.assertIn("STORY_TAKEN", self.take(self.b, "s3", "QA-1", env=later(1)).stderr)
+        ok(harbor(self.b, "worker", "end", session="s3", env=later(1)))
+        out = ok(harbor(self.a, "harbormaster", "control", env=later(190)))
+        self.assertIn("lost: acct1/mbp/s2", out)
+        self.assertIn("QA-1", out, "the round says which story the lost worker released")
+        self.assertEqual(self.worker("acct1/mbp/s2")["state"], "lost")
+        self.assertEqual(self.holders("QA-1"), [])
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="s4", env=later(190)))
+        ok(self.take(self.b, "s4", "QA-1", env=later(190)))
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/s4"])
+
+    def test_HRB_2_S3_a_request_for_a_story_already_on_the_trunk_is_refused_at_wanted_take(self):
+        os.environ["HARBOR_FAKE_STORIES"] = json.dumps({"QA-1": "on-trunk", "QA-3": "in-production", "QA-4": "in-progress"})
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1"))
+        for story in ("QA-1", "QA-3", "QA-4"):
+            ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", story))
+        for rid, state in (("w-0001", "on-trunk"), ("w-0002", "in-production")):
+            res = harbor(self.a, "wanted", "take", rid, session="d1")
+            self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+            self.assertIn("STORY_ON_TRUNK", res.stderr)
+            self.assertIn(state, res.stderr)
+            self.assertEqual(self.repo.log_toml(f"harbor/wanted/{rid}.toml")["state"], "open")
+        ok(harbor(self.a, "wanted", "take", "w-0003", session="d1"))
+
+    def test_HRB_2_S4_the_dispatchers_prompt_for_a_vessel_starts_with_ledger_take(self):
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1"))
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1"))
+        prompt = ok(harbor(self.a, "wanted", "prompt", "w-0001", session="d1"))
+        self.assertEqual(prompt.splitlines()[0], "python3 .keelokit/bin/ledger.py take QA-1")
+        self.assertIn("worker register --role vessel --story QA-1", prompt, "register still takes it in Harbor")
+        ok(harbor(self.a, "wanted", "add", "--role", "dispatcher", "--account", "acct1"))
+        ok(harbor(self.a, "wanted", "take", "w-0002", session="d1"))
+        self.assertNotIn("ledger.py take", ok(harbor(self.a, "wanted", "prompt", "w-0002", session="d1")))
+
+
+class TestHRB2Lock(Phase6Lock):
+    def setUp(self):
+        super().setUp()
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", session="va"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb"))
+
+    def test_taking_again_is_idempotent_and_writes_nothing(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        tip = self.log_tip()
+        out = ok(self.take(self.a, "va", "QA-1"))
+        self.assertIn("already yours", out)
+        self.assertEqual(self.log_tip(), tip)
+
+    def test_the_story_key_is_written_and_released_and_the_logbook_stays_schema_1(self):
+        self.assertNotIn("story", self.worker("acct1/mbp/va"), "absent keys are omitted")
+        ok(self.take(self.a, "va", "QA-1"))
+        w = self.worker("acct1/mbp/va")
+        self.assertEqual((w["schema"], w["story"]), (1, "QA-1"))
+        self.assertIn("QA-1", self.repo.log_files()["harbor/LOGBOOK.md"], "LOGBOOK.md shows each worker's story")
+        ok(harbor(self.a, "story", "release", "QA-1", session="va"))
+        text = self.repo.log_files()["harbor/workers/acct1/mbp/va.toml"]
+        self.assertNotIn("story", text)
+        self.assertEqual(tomllib.loads(text)["schema"], 1)
+        for path, body in self.repo.log_files().items():
+            if path.endswith(".toml"):
+                self.assertEqual(tomllib.loads(body).get("schema"), 1, path)
+
+    def test_release_by_a_worker_that_does_not_hold_it_is_refused(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        res = harbor(self.b, "story", "release", "QA-1", session="vb")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("NOT_HOLDER", res.stderr)
+        self.assertIn("acct1/mbp/va", res.stderr)
+        self.assertEqual(self.holders("QA-1"), ["acct1/mbp/va"])
+
+    def test_releasing_a_story_nobody_holds_changes_nothing(self):
+        tip = self.log_tip()
+        out = ok(harbor(self.a, "story", "release", "QA-1", session="va"))
+        self.assertIn("nobody holds", out)
+        self.assertEqual(self.log_tip(), tip)
+
+    def test_a_lost_worker_releasing_does_not_touch_the_new_holder(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        ok(harbor(self.a, "harbormaster", "control", env=later(190)))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vc", env=later(190)))
+        ok(self.take(self.b, "vc", "QA-1", env=later(190)))
+        res = harbor(self.a, "story", "release", "QA-1", session="va", env=later(191))
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("NOT_HOLDER", res.stderr)
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/vc"])
+        res = self.take(self.a, "va", "QA-1", env=later(191))
+        self.assertEqual(res.returncode, 1, "a lost worker holds nothing and takes nothing")
+        self.assertIn("NOT_REGISTERED", res.stderr)
+
+    def test_an_ended_worker_releases_its_story(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        ok(harbor(self.a, "worker", "end", session="va"))
+        self.assertEqual(self.holders("QA-1"), [])
+        ok(self.take(self.b, "vb", "QA-1"))
+        res = harbor(self.a, "story", "release", "QA-1", session="va")
+        self.assertIn("NOT_HOLDER", res.stderr, "an ended worker releasing can't clear the new holder")
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/vb"])
+
+    def test_a_re_registered_worker_does_not_get_back_a_story_it_released(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        ok(harbor(self.a, "worker", "end", session="va"))
+        ok(self.take(self.b, "vb", "QA-1"))
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", session="va"))
+        self.assertNotIn("story", self.worker("acct1/mbp/va"))
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/vb"])
+
+    def test_the_story_is_compared_without_case(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        res = self.take(self.b, "vb", "qa-1")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("STORY_TAKEN", res.stderr)
+
+    def test_a_story_id_is_one_plain_word(self):
+        self.assertEqual(self.take(self.a, "va", "QA-1, QA-3").returncode, 2)
+        self.assertEqual(self.take(self.a, "va", "").returncode, 2)
+
+    def test_taking_another_story_releases_the_first(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        out = ok(self.take(self.a, "va", "QA-3"))
+        self.assertIn("was QA-1", out)
+        self.assertEqual(self.holders("QA-1"), [])
+        ok(self.take(self.b, "vb", "QA-1"))
+
+    def test_an_unregistered_session_is_checked_but_nothing_is_written(self):
+        tip = self.log_tip()
+        out = ok(self.take(self.a, "nobody", "QA-1"))
+        self.assertIn("not registered", out)
+        self.assertEqual(self.log_tip(), tip)
+        ok(self.take(self.b, "vb", "QA-1"))
+        res = self.take(self.a, "nobody", "QA-1")
+        self.assertEqual(res.returncode, 1, "a held story is refused even before registering")
+        self.assertIn("STORY_TAKEN", res.stderr)
+
+    def test_worker_names_a_worker_its_caller_answers_for(self):
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "acct1/mbp/s1", session="kid"))
+        ok(self.take(self.a, "s1", "QA-1", "--worker", "acct1/mbp/kid"))
+        self.assertEqual(self.holders("QA-1"), ["acct1/mbp/kid"])
+        other = self.repo.clone("c", account="acct2", host="pc")
+        ok(harbor(other, "account", "set", "acct2", "--max-sessions", "2", session="x"))
+        ok(harbor(other, "worker", "register", "--role", "vessel", session="x"))
+        res = harbor(other, "story", "release", "QA-1", "--worker", "acct1/mbp/kid", session="x")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("NOT_YOURS", res.stderr)
+        res = self.take(other, "x", "QA-3", "--worker", "acct1/mbp/va")
+        self.assertIn("NOT_YOURS", res.stderr)
+        res = self.take(self.a, "s1", "QA-3", "--worker", "acct1/mbp/ghost")
+        self.assertIn("NOT_REGISTERED", res.stderr)
+
+    def test_the_harbormaster_releases_a_stuck_lock_by_naming_its_holder(self):
+        ok(self.take(self.b, "vb", "QA-1"))
+        ok(harbor(self.a, "story", "release", "QA-1", "--worker", "acct1/linux/vb"))
+        self.assertEqual(self.holders("QA-1"), [])
+
+    def test_acting_for_another_worker_does_not_renew_its_last_seen(self):
+        ok(self.take(self.b, "vb", "QA-1"))
+        seen = self.worker("acct1/linux/vb")["last_seen"]
+        ok(harbor(self.a, "story", "release", "QA-1", "--worker", "acct1/linux/vb", env=later(100)))
+        self.assertEqual(self.worker("acct1/linux/vb")["last_seen"], seen, "a silent holder must still go lost")
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--spawned-by", "acct1/mbp/s1", session="kid"))
+        seen = self.worker("acct1/mbp/kid")["last_seen"]
+        ok(self.take(self.a, "s1", "QA-3", "--worker", "acct1/mbp/kid", env=later(100)))
+        self.assertEqual(self.worker("acct1/mbp/kid")["last_seen"], seen)
+
+    def test_a_take_replayed_after_the_round_marked_its_worker_lost_is_refused(self):
+        def the_round_lands_first():
+            ok(harbor(self.a, "harbormaster", "control", env=later(190)))
+
+        rc, err = self.in_process(self.b, ["--session", "vb", "story", "take", "QA-1"], the_round_lands_first)
+        self.assertEqual(rc, 1)
+        self.assertIn("NOT_REGISTERED", err)
+        self.assertEqual(self.worker("acct1/linux/vb")["state"], "lost")
+        self.assertEqual(self.holders("QA-1"), [])
+
+    def test_a_take_that_dies_before_its_push_leaves_nothing(self):
+        def dies():
+            raise KeyboardInterrupt
+        with self.assertRaises(KeyboardInterrupt):
+            self.in_process(self.a, ["--session", "va", "story", "take", "QA-1"], dies)
+        self.assertEqual(self.holders("QA-1"), [])
+        ok(self.take(self.b, "vb", "QA-1"))
+
+    def test_STORY_ON_TRUNK_from_the_facts_of_ledger_json(self):
+        os.environ["HARBOR_FAKE_STORIES"] = json.dumps({"QA-1": "in-version", "QA-3": "ready"})
+        res = self.take(self.a, "va", "QA-1")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("STORY_ON_TRUNK", res.stderr)
+        self.assertIn("in-version", res.stderr)
+        self.assertNotIn("story", self.worker("acct1/mbp/va"))
+        ok(self.take(self.a, "va", "QA-3"))
+        self.assertIn(["show", "QA-1", "--json"], self.ledger_calls(), "show --json is asked first")
+
+    def test_show_json_is_used_when_the_ledger_answers_it(self):
+        os.environ["HARBOR_FAKE_STORIES"] = json.dumps({"QA-1": "in-progress"})
+        os.environ["HARBOR_FAKE_SHOW"] = json.dumps({"QA-1": "on-trunk"})
+        res = self.take(self.a, "va", "QA-1")
+        self.assertIn("STORY_ON_TRUNK", res.stderr)
+
+    def test_a_ledger_that_cannot_say_is_never_a_refusal(self):
+        os.environ["HARBOR_FAKE_STORIES"] = json.dumps({"QA-3": "on-trunk"})
+        out = ok(self.take(self.a, "va", "QA-1"))
+        self.assertEqual(len([l for l in out.splitlines() if "ledger" in l]), 1, out)
+        self.assertEqual(self.holders("QA-1"), ["acct1/mbp/va"])
+
+
+class TestHRB2Register(Phase6Lock):
+    def setUp(self):
+        super().setUp()
+        for clone in (self.a, self.b):
+            (clone / ".keelokit/bin/status.py").write_text(STATUS)
+
+    def test_worker_register_story_takes_it(self):
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-1", session="va"))
+        self.assertEqual(self.holders("QA-1"), ["acct1/mbp/va"])
+        res = harbor(self.b, "worker", "register", "--role", "vessel", "--story", "QA-1", session="vb")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("STORY_TAKEN", res.stderr)
+        self.assertIn("acct1/mbp/va", res.stderr)
+        self.assertNotIn("harbor/workers/acct1/linux/vb.toml", self.repo.log_files())
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-1", session="va"))  # again: its own
+
+    def test_worker_register_refuses_a_story_on_the_trunk(self):
+        os.environ["HARBOR_FAKE_STORIES"] = json.dumps({"QA-1": "on-trunk"})
+        res = harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-1", session="va")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("STORY_ON_TRUNK", res.stderr)
+
+    def test_a_lost_worker_re_registering_for_a_story_now_held_is_refused(self):
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-1", session="va"))
+        ok(harbor(self.a, "harbormaster", "control", env=later(190)))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", "--story", "QA-1", session="vb", env=later(190)))
+        res = harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-1", session="va", env=later(191))
+        self.assertIn("STORY_TAKEN", res.stderr)
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/vb"])
+
+
+class TestHRB2WantedTake(Phase6Lock):
+    def test_a_request_for_a_story_an_active_worker_holds_is_refused(self):
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb"))
+        ok(self.take(self.b, "vb", "QA-1"))
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        res = harbor(self.a, "wanted", "take", "w-0001", session="d1")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("STORY_TAKEN", res.stderr)
+        self.assertIn("acct1/linux/vb", res.stderr)
+        ok(harbor(self.b, "story", "release", "QA-1", session="vb"))
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1"))
+
+
+class TestHRB2WithoutLedger(Phase6Lock):
+    """No ledger.py: the prompt and `wanted take` are 0.5's; the lock itself is the logbook's."""
+    ledger = False
+
+    def test_the_prompt_and_wanted_take_are_0_5s(self):
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1"))
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1"))
+        prompt = ok(harbor(self.a, "wanted", "prompt", "w-0001", session="d1"))
+        self.assertNotIn("ledger.py", prompt)
+        self.assertTrue(prompt.startswith("You are a Harbor vessel session"))
+        self.assertEqual(self.ledger_calls(), [])
+
+    def test_story_take_still_locks(self):
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", session="va"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb"))
+        ok(self.take(self.a, "va", "QA-1"))
+        self.assertIn("STORY_TAKEN", self.take(self.b, "vb", "QA-1").stderr)
+        self.assertEqual(self.ledger_calls(), [])
