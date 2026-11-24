@@ -2068,11 +2068,23 @@ def holders(files: dict, sid: str, but: str | None = None) -> list[str]:
                   if w.get("state") == "active" and w["id"] != but and has_story(w, sid))
 
 
+def claimant_active(files: dict, r: dict) -> str | None:
+    """The request's claimant, while it is an active worker."""
+    c = workers(files).get(r.get("claimed_by") or "")
+    return c["id"] if c and c.get("state") == "active" else None
+
+
 def request_holds(files: dict, sid: str, cfg: dict, but_request: str | None = None) -> list[str]:
+    return [f"request {rid} (taken by {r['taken_by']}; its session hasn't claimed it yet)"
+            for rid, r in request_holders(files, sid, cfg, but_request)]
+
+
+def request_holders(files: dict, sid: str, cfg: dict, but_request: str | None = None) -> list[tuple[str, dict]]:
     """The vessel requests holding `sid`: taken (or started) by a dispatcher that is still active and not yet claimed
     by the session it spawned (`worker register --request`, which records `claimed_by`: from then on the claimant's
     own hold is the lock), for at most the watch's expiry after the take (or the start): a session that never
-    registers is as gone as a lost worker. No other session is exempt, not even another child of that dispatcher."""
+    registers is as gone as a lost worker. The bound runs from the take: `wanted started` never extends it. No other
+    session is exempt, not even another child of that dispatcher."""
     ws = workers(files)
     cutoff = parse_ts(now()) - expiry(cfg)
     out = []
@@ -2084,11 +2096,11 @@ def request_holds(files: dict, sid: str, cfg: dict, but_request: str | None = No
         if not taker or taker.get("state") != "active":
             continue  # its dispatcher ended or is lost: nobody will start that session
         try:
-            if parse_ts(r.get("started_at") or r.get("taken_at") or "") < cutoff:
+            if parse_ts(r.get("taken_at") or "") < cutoff:
                 continue  # its session never registered within the watch's expiry
         except (ValueError, HarborError):
             continue  # no readable time: holds nothing (never a lock nobody can lift)
-        out.append(f"request {rid} (taken by {r['taken_by']}; its session hasn't claimed it yet)")
+        out.append((rid, r))
     return out
 
 
@@ -2207,6 +2219,15 @@ def cmd_story(args) -> int:
         if held := holders(files, sid):
             raise HarborError("NOT_HOLDER", f"{sid} is held by {', '.join(held)}, not {wid}: only its holder, someone "
                               "who answers for it (--worker) or the harbormaster releases it")
+        if reqs := request_holders(files, sid, cfg):  # a request nobody claimed: its taker or the harbormaster drops it
+            if any(r.get("taken_by") != me["id"] for _, r in reqs) and not holds_watch(files, me):
+                raise HarborError("NOT_HOLDER", f"{sid} is held by " + ", ".join(
+                    f"request {rid} (taken by {r['taken_by']}, unclaimed)" for rid, r in reqs) + ", not by "
+                    f"{wid}: its taker or the harbormaster lifts it with " + " and ".join(f"wanted drop {rid}" for rid, _ in reqs))
+            for rid, r in reqs:
+                r["state"] = "dropped"
+                save(files, f"harbor/wanted/{rid}.toml", r)
+            return "dropped:" + ", ".join(rid for rid, _ in reqs)
         return "free"
 
     if args.action == "take":
@@ -2219,7 +2240,10 @@ def cmd_story(args) -> int:
             print(f"harbor: {wid} took {sid}" + (f" (was {was}: released)" if was else ""))
     else:
         what = transact(f"story release {sid} by {wid}", me["id"], release)
-        print(f"harbor: {sid} released by {wid}" if what == "released" else f"harbor: nobody holds {sid}: nothing to release")
+        if what.startswith("dropped:"):
+            print(f"harbor: {sid} was held by unclaimed request {what[8:]}: dropped; {sid} is free")
+        else:
+            print(f"harbor: {sid} released by {wid}" if what == "released" else f"harbor: nobody holds {sid}: nothing to release")
     return 0
 
 
@@ -3517,6 +3541,24 @@ def cmd_harbormaster(args) -> int:
                 lines.append(f"lost: {wid} (last seen {wk.get('last_seen')}): its account's place is free"
                              + (f"; {wk['story']} is released" if wk.get("story") else ""))
         lines += repair_double_holds(files, h, me["id"])
+        ws_now = workers(files)
+        for rid, r in requests(files).items():  # HRB-2: a started request nobody claimed
+            if r.get("role") != "vessel" or r.get("state") != "started" or claimant_active(files, r):
+                continue
+            taker = ws_now.get(r.get("taken_by") or "")
+            if not taker or taker.get("state") != "active":
+                r["state"] = "dropped"
+                save(files, f"harbor/wanted/{rid}.toml", r)
+                lines.append(f"dropped {rid}: started for {r.get('story')}, never claimed, and its taker "
+                             f"{r.get('taken_by')} is {taker.get('state') if taker else 'not in the logbook'}")
+                continue
+            try:
+                old = parse_ts(r.get("taken_at") or "") < limit
+            except (ValueError, HarborError):
+                old = True
+            if old:
+                lines.append(f"{rid}: started for {r.get('story')} and never claimed within the watch's expiry: its "
+                             f"session never registered; wanted drop {rid} ({r.get('taken_by')} or the harbormaster)")
         ws = workers(files)
         for wid, wk in ws.items():
             owner_id = wk.get("spawned_by")
@@ -4216,15 +4258,26 @@ def wanted_started(args, cfg: dict, me: dict) -> int:
 def wanted_drop(args, cfg: dict, me: dict) -> int:
     def mutate(files, head):
         r = request_of(files, args.id)
+        if r.get("state") == "started":  # HRB-2: a session that never claimed it must not lock its story
+            if c := claimant_active(files, r):
+                raise HarborError("WRONG_STATE", f"{args.id} is started and claimed by {c} (active): the story's hold is "
+                                  f"that worker's (harbor.py story release), not the request's")
+            if r.get("taken_by") != me["id"] and not holds_watch(files, me):
+                raise HarborError("NOT_YOURS", f"{args.id} is started: its taker ({r.get('taken_by')}) or the harbormaster drops it")
+            r["state"] = "dropped"
+            save(files, f"harbor/wanted/{args.id}.toml", r)
+            return "unclaimed"
         if r.get("state") not in ("open", "taken"):
-            raise HarborError("WRONG_STATE", f"{args.id} is {r.get('state')}; only an open or taken request is dropped")
+            raise HarborError("WRONG_STATE", f"{args.id} is {r.get('state')}; only an open, taken or unclaimed started "
+                              "request is dropped")
         if r.get("requested_by") != me["id"] and not holds_watch(files, me):
             raise HarborError("NOT_YOURS", f"{args.id} is dropped by whoever asked for it ({r.get('requested_by')}) or the harbormaster")
         r["state"] = "dropped"
         save(files, f"harbor/wanted/{args.id}.toml", r)
+        return ""
 
-    transact(f"wanted drop {args.id} by {me['id']}", me["id"], mutate)
-    print(f"harbor: {args.id} dropped")
+    why = transact(f"wanted drop {args.id} by {me['id']}", me["id"], mutate)
+    print(f"harbor: {args.id} dropped" + (" (started, unclaimed: its session never claimed it)" if why else ""))
     return 0
 
 
