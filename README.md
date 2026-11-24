@@ -162,7 +162,9 @@ done
   vessel's merge into a convoy carries `Convoy: <n>`, and `convoy add` asks `ledger.py attribution` for the
   vessel's commits: it refuses one with an unattributed commit (`NO_STORY`) and takes the vessel's story from the
   ledger. Keelokit 0.16.0 doesn't answer `attribution` yet: until it does, `convoy add` says so and reads the
-  `Story:` trailers, as 0.5. Without such a ledger, Harbor behaves as 0.5. Without `.keelokit/`, the fleet layer runs from `.harbor/` (see
+  `Story:` trailers, as 0.5. Taking a story is a lock in the logbook (`story take`, `worker register --story`):
+  a second worker gets `STORY_TAKEN` with the holder, a story the ledger puts on the trunk `STORY_ON_TRUNK`, and
+  a vessel's prompt starts with `ledger.py take <ID>`. Without such a ledger, Harbor behaves as 0.5. Without `.keelokit/`, the fleet layer runs from `.harbor/` (see
   "Harbor without Keelokit") and a repository with neither directory is left alone, silently.
 - The hooks run `lib/harbor.py sync --hook` from the plugin and read the project's settings and identity
   (`.keelokit/state.toml` and `.keelokit/local.toml`, or `.harbor/config.toml` and `.harbor/local.toml`). A

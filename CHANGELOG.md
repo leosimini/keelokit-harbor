@@ -15,6 +15,20 @@
   refusal: the add reads the `Story:` trailers as before. The contract with Keelokit's `ledger.py attribution`
   (LEDGER-013) is in docs/design.md, "Phase 6: Keelokit's ledger". The logbook
   stays schema 1.
+- **HRB-2: taking a story is a lock in the logbook.** New `harbor.py story take ID [--worker W]`: one logbook
+  transaction writes `story = "ID"` on the worker (the logbook stays schema 1; the key is optional and omitted
+  when absent). Refused with `STORY_TAKEN` naming the holder when another `active` worker holds it (ids compare
+  without case), and with `STORY_ON_TRUNK` when the ledger says it is `on-trunk` or later: `ledger.py show ID
+  --json` when the ledger answers it, else the story's state in `ledger.py --json` (Keelokit 0.16.0 has only the
+  text card); a ledger that can't say is one line, never a refusal. Two takes at once from two clones end with
+  one holder: the rejected push replays and finds the story held (first commit wins). Taking again is a no-op;
+  taking another story releases the first. `story release ID` clears it, only by its holder (`NOT_HOLDER`
+  otherwise, so a lost or ended worker that comes back can't clear a new holder's lock) or the harbormaster with
+  `--worker`. A worker that ends or is marked lost holds nothing (the round's `lost:` line names the story it
+  released), and registering again without `--story` doesn't take it back. With the ledger, `worker register
+  --story` takes the story with the same refusals, `wanted take` refuses a vessel request whose story is held or
+  on the trunk, and a vessel's prompt starts with `python3 .keelokit/bin/ledger.py take <ID>`. `LOGBOOK.md`
+  shows each worker's story.
 - **A vessel carrying several stories delivers each of them.** The round's cutoff line, `convoy assemble`,
   `convoy status`, the convoy page and `convoy defer` compared a vessel's `story` as one text, so a vessel with
   `QA-1, QA-3` left both "not delivered". They now match each story id (the HRB-7 nit).
