@@ -14,7 +14,8 @@ This is the design. **Phases 1 to 5 are implemented** in `lib/harbor.py`.
 Marks *(2)* name what phase 2 added. Designed and **not written yet**: reassigning a skipper
 (`convoy skipper N WORKER`), the early hotspot warning from stories' `touches`, the warning for
 vessels that share commits, everything marked *(3)*, and phase 3's "Designed, not built". Phase 6, how Harbor fits Keelokit's ledger, is designed in
-[ledger-phase6.md](ledger-phase6.md) and not written yet. Phase 7, the lessons of the JOUNA fleet (the ok
+[ledger-phase6.md](ledger-phase6.md); HRB-1, `Convoy:` on the merge, `NO_STORY` in `convoy add` and the story from
+the ledger (`tests/test_phase6.py`, "Phase 6: Keelokit's ledger"), is written, HRB-2 and HRB-3 are not. Phase 7, the lessons of the JOUNA fleet (the ok
 straight to `all`, a sail preflight, a seam report, cutoffs, a 30-minute round), is designed in
 [lessons-phase7.md](lessons-phase7.md); HRB-4, the ok straight to `all`, HRB-5, the sail preflight, HRB-6,
 the seam report at assemble, HRB-7, a convoy's cutoff, and HRB-8, the 30-minute round (`tests/test_phase7.py`),
@@ -71,7 +72,10 @@ Harbor depends on Keelokit and copies none of its code. It uses these as interfa
 | `status.py`, `ci.py health` | the harbormaster's round: machine state, CI of `main` (Keelokit's `main`, whatever `[harbor] trunk` says) |
 | tiers trivial / light / full | the first agent of a vessel and its model |
 | `touches`, `critical.toml` | an early hotspot warning, before any code *(phase 2)* |
-| the `Story:` trailer | which story a vessel carries, read from its commits |
+| the `Story:` trailer | which story a vessel carries, read from its commits (without the ledger, below) |
+| `ledger.py --json` answering `"schema": 1` *(6)* | the switch for every phase-6 behaviour; any other answer, a timeout, an exit other than 0 or 1, or no `ledger.py`: Harbor behaves as 0.5 |
+| `ledger.py attribution <seal_base>..<head> --json` *(6)* | `convoy add`: `NO_STORY` for a vessel's unattributed commit, and the vessel's story. In Keelokit's docs/ledger.md, not in its 0.16.0 code: until it answers, `convoy add` notes it and reads the `Story:` trailers |
+| the `Convoy: <n>` trailer *(6)* | ends each vessel's merge into `convoy/<n>`; the ledger reads from it which convoy sailed a commit (Keelokit 0.15 already reads it) |
 
 Harbor needs **Keelokit 0.12.0** or later: the landing policy, shared seals, the pre-push that lets the
 logbook through, and session titles are all there.
@@ -338,7 +342,7 @@ read_at = "2026-11-01T12:40:00Z"
 [[vessels]]
 branch = "claude/carga-001"
 head = "4d44fdd8…"               # the delivered commit; the remote tip must still be it
-story = "STORY-001"              # --story, else the Story: trailers of its commits
+story = "STORY-001"              # --story, else (6) the ledger's attribution of its commits, else their Story: trailers
 tier = "full"                    # as the vessel session chose it (Keelokit's tier)
 hotspots = ["schema"]            # computed from its diff against main and [harbor.hotspots]
 seal_base = "a2becf56d…"         # the main its vessel verify ran against
@@ -551,9 +555,12 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
 - **Logbook:** the vessel row (or replaces it: a redelivery after a fix), event `add` or
   `redelivered`, the skipper's `last_seen`. *(7, HRB-7)* `--optional` marks the vessel `optional = true`
   and moves its story from `expected` to `optional`.
+- **The ledger** *(6, HRB-1)*: with Keelokit's ledger, before the vessel is recorded, `ledger.py attribution
+  <seal_base>..<head> --json`; an unattributed non-merge commit of the vessel's own refuses the add with
+  `NO_STORY` and the ledger's suggestion, and the vessel's story is the ledger's ("Phase 6: Keelokit's ledger").
 - **Errors:** `BRANCH_NOT_PUSHED`, `HEAD_MISMATCH`, `NO_SEAL`, `SEAL_RED`, `HOTSPOT_HELD`,
   `VESSEL_TAKEN`, `NOT_SKIPPER`, `CONVOY_CLOSED`, `UNKNOWN_CONVOY`, `SAILING` (an abort while the
-  sail is pushing the trunk).
+  sail is pushing the trunk), `NO_STORY` *(6)*.
 - `convoy status [N]` (read-only) shows, for open convoys, when `main` moved past the base and when
   a vessel's branch moved after delivery ("the delivery is void").
 
@@ -564,7 +571,10 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   every vessel's remote tip still its delivered head (`VESSEL_MOVED` otherwise).
 - **Does:** creates `convoy/<n>` from the base if absent; merges `origin/main` into it if `main`
   moved (merge, not rebase, §4.3); merges each unmerged vessel in order (`depends_on` among
-  stories, then the order given, then the order added, §4.4), `--no-ff`. A conflict only in
+  stories, then the order given, then the order added, §4.4), `--no-ff`. *(6, HRB-1)* With Keelokit's ledger,
+  each vessel's merge is always a merge commit (never a fast-forward, `--no-log`) whose message ends with the
+  trailer `Convoy: <n>`; a `CONFLICT` prints the merge command that keeps it, and a vessel whose merge on the
+  convoy branch lacks it (a merge by hand) is named in the output. `main`'s merge carries none. A conflict only in
   `[harbor.generated]` paths: run its command and commit the result (R17). A conflict only in
   formatting: Keelokit's FMT-1 (keep the content, `pnpm format`). Any other conflict: stop with
   `CONFLICT` and the files; the skipper resolves it in a combination commit. Then the migration
@@ -1031,6 +1041,56 @@ with many sessions raises: which one is the harbormaster, which the dispatcher?
   worker's record, and `harbor/LOGBOOK.md` lists sessions by it, as a tree, each under the session that
   launched it (`spawned_by`), and, in "Sessions by account", account by account with session, title, role
   and state: the one place the gatekeeper reads to know who is who.
+
+## Phase 6: Keelokit's ledger *(HRB-1; 0.6.0 when HRB-2 and HRB-3 are in)*
+
+Keelokit's ledger (`.keelokit/bin/ledger.py`, its docs/ledger.md) derives every story's state from git and reads
+Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan is
+[ledger-phase6.md](ledger-phase6.md).
+
+- **Feature detection.** Every phase-6 behaviour runs only when `python3 .keelokit/bin/ledger.py --json`, run
+  from this checkout, answers a JSON object whose `schema` is the integer 1 (exit 0, or 1: the ledger found
+  differences). No `ledger.py`, another schema (or `true`), text that is not UTF-8 JSON, any other exit, or no
+  answer in `LEDGER_SECONDS` (60; `HARBOR_LEDGER_SECONDS` overrides it): Harbor behaves exactly as 0.5. It is
+  asked once per command, and only by `convoy add` and `convoy assemble`. Keelokit 0.15.0 already answers
+  schema 1, so it gets the trailer too, which its ledger already reads.
+- **The ledger is project code**, like `vessel_verify`: run with `sys.executable`, from the checkout, stdin
+  closed, with the timeout; Harbor copies none of its code.
+- **`Convoy: <n>` on the merge** (`convoy assemble`): each vessel's merge into `convoy/<n>` is a merge commit
+  (`--no-ff --no-log`: a fast-forward would leave nowhere to put the trailer, and `merge.log` would put a
+  shortlog after it) whose message is `convoy <n>: merge <branch>@<head>`, a blank line, `Convoy: <n>`. A conflict
+  only in generated files is committed with that same message (git's `# Conflicts:` lines would follow the
+  trailer). The vessels' own commits, with their `Story:` / `Part-of:` trailers, reach `main` unchanged. After
+  the merges, a vessel whose merge on the convoy's first-parent chain lacks the trailer is named, one line each.
+- **`NO_STORY` in `convoy add`.** When the add would otherwise reach its seal check (the convoy open, the caller
+  its skipper, a green seal), Harbor runs `ledger.py attribution <seal_base>..<head> --json` (`seal_base` is the
+  seal's `base`; the merge base with `main` when the seal has none or this clone lacks it). Of its answer it
+  counts only the vessel's own commits: those `<head>` reaches and neither `<seal_base>` nor today's `main` does
+  (a vessel that merged a newer `main` brings `main`'s commits, which are not its own). A merge is never
+  unattributed (the ledger attributes what it brings), and `No-story:` is the ledger's to judge. Any own
+  non-merge commit with `attributed = false` refuses the add: `harbor: NO_STORY: <short sha> '<subject>', …`
+  (exit 1), after the ledger's suggestion for each one on stderr. Nothing is recorded.
+- **The story from the ledger.** Without `--story`, the vessel's `story` is the stories of its own commits in
+  the answer (merges included), sorted and joined with `, `; with none, no `story`. `--story` still overrides.
+- **An answer Harbor can't read is not a refusal.** When `attribution` exits other than 0 or 1 (Keelokit 0.16.0
+  prints its usage and exits 2: the command is in its docs, not yet in its code), times out, prints no JSON, or
+  its commits lack a sha or a boolean `attributed`, `convoy add` prints `harbor: ledger: attribution not
+  available (<why>)` and goes on as 0.5 (the `Story:` trailers). A ledger that can't answer must not stop every
+  convoy; HRB-3's ok checks the ledger again before the sail.
+- **The answer Harbor reads** (the contract asked of Keelokit's `attribution`; other keys are ignored):
+
+  ```json
+  {"schema": 1, "range": "a2becf56d…..4d44fdd8…",
+   "commits": [{"sha": "4d44fdd8…", "subject": "feat: login form", "merge": false,
+                "stories": ["AUTH-001"], "attributed": true},
+               {"sha": "9c1e02b7…", "subject": "fix: typo", "merge": false, "stories": [], "attributed": false,
+                "suggestion": "add `Part-of: AUTH-001` to 9c1e02b7 (git rebase -i, reword)"}],
+   "stories": ["AUTH-001"], "suggestion": "…"}
+  ```
+
+  `sha` may be abbreviated (7 characters or more); a commit's `suggestion` wins over the top-level one. Exit 0 when
+  every commit is attributed, 1 otherwise.
+- **The logbook keeps `schema = 1`.** HRB-1 adds no key: a vessel's `story` is the key it always had.
 
 ## Phase 5: the fleet layer without Keelokit *(0.5.0)*
 

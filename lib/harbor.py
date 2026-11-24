@@ -698,7 +698,7 @@ def render_convoy(c: dict, files: dict) -> str:
                        f"{cell(', '.join(v.get('hotspots') or []))} | {v.get('added')} |")
     else:
         out.append("None yet.")
-    delivered = {v.get("story") for v in vs}
+    delivered = delivered_stories(c)
     missing = [s for s in c.get("expected") or [] if s not in delivered]
     if missing:
         out += ["", "## Expected, not delivered", ""] + [f"- {s}" for s in missing]
@@ -1223,7 +1223,10 @@ def cmd_convoy(args) -> int:
         raise HarborError("UNRELATED_BRANCH", f"{args.branch} shares no history with {TRUNK}")
     changed = [p for p in git("diff", "--name-only", mb, tip).splitlines() if p]
     story = args.story
-    if not story:
+    attributed = vessel_attribution(args, me, tip, mb, base) if has_ledger() else None
+    if not story and attributed is not None:  # the ledger's stories of the range (HRB-1)
+        story = ", ".join(attributed) or None
+    elif not story:
         found = {s.strip() for s in git("log", f"{mb}..{tip}", "--format=%(trailers:key=Story,valueonly)").splitlines() if s.strip()}
         story = ", ".join(sorted(found)) or None
     spots = hotspots_of(changed, cfg["hotspots"])
@@ -1279,6 +1282,32 @@ def cmd_convoy(args) -> int:
     return 0
 
 
+def vessel_attribution(args, me: dict, tip: str, mb: str, main_tip: str) -> list[str] | None:
+    """HRB-1: before a vessel is recorded, the ledger's attribution of `<seal_base>..<head>`. Refuses with NO_STORY
+    when one of the vessel's own non-merge commits is unattributed; the vessel's stories otherwise, or None when
+    the ledger could not answer (then 0.5's reading). Asked only when the add would otherwise go through to its
+    seal check (the convoy open, this session its skipper, a green seal): the logbook's own refusals come first."""
+    _, files = snapshot()
+    c = convoys(files).get(args.number) or {}
+    seal = run_of(files, tip)
+    if c.get("state") not in ("assembling", "waiting") or c.get("skipper") != me["id"] or not seal or seal.get("exit") != 0:
+        return None
+    base = seal.get("base") if seal.get("base") and rev(seal["base"]) else mb
+    found = ledger_attribution(base, tip, main_tip)
+    if found is None:
+        return None
+    stories, bad = found
+    if bad:
+        for _, _, hint in bad:
+            if hint:
+                print(f"harbor: ledger: {hint}", file=sys.stderr)
+        raise HarborError("NO_STORY", ", ".join(f"{short(sha)} {subject!r}" for sha, subject, _ in bad)
+                          + f" in {args.branch}: no Story:, Part-of: or No-story: (ledger.py attribution "
+                          f"{short(base)}..{short(tip)}). Every commit of a vessel names its story: the vessel rewords "
+                          "them, seals the new tip and delivers it again")
+    return stories
+
+
 def convoy_status(args) -> int:
     head, files = snapshot()
     cs = convoys(files)
@@ -1301,7 +1330,7 @@ def convoy_status(args) -> int:
                                                   else f" · moved to {short(tip)} after delivery: the delivery is void")
             print(f"  {v['branch']}@{short(v['head'])} {v.get('story') or ''}{' (optional)' if v.get('optional') else ''}"
                   f"{note}".rstrip())
-        missing = [s for s in c.get("expected") or [] if s not in {v.get("story") for v in vs}]
+        missing = [s for s in c.get("expected") or [] if s not in delivered_stories(c)]
         if missing:
             print(f"  expected, not delivered: {', '.join(missing)}")
         if late := late_optional(c):
@@ -1456,10 +1485,12 @@ def generated_cmds(paths: list[str], generated: dict) -> list[str] | None:
     return list(dict.fromkeys(cmds))
 
 
-def merge(ref: str, message: str, generated: dict, branch: str) -> None:
+def merge(ref: str, message: str, generated: dict, branch: str, trailer: str = "") -> None:
     """Merge `ref` into HEAD (a fast-forward when it can be). A conflict only in declared generated files
-    is rebuilt with their command; any other conflict is aborted and reported, never resolved here."""
-    res = run("git", "merge", "--no-edit", "-m", message, ref, check=False)
+    is rebuilt with their command; any other conflict is aborted and reported, never resolved here.
+    `trailer` (HRB-1, `Convoy: <n>`): always a merge commit (--no-ff), its message ending with the trailer."""
+    full = f"{message}\n\n{trailer}" if trailer else message
+    res = run("git", "merge", "--no-edit", *(["--no-ff", "--no-log"] if trailer else []), "-m", full, ref, check=False)
     if res.returncode == 0:
         return
     conflicted = [p for p in git("diff", "--name-only", "--diff-filter=U").splitlines() if p]
@@ -1468,8 +1499,10 @@ def merge(ref: str, message: str, generated: dict, branch: str) -> None:
         run("git", "merge", "--abort", check=False)
         if not conflicted:
             raise HarborError("GIT", f"git merge {short(ref)} failed: {(res.stderr or res.stdout).strip()[:300]}")
+        keep = (f" with the convoy's trailer: git merge --no-ff {ref} -m {shlex.quote(message)} -m "
+                f"{shlex.quote(trailer)}, resolve, git commit --no-edit --cleanup=strip") if trailer else ""
         raise HarborError("CONFLICT", f"merging {message.split(': merge ', 1)[-1]} conflicts in {', '.join(conflicted)}. "
-                          f"The skipper merges it on {branch} by hand, in its own commit, then runs assemble again")
+                          f"The skipper merges it on {branch} by hand, in its own commit{keep}, then runs assemble again")
     for cmd in cmds:
         if subprocess.run(shlex.split(cmd), cwd=ROOT).returncode != 0:
             run("git", "merge", "--abort", check=False)
@@ -1478,7 +1511,30 @@ def merge(ref: str, message: str, generated: dict, branch: str) -> None:
     if git("diff", "--name-only", "--diff-filter=U"):
         run("git", "merge", "--abort", check=False)
         raise HarborError("CONFLICT", f"rebuilding left conflicts in {', '.join(conflicted)}")
-    git("commit", "--no-edit", "--quiet")
+    if trailer:  # the message as given, so the trailer stays last (MERGE_MSG appends the conflicted files)
+        git("commit", "--quiet", "--cleanup=verbatim", "-m", full)
+    else:
+        git("commit", "--no-edit", "--quiet")
+
+
+def untrailed_merges(main_tip: str, vessels: list[dict], trailer: str) -> list[str]:
+    """HRB-1: a vessel whose merge on the convoy branch (first parent from main) lacks `trailer`, as a merge the
+    skipper made by hand after a CONFLICT can: one line each. A vessel brought by no merge of its own (inside
+    another vessel) is not named."""
+    out = run("git", "rev-list", "--first-parent", "--merges", "--parents", "HEAD", f"^{main_tip}", check=False).stdout
+    brought: dict[str, list[str]] = {}
+    for line in out.splitlines():
+        sha, _, *others = line.split()
+        for p in others:
+            brought.setdefault(p, []).append(sha)
+    lines = []
+    for v in vessels:
+        shas = brought.get(v["head"]) or []
+        if shas and not any(trailer in git("log", "-1", "--format=%(trailers:only,unfold)", m).splitlines() for m in shas):
+            lines.append(f"harbor: {v['branch']}@{short(v['head'])}: its merge {short(shas[0])} has no `{trailer}` trailer "
+                         f"(merged by hand?), so the ledger won't read which convoy carries it. A merge by hand ends its "
+                         f"message with it: git merge --no-ff <head> -m <subject> -m {shlex.quote(trailer)}")
+    return lines
 
 
 def migration_dirs(ref: str, patterns: list[str]) -> dict[str, set[str]]:
@@ -1550,11 +1606,15 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         merge(main_tip, f"convoy {c['number']}: merge {TRUNK} {short(main_tip)}", cfg["generated"], branch)
         notes.append(("main-moved", f"{short(c.get('base'))} → {short(main_tip)}"))
     merged = {}
+    trailer = f"Convoy: {c['number']}" if has_ledger() else ""  # HRB-1: the ledger reads which convoy sailed what
     for v in vessels:
         if not ancestor(v["head"], "HEAD"):
-            merge(v["head"], f"convoy {c['number']}: merge {v['branch']}@{short(v['head'])}", cfg["generated"], branch)
+            merge(v["head"], f"convoy {c['number']}: merge {v['branch']}@{short(v['head'])}", cfg["generated"], branch,
+                  trailer)
         merged[v["branch"]] = v.get("merged") or git("rev-parse", "HEAD")
     check_migrations(main_tip, vessels, cfg["migrations"])
+    for line in untrailed_merges(main_tip, vessels, trailer) if trailer else []:
+        print(line)
     head = git("rev-parse", "HEAD")
     pushed_at = int(time.time()) - 1
     if head != remote:
@@ -1595,7 +1655,7 @@ def convoy_assemble(args, cfg: dict, me: dict) -> int:
         c2["integrator"], c2["head"], c2["base"] = me["id"], head, main_tip
         for v in c2["vessels"]:
             v["merged"] = merged[v["branch"]]
-        missing = [s for s in c2.get("expected") or [] if s not in {v.get("story") for v in c2["vessels"]}]
+        missing = [s for s in c2.get("expected") or [] if s not in delivered_stories(c2)]
         deps = [d for d in c2.get("depends_on") or [] if (cs.get(d) or {}).get("state") != "sailed"]
         events = c2.setdefault("events", [])
         cut = past_cutoff(c2)
@@ -1872,6 +1932,86 @@ def convoy_seam(args, cfg: dict, me: dict) -> int:
     print(f"harbor: seam {seam['id']} ({seam['kind']} {seam['key']}) read as {kind}; "
           + (f"{left} seam(s) left" if left else f"every seam is read: convoy assemble {args.number} reaches ready"))
     return 0
+
+
+# --- Phase 6: Keelokit's ledger (HRB-1) ---------------------------------------------------------------
+# Keelokit's ledger.py derives every story's state from git. It is project code, like vessel_verify: Harbor runs
+# it from this checkout with a timeout and reads its JSON, copying none of it. Every phase-6 behaviour runs only
+# when `ledger.py --json` answers `"schema": 1`; without that, Harbor behaves exactly as 0.5.
+
+LEDGER_TOOL = ".keelokit/bin/ledger.py"
+LEDGER_SECONDS = 60  # the ledger makes a fixed number of git calls; HARBOR_LEDGER_SECONDS overrides it
+_LEDGER: dict[str, bool] = {}
+
+
+def ledger_seconds() -> float:
+    try:
+        return max(float(os.environ.get("HARBOR_LEDGER_SECONDS") or LEDGER_SECONDS), 0.1)
+    except ValueError:
+        return LEDGER_SECONDS
+
+
+def run_ledger(*args: str) -> tuple[dict | None, str]:
+    """The project's ledger.py answering `args`: (its JSON, "") when it is an object with schema 1, else (None, why).
+    Exit 0 and 1 are answers (1: differences); any other exit, a timeout or text that isn't JSON is none."""
+    tool = ROOT / LEDGER_TOOL
+    if not tool.is_file():
+        return None, f"no {LEDGER_TOOL}"
+    what, seconds = f"`ledger.py {' '.join(args)}`", ledger_seconds()
+    try:
+        res = subprocess.run([sys.executable, str(tool), *args], cwd=ROOT, capture_output=True,
+                             timeout=seconds, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, f"{what} did not answer in {seconds:g} s"
+    except OSError as e:
+        return None, f"{what}: {e}"
+    if res.returncode not in (0, 1):
+        why = (res.stderr.decode(errors="replace").strip().splitlines() or [""])[0][:160]
+        return None, f"{what}: exit {res.returncode}" + (f" ({why})" if why else "")
+    try:
+        data = json.loads(res.stdout.decode("utf-8"))
+    except ValueError:  # UnicodeDecodeError too: JSON is UTF-8
+        return None, f"{what} answered with text that is not JSON"
+    if not isinstance(data, dict) or type(data.get("schema")) is not int or data["schema"] != 1:
+        return None, f"{what} did not answer schema 1"
+    return data, ""
+
+
+def has_ledger() -> bool:
+    """Keelokit's ledger answering schema 1 (0.15.0 on): the switch for every phase-6 behaviour. Asked once per run."""
+    key = str(ROOT)
+    if key not in _LEDGER:
+        _LEDGER[key] = run_ledger("--json")[0] is not None
+    return _LEDGER[key]
+
+
+def ledger_attribution(base: str, tip: str, trunk_tip: str) -> tuple[list[str], list[tuple[str, str, str]]] | None:
+    """`ledger.py attribution <base>..<tip> --json` for a vessel: (its stories, its unattributed commits as
+    (sha, subject, the ledger's suggestion)), or None, with a note, when the ledger gives no usable answer.
+    Only the vessel's own commits count: not those main already has (a merge of a newer main brings them),
+    and a merge is never unattributed (the ledger attributes what it brings)."""
+    data, why = run_ledger("attribution", f"{base}..{tip}", "--json")
+    commits = data.get("commits") if data else None
+    if data and not why and not (isinstance(commits, list) and all(
+            isinstance(c, dict) and isinstance(c.get("sha"), str) and len(c["sha"]) >= 7
+            and isinstance(c.get("attributed"), bool) for c in commits)):
+        why = "an answer without a list of commits, each with its sha and a boolean `attributed`"
+    if why:  # never a refusal on an answer Harbor can't read: the ok's ledger check (HRB-3) still sees the vessel
+        print(f"harbor: ledger: attribution not available ({why}); the vessel's story comes from its Story: "
+              "trailers, as before")
+        return None
+    exclude = [f"^{base}"] + ([f"^{trunk_tip}"] if trunk_tip else [])
+    own = git("rev-list", tip, *exclude).split()
+    merges = set(git("rev-list", "--merges", tip, *exclude).split())
+    stories, bad = set(), []
+    for c in commits:
+        sha = next((o for o in own if o.startswith(c["sha"].lower())), None)  # a ledger may abbreviate
+        if sha is None:
+            continue
+        stories.update(s.strip() for s in c.get("stories") or [] if isinstance(s, str) and s.strip())
+        if sha not in merges and not c["attributed"]:
+            bad.append((sha, str(c.get("subject") or ""), str(c.get("suggestion") or data.get("suggestion") or "")))
+    return sorted(stories), bad
 
 
 # --- HRB-4: the ok's level from Keelokit's two plans -----------------------------------------------
@@ -2421,7 +2561,7 @@ def defer_story(c: dict, story: str, me: dict, what: str, detail: str) -> None:
 def cutoff_flags(c: dict) -> list[str]:
     if not past_cutoff(c):
         return []
-    got = {v.get("story") for v in c.get("vessels") or []}
+    got = delivered_stories(c)
     missing = [s for s in c.get("expected") or [] if s not in got]
     late = late_optional(c)
     return ([f"past its cutoff {c['cutoff']}: " + "; ".join(
@@ -2437,7 +2577,7 @@ def convoy_defer(args, cfg: dict, me: dict) -> int:
             raise HarborError("NOT_SKIPPER", f"convoy {args.number}'s skipper is {c.get('skipper')}")
         if args.story not in (c.get("expected") or []) + (c.get("optional") or []):
             raise HarborError("NOT_EXPECTED", f"{args.story} is not expected in convoy {args.number}")
-        if args.story in {v.get("story") for v in c.get("vessels") or []}:
+        if args.story in delivered_stories(c):
             raise HarborError("ALREADY_DELIVERED", f"{args.story} is delivered already")
         defer_story(c, args.story, me, "deferred", f"{args.story} goes to the next convoy")
         save_convoy(files, c)

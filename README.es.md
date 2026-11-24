@@ -161,7 +161,11 @@ done
 ## Bueno saber
 
 - Harbor no copia nada del código de Keelokit. Con Keelokit corre su `pnpm verify`, lee su `state.toml` y usa
-  sus niveles y su trailer `Story:`; sin `.keelokit/`, la capa de flota corre desde `.harbor/` (ver «Harbor sin
+  sus niveles y su trailer `Story:`. Cuando el ledger de Keelokit responde `ledger.py --json` con schema 1, el
+  merge de cada vessel en un convoy lleva `Convoy: <n>`, y `convoy add` le pide a `ledger.py attribution` los
+  commits del vessel: rechaza uno con un commit sin atribuir (`NO_STORY`) y toma la historia del vessel del
+  ledger. Keelokit 0.16.0 todavía no responde `attribution`: hasta que lo haga, `convoy add` lo dice y lee los
+  trailers `Story:`, como 0.5. Sin ese ledger, Harbor se comporta como 0.5. Sin `.keelokit/`, la capa de flota corre desde `.harbor/` (ver «Harbor sin
   Keelokit») y un repositorio sin ninguno de los dos directorios se deja en paz, sin decir nada.
 - Los hooks corren `lib/harbor.py sync --hook` desde el plugin y leen la configuración y la identidad del
   proyecto (`.keelokit/state.toml` y `.keelokit/local.toml`, o `.harbor/config.toml` y `.harbor/local.toml`).
