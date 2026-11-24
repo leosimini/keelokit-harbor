@@ -870,3 +870,182 @@ class TestHRB2WithoutLedger(Phase6Lock):
         ok(self.take(self.a, "va", "QA-1"))
         self.assertIn("STORY_TAKEN", self.take(self.b, "vb", "QA-1").stderr)
         self.assertEqual(self.ledger_calls(), [])
+
+
+# --- HRB-2, second breaker round: the lock never depends on the ledger; requests hold; the round repairs ------
+
+class Forge:
+    """Write the logbook by hand, as a Harbor older than 0.6.0 (or legacy data) would leave it."""
+
+    def forge(self, edits: dict, message: str = "an older Harbor wrote this"):
+        w = self.tmp / f"forger-{len(list(self.tmp.glob('forger-*')))}"
+        sh(self.tmp, "git", "clone", "--quiet", "-b", "harbor/log", str(self.repo.remote), str(w))
+        for path, edit in edits.items():
+            f = w / path
+            data = tomllib.loads(f.read_text()) if f.exists() else {}
+            data = edit(data)
+            lines = []
+            for k, v in data.items():
+                lines.append(f"{k} = {json.dumps(v)}")
+            f.write_text("\n".join(lines) + "\n")
+        sh(w, "git", "add", "-A")
+        sh(w, "git", "commit", "--quiet", "-m", message)
+        sh(w, "git", "push", "--quiet", "origin", "HEAD:harbor/log")
+
+
+class TestHRB2F1LockWithoutLedger(Phase6Lock):
+    """F1: STORY_TAKEN is the logbook's lock: a ledger that fails on one call, or no ledger, never skips it."""
+
+    def setUp(self):
+        super().setUp()
+        for c in (self.a, self.b):
+            (c / ".keelokit/bin/status.py").write_text(STATUS)
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-1", session="va"))
+
+    def assert_refused(self, env: dict):
+        res = harbor(self.b, "worker", "register", "--role", "vessel", "--story", "QA-1", session="vb", env=env)
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("STORY_TAKEN", res.stderr)
+        self.assertEqual(self.holders("QA-1"), ["acct1/mbp/va"])
+
+    def test_F1_register_story_is_refused_when_the_ledger_exits_2_on_that_call(self):
+        self.assert_refused({"HARBOR_FAKE_LEDGER": "exit2"})
+
+    def test_F1_register_story_is_refused_when_the_ledger_times_out_on_that_call(self):
+        self.assert_refused({"HARBOR_FAKE_LEDGER": "sleep", "HARBOR_LEDGER_SECONDS": "0.5"})
+
+    def test_F1_register_story_is_refused_when_the_ledger_prints_bad_json_on_that_call(self):
+        self.assert_refused({"HARBOR_FAKE_LEDGER": "bad"})
+
+
+class TestHRB2F1NoLedger(Phase6Lock):
+    ledger = False
+
+    def test_F1_without_a_ledger_register_story_after_a_story_take_is_refused(self):
+        for c in (self.a, self.b):
+            (c / ".keelokit/bin").mkdir(parents=True, exist_ok=True)
+            (c / ".keelokit/bin/status.py").write_text(STATUS)
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", session="va"))
+        ok(self.take(self.a, "va", "QA-1"))
+        res = harbor(self.b, "worker", "register", "--role", "vessel", "--story", "QA-1", session="vb")
+        self.assertIn("STORY_TAKEN", res.stderr)
+        self.assertEqual(self.holders("QA-1"), ["acct1/mbp/va"])
+
+    def test_F1_without_a_ledger_wanted_take_refuses_a_held_story(self):
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb"))
+        ok(self.take(self.b, "vb", "QA-1"))
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        res = harbor(self.a, "wanted", "take", "w-0001", session="d1")
+        self.assertIn("STORY_TAKEN", res.stderr)
+
+
+class TestHRB2F2Requests(Forge, Phase6Lock):
+    """F2: a taken vessel request holds its story until its session registers or ends, or its taker ends."""
+
+    def setUp(self):
+        super().setUp()
+        for c in (self.a, self.b):
+            (c / ".keelokit/bin/status.py").write_text(STATUS)
+        ok(harbor(self.a, "worker", "register", "--role", "dispatcher", session="d1"))
+
+    def second_request(self):
+        """w-0002 for QA-1 too, as an older Harbor's wanted add would have let in."""
+        self.forge({"harbor/wanted/w-0002.toml": lambda _: {
+            **self.repo.log_toml("harbor/wanted/w-0001.toml"), "id": "w-0002", "state": "open", "taken_by": "",
+            "taken_at": ""}})
+
+    def test_F2a_a_flaky_ledger_does_not_skip_STORY_TAKEN_at_wanted_take(self):
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb"))
+        ok(self.take(self.b, "vb", "QA-1"))
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        res = harbor(self.a, "wanted", "take", "w-0001", session="d1", env={"HARBOR_FAKE_LEDGER": "exit2"})
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("STORY_TAKEN", res.stderr)
+
+    def test_F2b_a_second_open_request_for_a_story_is_refused_at_wanted_add(self):
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        res = harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1")
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("STORY_REQUESTED", res.stderr)
+        self.assertIn("w-0001", res.stderr)
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1"))
+        self.assertIn("STORY_REQUESTED", harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1").stderr)
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-3"))
+
+    def test_F2b_a_taken_request_holds_its_story_against_another_request(self):
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        self.second_request()
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1"))
+        res = harbor(self.a, "wanted", "take", "w-0002", session="d1")
+        self.assertEqual(res.returncode, 1, "two vessels would be spawned for QA-1")
+        self.assertIn("STORY_TAKEN", res.stderr)
+        self.assertIn("w-0001", res.stderr)
+
+    def test_F2b_the_session_spawned_for_the_request_registers_and_others_are_refused(self):
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1"))
+        res = harbor(self.b, "worker", "register", "--role", "vessel", session="other")
+        ok(res)
+        self.assertIn("STORY_TAKEN", self.take(self.b, "other", "QA-1").stderr, "the request holds it for its spawn")
+        out = ok(self.take(self.a, "spawn", "QA-1"))  # its prompt's first line, before it registers
+        self.assertIn("not registered", out)
+        ok(harbor(self.a, "wanted", "started", "w-0001", "--session", "spawn", session="d1"))
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", "--story", "QA-1", "--spawned-by", "acct1/mbp/d1",
+                  session="spawn"))
+        self.assertEqual(self.holders("QA-1"), ["acct1/mbp/spawn"])
+        ok(harbor(self.a, "worker", "end", session="spawn"))
+        ok(self.take(self.b, "other", "QA-1"))  # its session ended: the request holds nothing any more
+
+    def test_F2b_a_request_whose_session_never_registers_holds_only_until_the_watch_expiry(self):
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1"))
+        ok(harbor(self.a, "wanted", "started", "w-0001", "--session", "died", session="d1"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb", env=later(170)))
+        self.assertIn("STORY_TAKEN", self.take(self.b, "vb", "QA-1", env=later(170)).stderr)
+        ok(self.take(self.b, "vb", "QA-1", env=later(181)))
+
+    def test_F2b_a_request_whose_taker_ended_holds_nothing(self):
+        ok(harbor(self.a, "wanted", "add", "--role", "vessel", "--story", "QA-1"))
+        ok(harbor(self.a, "wanted", "take", "w-0001", session="d1"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb"))
+        self.assertIn("STORY_TAKEN", self.take(self.b, "vb", "QA-1").stderr)
+        ok(harbor(self.a, "worker", "end", session="d1"))
+        ok(self.take(self.b, "vb", "QA-1"))
+
+
+class TestHRB2F3Repair(Forge, Phase6Lock):
+    """F3: an older Harbor leaves two active holders; the harbormaster's round keeps the first and releases the rest."""
+
+    def setUp(self):
+        super().setUp()
+        ok(harbor(self.a, "worker", "register", "--role", "vessel", session="va"))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vb"))
+
+    def test_F3a_the_round_repairs_a_double_hold_an_old_client_wrote(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        self.forge({"harbor/workers/acct1/linux/vb.toml": lambda w: {**w, "story": "QA-1"}})
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/vb", "acct1/mbp/va"])
+        out = ok(harbor(self.a, "harbormaster", "control"))
+        self.assertIn("QA-1", out)
+        self.assertIn("acct1/linux/vb", out)
+        self.assertEqual(self.holders("QA-1"), ["acct1/mbp/va"], "the first take keeps it")
+        self.assertNotIn("story", self.worker("acct1/linux/vb"))
+
+    def test_F3a_a_lost_worker_an_old_client_revived_loses_to_the_holder_since(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        ok(harbor(self.a, "harbormaster", "control", env=later(190)))
+        ok(harbor(self.b, "worker", "register", "--role", "vessel", session="vc", env=later(190)))
+        ok(self.take(self.b, "vc", "QA-1", env=later(190)))
+        # 0.5's worker register keeps the old story when it revives a lost worker
+        self.forge({"harbor/workers/acct1/mbp/va.toml": lambda w: {**w, "state": "active", "last_seen": later(191)["HARBOR_NOW"]}})
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/vc", "acct1/mbp/va"])
+        out = ok(harbor(self.a, "harbormaster", "control", env=later(192)))
+        self.assertIn("QA-1", out)
+        self.assertEqual(self.holders("QA-1"), ["acct1/linux/vc"], "vc held it first in this active stretch")
+
+    def test_F3d_a_holder_re_taking_with_legacy_duplicates_gets_already_yours(self):
+        ok(self.take(self.a, "va", "QA-1"))
+        self.forge({"harbor/workers/acct1/linux/vb.toml": lambda w: {**w, "story": "QA-1"}})
+        out = ok(self.take(self.a, "va", "QA-1"))
+        self.assertIn("already yours", out)
