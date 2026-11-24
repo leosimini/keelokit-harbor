@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Phase 6: Keelokit's ledger
+- **HRB-1: `Convoy:` on the merge, `NO_STORY` in `convoy add`, the story from the ledger.** Only when the
+  project's `.keelokit/bin/ledger.py --json` answers `"schema": 1` (run from the checkout with a 60 s timeout;
+  anything else, and Harbor behaves exactly as 0.5). `convoy assemble` merges each vessel into `convoy/<n>` as a
+  merge commit (`--no-ff --no-log`) whose message ends with the trailer `Convoy: <n>`, also when a generated-file
+  conflict is rebuilt; a `CONFLICT` prints the merge command that keeps the trailer, and a vessel merged by hand
+  without it is named. `convoy add` runs `ledger.py attribution <seal_base>..<head> --json` and refuses a vessel
+  whose own non-merge commit is unattributed with `NO_STORY: <short sha> …` (exit 1) and how to attribute it;
+  the vessel's story is the ledger's (`--story` still overrides). An `attribution` that can't be read (Keelokit
+  0.16.0 doesn't have the command yet, exit 3 for an incomplete history, a timeout, no JSON) is a note, never a
+  refusal: the add reads the `Story:` trailers as before. The contract with Keelokit's `ledger.py attribution`
+  (LEDGER-013) is in docs/design.md, "Phase 6: Keelokit's ledger". The logbook
+  stays schema 1.
+- **A vessel carrying several stories delivers each of them.** The round's cutoff line, `convoy assemble`,
+  `convoy status`, the convoy page and `convoy defer` compared a vessel's `story` as one text, so a vessel with
+  `QA-1, QA-3` left both "not delivered". They now match each story id (the HRB-7 nit).
+
 ### Phase 7: lessons from the JOUNA fleet
 - **HRB-8: a round every 30 minutes, scheduled with commands, not state.** The default of `[harbor]
   control_every_minutes` is now **30** (was 90); the watch's expiry stays 180. A project that set

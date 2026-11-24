@@ -60,7 +60,11 @@ running.
 `python3 "$H" --session <id> convoy add <n> <branch> --head <hash> --tier <tier>`. Refusals say
 what to do: `NO_SEAL` / `SEAL_RED` / `HEAD_MISMATCH` go back to the vessel; `HOTSPOT_HELD` means
 that vessel waits for the holder to sail and then rebases; `VESSEL_TAKEN` means it is in another
-convoy.
+convoy. With Keelokit's ledger (`ledger.py --json` schema 1), add asks `ledger.py attribution` for the vessel's
+commits: `NO_STORY` names each commit with no `Story:`, `Part-of:` or `No-story:` (merges don't count) and goes
+back to the vessel, which rewords them, seals the new tip and delivers again; the vessel's story is the ledger's
+(`--story` still overrides). `harbor: ledger: attribution not available (…)` means the ledger couldn't answer:
+the add goes on with the `Story:` trailers, as before.
 
 ## status
 
@@ -75,7 +79,9 @@ a void delivery.
 `[harbor.generated]` files, checks migration timestamps, and pushes `convoy/<n>`. It ends `ready`, or
 `waiting` with what is missing (stories, a dependency, or seams to read). Refusals:
 - `CONFLICT`: you merge that vessel's head by hand on `convoy/<n>`, resolve only what the merge
-  needs, commit, and run assemble again (it takes your local branch). A conflict only in formatting
+  needs, commit, and run assemble again (it takes your local branch). With Keelokit's ledger, each vessel's
+  merge ends with the trailer `Convoy: <n>`: the refusal prints the merge command that keeps it; a merge without
+  it is named at the next assemble. A conflict only in formatting
   follows Keelokit's FMT-1: keep the content, `pnpm format`.
 - `MIGRATION_COLLISION` / `MIGRATION_ORDER`, `VESSEL_MOVED`: back to the vessel, which fixes, seals
   and is added again.
