@@ -30,7 +30,11 @@
   request holds its story until the session started for it claims it (`worker register --request <id>`, which the
   vessel prompt passes; it records `claimed_by` on the request, and the claimant's hold is the lock from then on:
   `REQUEST_NOT_YOURS` for a session its taker didn't launch, `REQUEST_CLAIMED` after the first claim), its
-  dispatcher ends, or the watch's expiry passes; no other child of the dispatcher is exempt: `wanted take` refuses a vessel
+  dispatcher ends, or the watch's expiry after its take passes (`wanted started` never extends it); no other child
+  of the dispatcher is exempt. An unclaimed request can always be lifted: `wanted drop` takes a started request
+  nobody claimed (its taker or the harbormaster), `story release` drops the request holding the story for them
+  (anyone else gets `NOT_HOLDER` naming it), and the round drops one whose taker is gone and names one older than
+  the expiry: `wanted take` refuses a vessel
   request whose story is held or on the trunk, and `wanted add` refuses a second request for one story
   (`STORY_REQUESTED`). With the ledger, a vessel's prompt starts with `python3 .keelokit/bin/ledger.py take <ID>`.
   `LOGBOOK.md` shows each worker's story. **Every clone of a project must run Harbor 0.6.0 for the lock to hold**

@@ -1143,8 +1143,8 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   transaction as the registration. `STORY_TAKEN` runs in every project, with or without a ledger, and whatever
   the ledger answers on that call; only `STORY_ON_TRUNK` asks the ledger. The prompt's first line needs the ledger.
 - **A vessel request holds its story** while it is `taken` or `started` by a dispatcher that is still active and
-  no session has claimed it, for at most `watch_expiry_minutes` after its take (or its start): a session that
-  never registers is as gone as a lost worker. `wanted take` of another request for that story, and a take or a
+  no session has claimed it, for at most `watch_expiry_minutes` after its take (`wanted started` never extends it):
+  a session that never registers is as gone as a lost worker. `wanted take` of another request for that story, and a take or a
   `worker register --story` by any worker, get `STORY_TAKEN` naming the request, other children of the same
   dispatcher included.
 - **The claim ties a request to one session.** The vessel's prompt registers with `worker register --story <ID>
@@ -1155,6 +1155,14 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   `REQUEST_CLAIMED`, naming the claimant, when another active worker claimed it first (first commit wins). A session
   not registered yet (`ledger.py take`, the prompt's first line) is checked against workers only; its register
   claims.
+- **An unclaimed request can always be lifted**, before the expiry too: `wanted drop` takes a started request
+  nobody claimed (no `claimed_by`, or its claimant ended or is lost), from its taker or the harbormaster; a claimed
+  request whose claimant is active stays (its hold is the claimant's). `story release ID`, when only a request
+  holds the story, drops that request for its taker or the harbormaster and says so; anyone else gets
+  `NOT_HOLDER` naming the request and its `wanted drop`. The harbormaster's round drops a started, unclaimed
+  request whose taker is no longer active, and names each one older than the watch's expiry with its
+  `wanted drop`. Mixed versions are unsupported (an old vessel doesn't know `--request`; an old dispatcher's prompt
+  lacks it, so the new vessel is refused by its own request), and they end in this same state, lifted the same ways.
 - **Identity is self-declared**, as everywhere in Harbor: account and host come from the clone's local file and
   `--spawned-by` is the session's word. The claim stops an accidental steal and a double holder; a session that lies
   can still claim first, but then exactly one holder exists and the real spawn gets `REQUEST_CLAIMED` naming it, in
@@ -1505,7 +1513,8 @@ claimed_by = "acct1/mbp/session_01Ve"  # (6, HRB-2) optional: the vessel session
   `python3 .keelokit/bin/ledger.py take <ID>` (with LEDGER-013 it calls `harbor.py story take`); its
   `worker register --story <ID>` is the take in the logbook.
 - `wanted started ID --session S` — the taker records the session it started.
-- `wanted drop ID` — the requester or the watch holder gives it up.
+- `wanted drop ID` — the requester or the watch holder gives it up. *(6, HRB-2)* A started request nobody claimed
+  is dropped by its taker or the harbormaster.
 - `wanted list [--all]` — open and taken by default.
 
 ### The dispatcher: one per account
