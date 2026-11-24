@@ -927,6 +927,8 @@ def cmd_worker(args) -> int:
     me = identity(args.session)
     path = worker_path(me["id"])
 
+    if args.action == "register" and args.request and not args.story:
+        raise HarborError("USAGE", "--request needs --story: a vessel claims the request for its story")
     if args.action == "register" and args.story:
         keelokit("a worker for a story")
         story_id(args.story)
@@ -961,8 +963,22 @@ def cmd_worker(args) -> int:
                 raise HarborError("SPAWNER_UNKNOWN", f"{args.spawned_by} is not an active worker: a session that "
                                   "ended or is lost can't own new work")
             cur["spawned_by"] = args.spawned_by
+        if args.request:  # the claim: this session is the one the request's dispatcher launched for it
+            r = request_of(files, args.request)
+            if r.get("role") != "vessel" or r.get("state") not in ("taken", "started") \
+                    or not args.spawned_by or r.get("taken_by") != args.spawned_by \
+                    or not isinstance(r.get("story"), str) or r["story"].casefold() != args.story.casefold():
+                raise HarborError("REQUEST_NOT_YOURS", f"{args.request} is a {r.get('role')} request for "
+                                  f"{r.get('story') or 'no story'}, {r.get('state')}" + (f" by {r['taken_by']}" if r.get("taken_by") else "")
+                                  + f": only a vessel for that story launched by its taker (--spawned-by) claims it")
+            claimant = workers(files).get(r.get("claimed_by") or "")
+            if claimant and claimant["id"] != me["id"] and claimant.get("state") == "active":
+                raise HarborError("REQUEST_CLAIMED", f"{args.request} is already claimed by {claimant['id']} (active): "
+                                  "the first claim wins; if that is not the session you launched, tell the harbormaster")
+            r["claimed_by"] = me["id"]
+            save(files, f"harbor/wanted/{args.request}.toml", r)
         if lock and not (cur.get("state") == "active" and has_story(cur, args.story)):
-            refuse_taken(files, args.story, cfg, but=me["id"], spawn=cur)
+            refuse_taken(files, args.story, cfg, but=me["id"])
         elif not args.story and cur.get("state") in ("ended", "lost") and cur.get("story"):
             # it released that story when it ended or was lost: registering again doesn't take it back
             if cur.get("canonical_branch") == cur["story"].lower():
@@ -2052,18 +2068,17 @@ def holders(files: dict, sid: str, but: str | None = None) -> list[str]:
                   if w.get("state") == "active" and w["id"] != but and has_story(w, sid))
 
 
-def request_holds(files: dict, sid: str, cfg: dict, but_request: str | None = None,
-                  spawn: dict | None = None) -> list[str]:
-    """The vessel requests holding `sid`: taken (or started) by a dispatcher that is still active, while the session
-    it spawned hasn't registered or ended, for at most the watch's expiry after the take (or the start): a session
-    that never registers is as gone as a lost worker. `spawn`, a worker about to take the story, is exempt from the
-    requests of the dispatcher that launched it (it is that request's session)."""
+def request_holds(files: dict, sid: str, cfg: dict, but_request: str | None = None) -> list[str]:
+    """The vessel requests holding `sid`: taken (or started) by a dispatcher that is still active and not yet claimed
+    by the session it spawned (`worker register --request`, which records `claimed_by`: from then on the claimant's
+    own hold is the lock), for at most the watch's expiry after the take (or the start): a session that never
+    registers is as gone as a lost worker. No other session is exempt, not even another child of that dispatcher."""
     ws = workers(files)
     cutoff = parse_ts(now()) - expiry(cfg)
     out = []
     for rid, r in requests(files).items():
         if rid == but_request or r.get("role") != "vessel" or r.get("state") not in ("taken", "started") \
-                or not isinstance(r.get("story"), str) or r["story"].casefold() != sid.casefold():
+                or not isinstance(r.get("story"), str) or r["story"].casefold() != sid.casefold() or r.get("claimed_by"):
             continue
         taker = ws.get(r.get("taken_by"))
         if not taker or taker.get("state") != "active":
@@ -2073,22 +2088,14 @@ def request_holds(files: dict, sid: str, cfg: dict, but_request: str | None = No
                 continue  # its session never registered within the watch's expiry
         except (ValueError, HarborError):
             continue  # no readable time: holds nothing (never a lock nobody can lift)
-        since = r.get("taken_at") or ""
-        if any((r.get("session") and w.get("session") == r["session"] and w.get("account") == taker.get("account"))
-               or (w.get("spawned_by") == r["taken_by"] and has_story(w, sid) and (w.get("registered") or "") >= since)
-               for w in ws.values() if spawn is None or w["id"] != spawn["id"]):
-            continue  # its session registered (and holds the story itself, or ended): the request is done
-        if spawn and spawn.get("spawned_by") == r["taken_by"] and \
-                (r.get("state") == "taken" or spawn.get("session") == r.get("session")):
-            continue
-        out.append(f"request {rid} (taken by {r['taken_by']}; its session hasn't registered yet)")
+        out.append(f"request {rid} (taken by {r['taken_by']}; its session hasn't claimed it yet)")
     return out
 
 
 def refuse_taken(files: dict, sid: str, cfg: dict, but: str | None = None, requests_too: bool = True,
-                 but_request: str | None = None, spawn: dict | None = None) -> None:
+                 but_request: str | None = None) -> None:
     """STORY_TAKEN: the logbook's lock. It never depends on the ledger."""
-    held = holders(files, sid, but) + (request_holds(files, sid, cfg, but_request, spawn) if requests_too else [])
+    held = holders(files, sid, but) + (request_holds(files, sid, cfg, but_request) if requests_too else [])
     if held:
         raise HarborError("STORY_TAKEN", f"{sid} is held by {', '.join(held)}: harbor.py story release {sid} is the "
                           "holder's; a lost or ended worker holds nothing")
@@ -2180,7 +2187,7 @@ def cmd_story(args) -> int:
             return "again", None  # its own hold, even beside a duplicate an older Harbor wrote (the round repairs it)
         # an unregistered session is only checked against workers: its own request (the dispatcher's take) holds the
         # story for it, and its `worker register --story` is the real take
-        refuse_taken(files, sid, cfg, but=wid, requests_too=bool(w), spawn=w)
+        refuse_taken(files, sid, cfg, but=wid, requests_too=bool(w))
         if not w:
             return "unregistered", None
         was = w.get("story")
@@ -4169,7 +4176,7 @@ def wanted_prompt(args, cfg: dict, me: dict) -> int:
     title = session_title(role, convoy, story, me["account"])
     register = ("python3 \"${CLAUDE_PLUGIN_ROOT}/lib/harbor.py\" --session <your session id> worker register "
                 f"--role {role}" + (f" --story {story}" if story else "") + (f" --convoy {convoy}" if convoy else "")
-                + f" --spawned-by {me['id']} --model {model}")
+                + f" --spawned-by {me['id']} --model {model}" + (f" --request {args.id}" if role == "vessel" else ""))
     lines = [f"You are a Harbor {role} session on account {me['account']}, started by the dispatcher {me['id']}."]
     if role == "vessel" and has_ledger():  # HRB-2: the story is taken first (LEDGER-013: ledger.py take calls story take)
         lines.insert(0, f"python3 .keelokit/bin/ledger.py take {story}")
@@ -4544,6 +4551,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--model")
     s.add_argument("--spawned-by", metavar="WORKER", help="the session that launched this one, which owns its result")
     s.add_argument("--story", help="the story this session builds: its title and canonical branch come from it")
+    s.add_argument("--request", metavar="ID", help="the vessel request this session was started for: claims it")
     s = wsub.add_parser("end")
     for f in ("--branch", "--head", "--verified", "--pending", "--worktree", "--log"):
         s.add_argument(f)
