@@ -923,16 +923,16 @@ def paused(acc: dict | None) -> str | None:
 
 
 def cmd_worker(args) -> int:
-    project()
+    cfg = config(project())
     me = identity(args.session)
     path = worker_path(me["id"])
 
     if args.action == "register" and args.story:
         keelokit("a worker for a story")
         story_id(args.story)
-    lock = args.action == "register" and bool(args.story) and has_ledger()  # HRB-2: the take, at registration
+    lock = args.action == "register" and bool(args.story)  # HRB-2: the take, at registration; never on the ledger
     if lock:
-        refuse_on_trunk(args.story)
+        refuse_on_trunk(args.story)  # only this asks the ledger, and a ledger that can't say is no refusal
     title = session_title(args.role, args.convoy, args.story, me["account"]) if args.action == "register" else None
     if args.action == "register" and args.story and not title:
         raise HarborError("UNKNOWN_STORY", f"Keelokit's status.py title doesn't know {args.story} (or this Keelokit "
@@ -961,8 +961,8 @@ def cmd_worker(args) -> int:
                 raise HarborError("SPAWNER_UNKNOWN", f"{args.spawned_by} is not an active worker: a session that "
                                   "ended or is lost can't own new work")
             cur["spawned_by"] = args.spawned_by
-        if lock:
-            refuse_taken(files, args.story, but=me["id"])
+        if lock and not (cur.get("state") == "active" and has_story(cur, args.story)):
+            refuse_taken(files, args.story, cfg, but=me["id"], spawn=cur)
         elif not args.story and cur.get("state") in ("ended", "lost") and cur.get("story"):
             # it released that story when it ended or was lost: registering again doesn't take it back
             if cur.get("canonical_branch") == cur["story"].lower():
@@ -2042,17 +2042,103 @@ def story_id(sid: str) -> str:
     return sid
 
 
+def has_story(w: dict, sid: str) -> bool:
+    return sid.casefold() in (x.casefold() for x in stories_of(w.get("story")))
+
+
 def holders(files: dict, sid: str, but: str | None = None) -> list[str]:
     """The active workers holding `sid` (an id compares without case), except `but`."""
     return sorted(w["id"] for w in workers(files).values()
-                  if w.get("state") == "active" and w["id"] != but
-                  and sid.casefold() in (x.casefold() for x in stories_of(w.get("story"))))
+                  if w.get("state") == "active" and w["id"] != but and has_story(w, sid))
 
 
-def refuse_taken(files: dict, sid: str, but: str | None = None) -> None:
-    if held := holders(files, sid, but):
-        raise HarborError("STORY_TAKEN", f"{sid} is held by {', '.join(held)} (active): harbor.py story release "
-                          f"{sid} is theirs; a lost or ended worker holds nothing")
+def request_holds(files: dict, sid: str, cfg: dict, but_request: str | None = None,
+                  spawn: dict | None = None) -> list[str]:
+    """The vessel requests holding `sid`: taken (or started) by a dispatcher that is still active, while the session
+    it spawned hasn't registered or ended, for at most the watch's expiry after the take (or the start): a session
+    that never registers is as gone as a lost worker. `spawn`, a worker about to take the story, is exempt from the
+    requests of the dispatcher that launched it (it is that request's session)."""
+    ws = workers(files)
+    cutoff = parse_ts(now()) - expiry(cfg)
+    out = []
+    for rid, r in requests(files).items():
+        if rid == but_request or r.get("role") != "vessel" or r.get("state") not in ("taken", "started") \
+                or not isinstance(r.get("story"), str) or r["story"].casefold() != sid.casefold():
+            continue
+        taker = ws.get(r.get("taken_by"))
+        if not taker or taker.get("state") != "active":
+            continue  # its dispatcher ended or is lost: nobody will start that session
+        try:
+            if parse_ts(r.get("started_at") or r.get("taken_at") or "") < cutoff:
+                continue  # its session never registered within the watch's expiry
+        except (ValueError, HarborError):
+            continue  # no readable time: holds nothing (never a lock nobody can lift)
+        since = r.get("taken_at") or ""
+        if any((r.get("session") and w.get("session") == r["session"] and w.get("account") == taker.get("account"))
+               or (w.get("spawned_by") == r["taken_by"] and has_story(w, sid) and (w.get("registered") or "") >= since)
+               for w in ws.values() if spawn is None or w["id"] != spawn["id"]):
+            continue  # its session registered (and holds the story itself, or ended): the request is done
+        if spawn and spawn.get("spawned_by") == r["taken_by"] and \
+                (r.get("state") == "taken" or spawn.get("session") == r.get("session")):
+            continue
+        out.append(f"request {rid} (taken by {r['taken_by']}; its session hasn't registered yet)")
+    return out
+
+
+def refuse_taken(files: dict, sid: str, cfg: dict, but: str | None = None, requests_too: bool = True,
+                 but_request: str | None = None, spawn: dict | None = None) -> None:
+    """STORY_TAKEN: the logbook's lock. It never depends on the ledger."""
+    held = holders(files, sid, but) + (request_holds(files, sid, cfg, but_request, spawn) if requests_too else [])
+    if held:
+        raise HarborError("STORY_TAKEN", f"{sid} is held by {', '.join(held)}: harbor.py story release {sid} is the "
+                          "holder's; a lost or ended worker holds nothing")
+
+
+def take_streak(files_head: str | None, w: dict, sid: str) -> int:
+    """Where the worker's current hold of `sid` began, as the logbook commit's depth (smaller: earlier): the oldest
+    commit of the unbroken run, newest first, in which its file says active and that story."""
+    path = worker_path(w["id"])
+    if not files_head:
+        return 1 << 60
+    first = None
+    for sha in git("log", "--format=%H", files_head, "--", path).split():
+        res = run("git", "show", f"{sha}:{path}", check=False)
+        try:
+            d = tomllib.loads(res.stdout) if res.returncode == 0 else {}
+        except tomllib.TOMLDecodeError:
+            d = {}
+        if d.get("state") != "active" or not has_story(d, sid):
+            break
+        first = sha
+    return int(git("rev-list", "--count", first)) if first else 1 << 60
+
+
+def repair_double_holds(files: dict, head: str | None, by: str) -> list[str]:
+    """A Harbor older than 0.6.0 doesn't know the lock (the schema stays 1): it can leave two active holders. Keep the
+    one whose hold began first and release the others' story, saying so."""
+    lines, groups = [], {}
+    for w in workers(files).values():
+        if w.get("state") == "active":
+            for x in stories_of(w.get("story")):
+                groups.setdefault(x.casefold(), []).append(w)
+    for key, ws in sorted(groups.items()):
+        if len(ws) < 2:
+            continue
+        sid = stories_of(ws[0].get("story"))[[x.casefold() for x in stories_of(ws[0].get("story"))].index(key)]
+        order = sorted(ws, key=lambda w: (take_streak(head, w, sid), w.get("last_seen") or "", w["id"]))
+        keep, rest = order[0], order[1:]
+        for w in rest:
+            left = [x for x in stories_of(w.get("story")) if x.casefold() != key]
+            if left:
+                w["story"] = ", ".join(left)
+            else:
+                w.pop("story", None)
+            if w.get("canonical_branch") == sid.lower():
+                w.pop("canonical_branch", None)
+            save(files, worker_path(w["id"]), w)
+        lines.append(f"double hold: {sid} was held by {', '.join(sorted(w['id'] for w in ws))}; kept "
+                     f"{keep['id']} (its hold began first), released it from {', '.join(w['id'] for w in rest)}")
+    return lines
 
 
 def answers_for(files: dict, me: dict, wid: str) -> bool:
@@ -2064,7 +2150,7 @@ def answers_for(files: dict, me: dict, wid: str) -> bool:
 
 
 def cmd_story(args) -> int:
-    project()
+    cfg = config(project())
     sid = story_id(args.id)
     me = identity(args.session)
     wid = args.worker or me["id"]
@@ -2090,19 +2176,21 @@ def cmd_story(args) -> int:
         if (w or args.worker) and (not w or w.get("state") != "active"):
             raise HarborError("NOT_REGISTERED", f"{wid} is not an active worker" + (f" (it is {w.get('state')})" if w else "")
                               + ": a lost or ended worker takes nothing; harbor.py worker register first")
-        refuse_taken(files, sid, but=wid)
+        if w and has_story(w, sid):
+            return "again", None  # its own hold, even beside a duplicate an older Harbor wrote (the round repairs it)
+        # an unregistered session is only checked against workers: its own request (the dispatcher's take) holds the
+        # story for it, and its `worker register --story` is the real take
+        refuse_taken(files, sid, cfg, but=wid, requests_too=bool(w), spawn=w)
         if not w:
             return "unregistered", None
         was = w.get("story")
-        if was and was.casefold() == sid.casefold():
-            return "again", None
         w.update(story=sid, canonical_branch=sid.lower())
         keep(files, w)
         return "taken", was
 
     def release(files, head):
         w = target(files)
-        mine = w and sid.casefold() in (x.casefold() for x in stories_of(w.get("story")))
+        mine = w and has_story(w, sid)
         if mine and w.get("state") == "active":
             w.pop("story", None)
             if w.get("canonical_branch") == sid.lower():
@@ -3421,6 +3509,7 @@ def cmd_harbormaster(args) -> int:
                 save(files, worker_path(wid), wk)
                 lines.append(f"lost: {wid} (last seen {wk.get('last_seen')}): its account's place is free"
                              + (f"; {wk['story']} is released" if wk.get("story") else ""))
+        lines += repair_double_holds(files, h, me["id"])
         ws = workers(files)
         for wid, wk in ws.items():
             owner_id = wk.get("spawned_by")
@@ -3993,6 +4082,14 @@ def wanted_add(args, cfg: dict, me: dict) -> int:
             convoy_of(files, args.convoy)
         if account != "any" and account not in accounts(files):
             raise HarborError("ACCOUNT_UNKNOWN", f"account '{account}' has no cap in the logbook")
+        if story:  # HRB-2: one vessel request per story at a time: none open, none holding it
+            holding = request_holds(files, story, cfg)
+            for rid, r in requests(files).items():
+                if r.get("role") == "vessel" and isinstance(r.get("story"), str) \
+                        and r["story"].casefold() == story.casefold() \
+                        and (r.get("state") == "open" or any(h.startswith(f"request {rid} ") for h in holding)):
+                    raise HarborError("STORY_REQUESTED", f"{rid} already asks for a vessel for {r['story']} "
+                                      f"({r.get('state')}): drop it first (wanted drop {rid})")
         wid = next_id(files, "wanted", "w")
         save(files, f"harbor/wanted/{wid}.toml", {
             "schema": SCHEMA, "id": wid, "role": role, "story": story, "convoy": args.convoy, "model": model,
@@ -4013,8 +4110,7 @@ def request_of(files: dict, rid: str) -> dict:
 
 
 def wanted_take(args, cfg: dict, me: dict) -> int:
-    lock = has_ledger()  # HRB-2: a vessel request whose story is held or on the trunk is refused
-    if lock:
+    if has_ledger():  # HRB-2: a vessel request whose story is on the trunk is refused (held: in the transaction)
         _, files = snapshot()
         r = requests(files).get(args.id) or {}
         if r.get("role") == "vessel" and r.get("state") == "open" and isinstance(r.get("story"), str) \
@@ -4043,8 +4139,8 @@ def wanted_take(args, cfg: dict, me: dict) -> int:
         n = active_count(files, me["account"])
         if n >= acc["max_sessions"]:
             raise HarborError("ACCOUNT_AT_CAP", f"account '{me['account']}' already runs {n} of {acc['max_sessions']} session(s)")
-        if lock and r.get("role") == "vessel" and r.get("story"):
-            refuse_taken(files, r["story"])
+        if r.get("role") == "vessel" and isinstance(r.get("story"), str) and r["story"]:
+            refuse_taken(files, r["story"], cfg, but_request=args.id)
         r.update(state="taken", taken_by=me["id"], taken_at=now())
         save(files, f"harbor/wanted/{args.id}.toml", r)
         touch(files, w)
