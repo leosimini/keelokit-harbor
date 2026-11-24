@@ -51,9 +51,21 @@ line per open convoy with what it waits for. Act on each line:
 - `past its cutoff …: mandatory <STORY> not delivered, it waits`: ask the story's vessel (or the skipper)
   when it lands; deferring a mandatory story is the gatekeeper's call (`convoy defer`), never automatic.
   `the next assemble defers <STORY>`: tell the integrator to assemble; the optional ones go by themselves.
-- a loose push: tell the gatekeeper what landed outside a convoy.
+- a loose push: tell the gatekeeper what landed outside a convoy. With Keelokit's ledger the line lists the
+  stories that entered and the unattributed commits: name those commits to the gatekeeper (attributing them on main
+  is `ledger.py correct`, a person's `backfill --accept`).
 - `orphan: …`: a session still running whose owner ended, got lost or is paused. Tell the gatekeeper;
   its result is either taken over by its owner's replacement or ended.
+
+Then, with Keelokit's ledger, `ledger: <CODE> <detail>` lines: the error-level differences of `ledger.py check`
+(five lines at most; `(+N more …)` means run `python3 .keelokit/bin/ledger.py check` for the rest). Tell the
+gatekeeper each one once; fixing history is theirs (`ledger.py correct`). `ledger: not available` (no ledger) or
+`ledger: … not available (why)` (a ledger that can't answer) is one line and the round goes on; but while the
+ledger can't answer, the ok fails closed (`LEDGER_UNAVAILABLE`): say so to the gatekeeper.
+
+The ok asks the ledger too: `LEDGER_DIFF` names each vessel the ledger holds back (`UNATTRIBUTED` commit,
+`UNKNOWN_STORY`, `DONE_TWICE`: its story already on the trunk). Never work around it: tell the vessel's owner to fix
+its commits, or the skipper to take it out of the convoy, then assemble and give the ok again.
 
 After those lines, control prints what is late: `escalated: …` (a late question, a message for the gatekeeper, or one
 queued past `escalate_minutes`), `late: …`, `account A: no watcher` and `account A: no heartbeat recorded`. Tell the
