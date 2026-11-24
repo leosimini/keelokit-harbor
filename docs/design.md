@@ -74,7 +74,7 @@ Harbor depends on Keelokit and copies none of its code. It uses these as interfa
 | `touches`, `critical.toml` | an early hotspot warning, before any code *(phase 2)* |
 | the `Story:` trailer | which story a vessel carries, read from its commits (without the ledger, below) |
 | `ledger.py --json` answering `"schema": 1` *(6)* | the switch for every phase-6 behaviour; any other answer, a timeout, an exit other than 0 or 1, or no `ledger.py`: Harbor behaves as 0.5 |
-| `ledger.py attribution <seal_base>..<head> --json` *(6)* | `convoy add`: `NO_STORY` for a vessel's unattributed commit, and the vessel's story. In Keelokit's docs/ledger.md, not in its 0.16.0 code: until it answers, `convoy add` notes it and reads the `Story:` trailers |
+| `ledger.py attribution <seal_base>..<head> --json` *(6)* | `convoy add`: `NO_STORY` for a vessel's unattributed commit, and the vessel's story. The contract is in "Phase 6: Keelokit's ledger"; Keelokit builds it in LEDGER-013 (in its docs/ledger.md, not in its 0.16.0 code): until it answers, `convoy add` notes it and reads the `Story:` trailers |
 | the `Convoy: <n>` trailer *(6)* | ends each vessel's merge into `convoy/<n>`; the ledger reads from it which convoy sailed a commit (Keelokit 0.15 already reads it) |
 
 Harbor needs **Keelokit 0.12.0** or later: the landing policy, shared seals, the pre-push that lets the
@@ -557,7 +557,7 @@ print `harbor: CODE: why` and exit 1 (refused) or 2 (environment or command line
   and moves its story from `expected` to `optional`.
 - **The ledger** *(6, HRB-1)*: with Keelokit's ledger, before the vessel is recorded, `ledger.py attribution
   <seal_base>..<head> --json`; an unattributed non-merge commit of the vessel's own refuses the add with
-  `NO_STORY` and the ledger's suggestion, and the vessel's story is the ledger's ("Phase 6: Keelokit's ledger").
+  `NO_STORY` and how to attribute each commit, and the vessel's story is the ledger's ("Phase 6: Keelokit's ledger").
 - **Errors:** `BRANCH_NOT_PUSHED`, `HEAD_MISMATCH`, `NO_SEAL`, `SEAL_RED`, `HOTSPOT_HELD`,
   `VESSEL_TAKEN`, `NOT_SKIPPER`, `CONVOY_CLOSED`, `UNKNOWN_CONVOY`, `SAILING` (an abort while the
   sail is pushing the trunk), `NO_STORY` *(6)*.
@@ -1069,27 +1069,35 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   (a vessel that merged a newer `main` brings `main`'s commits, which are not its own). A merge is never
   unattributed (the ledger attributes what it brings), and `No-story:` is the ledger's to judge. Any own
   non-merge commit with `attributed = false` refuses the add: `harbor: NO_STORY: <short sha> '<subject>', …`
-  (exit 1), after the ledger's suggestion for each one on stderr. Nothing is recorded.
+  (exit 1), after a line for each saying how to attribute it. Nothing is recorded.
 - **The story from the ledger.** Without `--story`, the vessel's `story` is the stories of its own commits in
-  the answer (merges included), sorted and joined with `, `; with none, no `story`. `--story` still overrides.
-- **An answer Harbor can't read is not a refusal.** When `attribution` exits other than 0 or 1 (Keelokit 0.16.0
-  prints its usage and exits 2: the command is in its docs, not yet in its code), times out, prints no JSON, or
-  its commits lack a sha or a boolean `attributed`, `convoy add` prints `harbor: ledger: attribution not
-  available (<why>)` and goes on as 0.5 (the `Story:` trailers). A ledger that can't answer must not stop every
-  convoy; HRB-3's ok checks the ledger again before the sail.
-- **The answer Harbor reads** (the contract asked of Keelokit's `attribution`; other keys are ignored):
+  the answer (`story` and `part_of`, merges included), sorted and joined with `, `; with none, no `story`. `--story` still overrides.
+- **An answer Harbor can't read is not a refusal.** When `attribution` exits other than 0 (2: usage or
+  unsupported, which is what Keelokit 0.16.0 does, since the command is in its docs and not yet in its code; 3:
+  history incomplete), times out, prints no JSON, or its commits lack a sha or a boolean `attributed`, `convoy add`
+  prints `harbor: ledger: attribution not available (<why>)` and goes on as 0.5 (the `Story:` trailers). A ledger
+  that can't answer must not stop every convoy; HRB-3's ok checks the ledger again before the sail.
+- **The contract with Keelokit's `ledger.py attribution` (LEDGER-013).** Both sides build against this one shape:
+  `python3 .keelokit/bin/ledger.py attribution <a>..<b> --json` exits 0 when it answered, even if some commits are
+  unattributed; 2 for usage or unsupported (also a range whose ends don't resolve); 3 when the history is
+  incomplete.
 
   ```json
-  {"schema": 1, "range": "a2becf56d…..4d44fdd8…",
-   "commits": [{"sha": "4d44fdd8…", "subject": "feat: login form", "merge": false,
-                "stories": ["AUTH-001"], "attributed": true},
-               {"sha": "9c1e02b7…", "subject": "fix: typo", "merge": false, "stories": [], "attributed": false,
-                "suggestion": "add `Part-of: AUTH-001` to 9c1e02b7 (git rebase -i, reword)"}],
-   "stories": ["AUTH-001"], "suggestion": "…"}
+  {"schema": 1,
+   "range": "<a>..<b>",
+   "ok": true,
+   "commits": [{"sha": "<40 hex>", "subject": "…",
+                "story": ["AUTH-001"], "part_of": [], "no_story": null,
+                "merge": false, "attributed": true, "via": "own"}],
+   "unattributed": ["<sha>"],
+   "stories": ["AUTH-001"]}
   ```
 
-  `sha` may be abbreviated (7 characters or more); a commit's `suggestion` wins over the top-level one. Exit 0 when
-  every commit is attributed, 1 otherwise.
+  `ok`: every non-merge commit of `a..b` is attributed. `via`: how a commit is attributed (`own` trailer, a `merge`
+  that brings it, an approved `correction` row), `null` when it isn't. A merge counts as attributed when everything
+  it brings is (`via` `own` when it carries a trailer itself). `stories` is the union of `story` and `part_of` over
+  the range, sorted. Harbor reads `commits` (`sha`, `subject`, `story`, `part_of`, `attributed`) and checks merges
+  itself with git; it ignores other keys, and matches a `sha` by prefix.
 - **The logbook keeps `schema = 1`.** HRB-1 adds no key: a vessel's `story` is the key it always had.
 
 ## Phase 5: the fleet layer without Keelokit *(0.5.0)*

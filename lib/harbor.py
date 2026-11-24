@@ -1951,9 +1951,10 @@ def ledger_seconds() -> float:
         return LEDGER_SECONDS
 
 
-def run_ledger(*args: str) -> tuple[dict | None, str]:
+def run_ledger(*args: str, answers: tuple[int, ...] = (0, 1)) -> tuple[dict | None, str]:
     """The project's ledger.py answering `args`: (its JSON, "") when it is an object with schema 1, else (None, why).
-    Exit 0 and 1 are answers (1: differences); any other exit, a timeout or text that isn't JSON is none."""
+    The exits in `answers` are answers (`--json`: 0, or 1 for differences); any other exit, a timeout or text that
+    isn't JSON is none."""
     tool = ROOT / LEDGER_TOOL
     if not tool.is_file():
         return None, f"no {LEDGER_TOOL}"
@@ -1965,7 +1966,7 @@ def run_ledger(*args: str) -> tuple[dict | None, str]:
         return None, f"{what} did not answer in {seconds:g} s"
     except OSError as e:
         return None, f"{what}: {e}"
-    if res.returncode not in (0, 1):
+    if res.returncode not in answers:
         why = (res.stderr.decode(errors="replace").strip().splitlines() or [""])[0][:160]
         return None, f"{what}: exit {res.returncode}" + (f" ({why})" if why else "")
     try:
@@ -1986,11 +1987,12 @@ def has_ledger() -> bool:
 
 
 def ledger_attribution(base: str, tip: str, trunk_tip: str) -> tuple[list[str], list[tuple[str, str, str]]] | None:
-    """`ledger.py attribution <base>..<tip> --json` for a vessel: (its stories, its unattributed commits as
-    (sha, subject, the ledger's suggestion)), or None, with a note, when the ledger gives no usable answer.
-    Only the vessel's own commits count: not those main already has (a merge of a newer main brings them),
-    and a merge is never unattributed (the ledger attributes what it brings)."""
-    data, why = run_ledger("attribution", f"{base}..{tip}", "--json")
+    """`ledger.py attribution <base>..<tip> --json` for a vessel (the contract with Keelokit's LEDGER-013, in
+    docs/design.md): (its stories, its unattributed commits as (sha, subject, what to do)), or None, with a note,
+    when the ledger gives no usable answer (exit 2: unsupported; 3: history incomplete). Only the vessel's own
+    commits count: not those main already has (a merge of a newer main brings them), and a merge is never
+    unattributed (the ledger attributes what it brings)."""
+    data, why = run_ledger("attribution", f"{base}..{tip}", "--json", answers=(0,))
     commits = data.get("commits") if data else None
     if data and not why and not (isinstance(commits, list) and all(
             isinstance(c, dict) and isinstance(c.get("sha"), str) and len(c["sha"]) >= 7
@@ -2008,9 +2010,11 @@ def ledger_attribution(base: str, tip: str, trunk_tip: str) -> tuple[list[str], 
         sha = next((o for o in own if o.startswith(c["sha"].lower())), None)  # a ledger may abbreviate
         if sha is None:
             continue
-        stories.update(s.strip() for s in c.get("stories") or [] if isinstance(s, str) and s.strip())
+        for key in ("story", "part_of"):
+            stories.update(s.strip() for s in c.get(key) or [] if isinstance(s, str) and s.strip())
         if sha not in merges and not c["attributed"]:
-            bad.append((sha, str(c.get("subject") or ""), str(c.get("suggestion") or data.get("suggestion") or "")))
+            bad.append((sha, str(c.get("subject") or ""), f"{short(sha)}: add `Part-of: <ID>`, `Story: <ID>` or "
+                        "`No-story: <category>` as its message's last paragraph (git rebase -i, reword)"))
     return sorted(stories), bad
 
 

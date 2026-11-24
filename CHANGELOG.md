@@ -9,10 +9,11 @@
   merge commit (`--no-ff --no-log`) whose message ends with the trailer `Convoy: <n>`, also when a generated-file
   conflict is rebuilt; a `CONFLICT` prints the merge command that keeps the trailer, and a vessel merged by hand
   without it is named. `convoy add` runs `ledger.py attribution <seal_base>..<head> --json` and refuses a vessel
-  whose own non-merge commit is unattributed with `NO_STORY: <short sha> …` (exit 1) and the ledger's suggestion;
+  whose own non-merge commit is unattributed with `NO_STORY: <short sha> …` (exit 1) and how to attribute it;
   the vessel's story is the ledger's (`--story` still overrides). An `attribution` that can't be read (Keelokit
-  0.16.0 doesn't have the command yet, a timeout, no JSON) is a note, never a refusal: the add reads the `Story:`
-  trailers as before. The answer Harbor reads is in docs/design.md, "Phase 6: Keelokit's ledger". The logbook
+  0.16.0 doesn't have the command yet, exit 3 for an incomplete history, a timeout, no JSON) is a note, never a
+  refusal: the add reads the `Story:` trailers as before. The contract with Keelokit's `ledger.py attribution`
+  (LEDGER-013) is in docs/design.md, "Phase 6: Keelokit's ledger". The logbook
   stays schema 1.
 - **A vessel carrying several stories delivers each of them.** The round's cutoff line, `convoy assemble`,
   `convoy status`, the convoy page and `convoy defer` compared a vessel's `story` as one text, so a vessel with

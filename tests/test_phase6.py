@@ -17,9 +17,10 @@ from test_phase2 import Phase2
 # Keelokit's ledger.py, as far as Harbor sees it.
 # `--json`: HARBOR_FAKE_LEDGER = the JSON value of "schema" (default 1), or bad | sleep | exit2 | binary (not UTF-8).
 #   Exits 1, as the real one does when there are differences: an answer with schema 1 counts whatever the exit.
-# `attribution A..B --json`: the commits of the range with their stories, from Story:/Part-of:/No-story: trailers;
-#   a merge is reported unattributed unless it has its own trailer (the worst a ledger may say: Harbor ignores
-#   merges itself). HARBOR_FAKE_ATTRIBUTION = usage (Keelokit 0.16.0: no such command, usage and exit 2) | bad | sleep
+# `attribution A..B --json`: the contract with Keelokit's ledger.py attribution (LEDGER-013, docs/design.md), from
+#   Story:/Part-of:/No-story: trailers; exit 0 whenever it answered. A merge is reported unattributed unless it has
+#   its own trailer (the worst a ledger may say: Harbor ignores merges itself). HARBOR_FAKE_ATTRIBUTION = usage
+#   (Keelokit 0.16.0: no such command, usage and exit 2) | exit3 (history incomplete) | bad | sleep
 #   | no-attributed (`attributed` is not a boolean) | short (abbreviated shas).
 # Every call is logged to HARBOR_FAKE_LEDGER_LOG.
 FAKE_LEDGER = """\
@@ -54,26 +55,31 @@ if sys.argv[1:2] == ["attribution"] and len(sys.argv) == 4 and sys.argv[3] == "-
     if mode == "bad":
         print("not json")
         sys.exit(0)
+    if mode == "exit3":
+        print("Keelokit: the history is incomplete", file=sys.stderr)
+        sys.exit(3)
     commits, stories = [], set()
     for sha in git("rev-list", "--reverse", sys.argv[2]).split():
         parents = git("rev-list", "--parents", "-n", "1", sha).split()[1:]
         def values(key):
             out = git("log", "-1", f"--format=%(trailers:key={key},valueonly,separator=%x2C)", sha)
             return [v.strip() for v in out.split(",") if v.strip()]
-        mine = values("Story") + values("Part-of")
-        stories.update(mine)
-        attributed = bool(mine or values("No-story"))
-        commits.append({"sha": sha, "subject": git("log", "-1", "--format=%s", sha).strip(), "merge": len(parents) > 1,
-                        "stories": mine, "attributed": attributed,
-                        **({} if attributed else {"suggestion": f"add Part-of: <ID> to {sha[:9]} (git rebase -i, reword)"})})
+        story, part_of, no_story = values("Story"), values("Part-of"), (values("No-story") or [None])[0]
+        stories.update(story + part_of)
+        attributed = bool(story or part_of or no_story)
+        commits.append({"sha": sha, "subject": git("log", "-1", "--format=%s", sha).strip(), "story": story,
+                        "part_of": part_of, "no_story": no_story, "merge": len(parents) > 1, "attributed": attributed,
+                        "via": "own" if attributed else None})
     if mode == "no-attributed":  # another shape: the commits without a boolean `attributed`
         for c in commits:
             c["attributed"] = "yes" if c.pop("attributed") else None
     if mode == "short":  # abbreviated shas
         for c in commits:
             c["sha"] = c["sha"][:10]
-    print(json.dumps({"schema": 1, "range": sys.argv[2], "commits": commits, "stories": sorted(stories)}))
-    sys.exit(0 if all(c["attributed"] for c in commits) else 1)
+    unattributed = [c["sha"] for c in commits if c["attributed"] is not True]
+    print(json.dumps({"schema": 1, "range": sys.argv[2], "ok": not [c for c in commits if not c["merge"] and c["sha"]
+                      in unattributed], "commits": commits, "unattributed": unattributed, "stories": sorted(stories)}))
+    sys.exit(0)
 print("usage: ledger.py ...", file=sys.stderr)
 sys.exit(2)
 """
@@ -157,7 +163,8 @@ class TestHRB1(Phase6):
         self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
         self.assertIn(f"harbor: NO_STORY: {bad[:9]}", res.stderr)
         self.assertIn("fix: forgot one", res.stderr)
-        self.assertIn(f"add Part-of: <ID> to {bad[:9]}", res.stdout + res.stderr, "the ledger's suggestion")
+        self.assertIn(f"harbor: ledger: {bad[:9]}: add `Part-of: <ID>`, `Story: <ID>` or `No-story: <category>`",
+                      res.stderr, "what to do with it")
         self.assertEqual(self.convoy()["vessels"], [], "nothing recorded")
         seal = self.repo.log_toml(f"harbor/runs/{bad}.toml")
         self.assertIn(["attribution", f"{seal['base']}..{bad}", "--json"], self.ledger_calls())
@@ -309,6 +316,15 @@ class TestHRB1Edges(Phase6):
         out = ok(res)
         self.assertIn("ledger: attribution not available", out)
         self.assertIn("exit 2", out)
+        self.assertEqual(self.convoy()["vessels"][0]["story"], "QA-1")
+
+    def test_an_incomplete_history_falls_back_with_a_note(self):
+        os.environ["HARBOR_FAKE_ATTRIBUTION"] = "exit3"
+        ok(harbor(self.a, "convoy", "new"))
+        _, res = self.add("claude/qa-1", ("apps/web/a.ts", "feat: a\n\nStory: QA-1"), ("apps/web/b.ts", "none"))
+        out = ok(res)
+        self.assertIn("ledger: attribution not available", out)
+        self.assertIn("exit 3", out)
         self.assertEqual(self.convoy()["vessels"][0]["story"], "QA-1")
 
     def test_an_attribution_that_times_out_falls_back_with_a_note(self):
