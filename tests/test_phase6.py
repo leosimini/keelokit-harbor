@@ -112,6 +112,7 @@ def computed_diffs():
                         "detail": f"{c[:9]} {subject(c)!r}: names {', '.join(unknown)}, which no story file of the trunk has"})
     if not since:
         return out
+    level = "warning" if os.environ.get("HARBOR_FAKE_WARN") else "error"
     has = lambda c: bool(tr(c, "Story") or tr(c, "Part-of") or tr(c, "No-story"))
     covered = set()
     for c in rng:
@@ -127,11 +128,11 @@ def computed_diffs():
         for v in tr(c, "No-story"):
             cat = re.split(r"[\\s:,-]", v.strip(), maxsplit=1)[0].strip()
             if cat not in ("harness", "docs", "release", "deps", "ci"):
-                out.append({"level": "error", "code": "BAD_CATEGORY", "detail": f"{c[:9]} {subject(c)!r}: No-story: {v!r}"})
+                out.append({"level": level, "code": "BAD_CATEGORY", "detail": f"{c[:9]} {subject(c)!r}: No-story: {v!r}"})
         if tr(c, "Story"):
             paras = [p for p in re.split(r"\\n[ \\t]*\\n", git("log", "-1", "--format=%B", c).strip()) if p.strip()]
             if len(paras) <= 2:
-                out.append({"level": "error", "code": "STORY_NO_BODY",
+                out.append({"level": level, "code": "STORY_NO_BODY",
                             "detail": f"{c[:9]} {subject(c)!r}: closes {', '.join(tr(c, 'Story'))} with no body"})
     return out
 if sys.argv[1:2] == ["check"] and sys.argv[-1:] == ["--json"] and set(sys.argv[2:-1]) <= {"--ci"} and len(sys.argv) <= 4:
@@ -1883,3 +1884,32 @@ class TestHRB3Judge(Phase6Ok):
         self.vessel_branch("claude/qa-3", ("apps/web/c.ts", "feat: c\n\nThe change.\n\nStory: QA-3"))
         ok(harbor(self.a, "convoy", "assemble", "1"))
         ok(self.ok_changed())
+
+
+class TestHRB3Coordinator(Phase6Ok):
+    """The coordinator's additions: Keelokit's own rules whatever level they come at; a bounded timeout."""
+
+    def test_a_bad_category_at_warning_level_is_still_the_convoys(self):
+        os.environ["HARBOR_FAKE_SINCE"] = self.repo.main_sha()
+        os.environ["HARBOR_FAKE_WARN"] = "1"  # the fake's enforce = "warn": BAD_CATEGORY and STORY_NO_BODY are warnings
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3"))
+        for name, commits in (("claude/qa-1", (("apps/web/a.ts", "feat: a\n\nThe change.\n\nStory: QA-1"),
+                                               ("apps/web/b.ts", "chore: b\n\nNo-story: anything goes"))),
+                              ("claude/qa-3", (("apps/web/c.ts", "feat: c\n\nStory: QA-3"),))):
+            self.branch(name, *commits)
+            ok(harbor(self.a, "seal"))
+            ok(harbor(self.a, "convoy", "add", "1", name))
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        err = self.refused(self.ok_changed(), "LEDGER_DIFF")
+        self.assertIn("BAD_CATEGORY", err)
+        self.assertIn("STORY_NO_BODY", err)
+
+    def test_the_timeout_is_bounded(self):
+        mod = load_module()
+        for value in ("nan", "inf", "-inf", "0", "-5", "junk", ""):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"HARBOR_LEDGER_SECONDS": value}):
+                self.assertEqual(mod.ledger_seconds(), mod.LEDGER_SECONDS)
+        with mock.patch.dict(os.environ, {"HARBOR_LEDGER_SECONDS": "1e9"}):
+            self.assertEqual(mod.ledger_seconds(), mod.LEDGER_MAX_SECONDS)
+        with mock.patch.dict(os.environ, {"HARBOR_LEDGER_SECONDS": "2.5"}):
+            self.assertEqual(mod.ledger_seconds(), 2.5)
