@@ -1427,7 +1427,7 @@ class TestHRB3Ok(Phase6Ok):
     def test_the_ok_goes_through_when_the_ledger_finds_nothing(self):
         ok(self.ok_changed())
         self.assertEqual(self.convoy()["state"], "verifying")
-        self.assertIn(["check", "--json"], self.ledger_calls())
+        self.assertIn(["check", "--ci", "--json"], self.ledger_calls(), "main's ledger, as the CI reads")
 
     def test_an_unknown_story_is_refused(self):
         self.stories(**{"QA-3": "in-progress"})
@@ -1528,9 +1528,10 @@ class TestHRB3Ok(Phase6Ok):
     def test_a_vessel_redelivered_while_the_ledger_answers_is_not_okd(self):
         """The ok asks the ledger outside its transaction; the vessels it checked must be the ones it records."""
         b = self.repo.clone("b", host="linux")
-        hook = (f"cd {b} && git fetch -q origin harbor/log && git checkout -q -B log origin/harbor/log && "
-                f"sed -i 's/^story = \"QA-1\"$/story = \"QA-1, QA-3\"/' "
-                f"harbor/convoys/1.toml && git commit -qam 'a redelivery' && git push -q origin log:harbor/log")
+        once = self.tmp / "redelivered"  # the judge asks check twice (main, the convoy as landed): one redelivery
+        hook = (f"[ -e {once} ] || (cd {b} && touch {once} && git fetch -q origin harbor/log && "
+                f"git checkout -q -B log origin/harbor/log && sed -i 's/^story = \"QA-1\"$/story = \"QA-1, QA-3\"/' "
+                f"harbor/convoys/1.toml && git commit -qam 'a redelivery' && git push -q origin log:harbor/log)")
         err = self.refused(self.ok_changed(env={"HARBOR_FAKE_CHECK_HOOK": hook}), "CONVOY_MOVED")
         self.assertIn("vessels changed", err)
 
