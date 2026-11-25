@@ -1200,8 +1200,29 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   differences whose detail starts with a sha of that range): `stories = [...]`, `unattributed = [full shas]`
   (optional keys; the logbook stays schema 1). A ledger that can't answer, or that read `main` at another commit
   than the round fetched, is said on the line and nothing is recorded.
-- **The ok** (`convoy sail N --ok`) decides what reaches main, so it fails closed. It asks `ledger.py --json`
-  and `check --json` before its transaction, then, for each vessel's own commits (`<main>..<head>`), and for the
+- **The judge is main's ledger, never the convoy's** (the coordinator's decision after a breaker on 88f5aab: a
+  vessel could delete `ledger.py`, or ship one answering schema 2 or a clean schema 1, and the ok ran the checkout's,
+  which after `convoy assemble` is the convoy's). Whether there is a schema-1 ledger is main's tree: no
+  `.keelokit/bin/ledger.py` at the trunk tip (or one answering another integer schema) is 0.5's ok. Else the ok
+  builds two throwaway clones of this one (`git clone --shared --no-checkout`, deleted afterwards): one checked out
+  at the trunk tip, one at the convoy tip, each with `refs/remotes/origin/<trunk>` (and the local trunk) at that tip,
+  its other origin refs this clone's, and `.keelokit/bin/` and `.keelokit/state.toml` replaced by the trunk tip's
+  bytes (so main's ledger runs, with main's `[ledger]` rules: a convoy can't set `enforce = "warn"` for itself). In
+  them, with no caller `GIT_*`, no GitHub pull-request variables and Keelokit's hardened git
+  (`safe.bareRepository=explicit`, `protocol.ext.allow=never`, `core.hooksPath=/dev/null`, `GIT_NO_LAZY_FETCH=1`),
+  it runs `--json` and `check --ci --json` on main as it is, and `check --ci --json` on the convoy as if it had
+  landed. Every difference the convoy run has that main's doesn't (same level, code and detail), at level `error`
+  or with code `DONE_TWICE`, `UNKNOWN_STORY` or `UNATTRIBUTED`, is the convoy's: `LEDGER_DIFF`. That is Keelokit's
+  own rules on what would reach main: two vessels each closing one story (`DONE_TWICE`: they arrive in two
+  first-parent merges), `BAD_CATEGORY`, `STORY_NO_BODY`, a corrections file the convoy breaks. Which of them are
+  errors is the project's `enforce` (main's), except the three codes above, refused at any level.
+- **The ok is bound to the convoy's exact tip.** An ok that asked the ledger records `ledger = "checked"` and its
+  `head`; any later commit on `convoy/<n>` (a fix `convoy verify` records, anything) makes it stale: verify marks
+  it (`stale`, event `ok-stale`), and the sail refuses `OK_STALE` until `convoy sail N --ok` is given again on the
+  new tip (allowed on a verifying convoy whose ok is stale; the level and reason stand unless given), which runs
+  the judge again. Without a ledger the ok stays 0.5's, unbound.
+- **The ok** (`convoy sail N --ok`) decides what reaches main, so it fails closed. With the judge above, also for
+  each vessel's own commits (`<main>..<head>`), and for the
   convoy's own commits (`<main>..<convoy head>` that no vessel brings: the integrator's fixes, as if a vessel of
   `convoy/<n>`), `ledger.py attribution <main>..<head> --json` when it answers (Keelokit 0.16.0 doesn't: then the commits'
   `Story:`/`Part-of:`/`No-story:` trailers, read by git from the message's last paragraph, stand in; a commit only
@@ -1220,13 +1241,14 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
     `UNKNOWN_STORY` or `UNATTRIBUTED` at any level (0.16.0 gives `DONE_TWICE` as a warning). A difference names a
     story through its `story`/`stories` fields when the ledger gives them (with case); 0.16.0 gives neither, so a
     `DONE_TWICE`'s story is the id before the colon of its detail (`QA-1: Story: commits … arrived separately`).
-- **Fails closed** (Leo's decision): with a `ledger.py` whose `--json` answers schema 1, anything else at the ok
-  is `LEDGER_UNAVAILABLE` and no ok: `--json` or `check --json` timing out, exiting otherwise, answering text
+- **Fails closed** (Leo's decision): with a `ledger.py` on main whose `--json` answers schema 1, anything else at
+  the ok is `LEDGER_UNAVAILABLE` and no ok (a judge clone that can't be built too): `--json` or `check --json` timing out, exiting otherwise, answering text
   that is not UTF-8 JSON, a schema that is not the integer 1 (an integer other than 1 is another ledger: below),
   more than the cap, `stories` or `diffs` of the wrong types (a story's id must be one plain word: letters,
   digits, `. _ -`), no full `trunk_sha`, a `trunk_sha` other than the `main` the ok fetched, or a `ledger.py`
-  that is there but is no file (a directory, a dangling link). With no `ledger.py`, or one answering another integer schema, there is no schema-1
-  ledger: the ok is 0.5's, and asks nothing more.
+  that is there but is no file (a dangling link on main; in the round, a directory too). With no `ledger.py` on
+  main, or one answering another integer schema, there is no schema-1 ledger: the ok is 0.5's, and asks nothing
+  more. The round still runs the checkout's ledger: it reports, it decides nothing.
 - **Races.** The ledger is asked outside the ok's transaction; the transaction refuses `CONVOY_MOVED` unless the
   convoy's vessels (branch, head, story) are exactly the ones checked, besides its own head, base and state
   checks. A ledger that read another `main` is refused above; `main` moving after the ok voids it at verify and

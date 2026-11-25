@@ -54,7 +54,11 @@
   integrator's fixes) are checked as a vessel's (0.16.0's `DONE_TWICE` warning included). **The ok fails closed:** when `ledger.py --json` answers
   schema 1 but the ledger then can't answer (a timeout, another exit, not UTF-8 JSON, wrong types, over 32 MiB,
   `main` read at another commit), it is `LEDGER_UNAVAILABLE`; with no schema-1 ledger the ok is 0.5's. The ok
-  refuses `CONVOY_MOVED` when the vessels changed while the ledger was asked. The ledger now runs in its own
+  refuses `CONVOY_MOVED` when the vessels changed while the ledger was asked. **The judge is main's ledger:** the
+  ok runs the trunk tip's `.keelokit/bin/` and `state.toml` in two throwaway clones (main as it is, and the convoy as
+  if it had landed) and refuses every difference the convoy brings by Keelokit's own rules (two vessels closing one
+  story, `BAD_CATEGORY`, `STORY_NO_BODY`, …); a vessel deleting or replacing `ledger.py` changes nothing. **The ok is
+  bound to the convoy's tip:** a commit after it makes it stale, and `convoy sail` refuses `OK_STALE` until a new ok. The ledger now runs in its own
   process group, killed whole at the timeout.
 - **A vessel carrying several stories delivers each of them.** The round's cutoff line, `convoy assemble`,
   `convoy status`, the convoy page and `convoy defer` compared a vessel's `story` as one text, so a vessel with

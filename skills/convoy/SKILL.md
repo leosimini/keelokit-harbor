@@ -131,12 +131,20 @@ it, never verify the same head twice. When the convoy is critical (a
 full-tier vessel or a critical area, per `[harbor] gatekeeper_ok` (formerly `person_ok`); with `"areas"`, only a critical area), the ok says it also needs the
 gatekeeper's yes: the verify runs meanwhile, and only the sail waits.
 
+With Keelokit's ledger on main, the ok asks main's ledger (never the convoy's) about the convoy as if it had
+landed: `LEDGER_DIFF` names what holds it back (an unattributed commit, an unknown story, a story already on main
+or closed twice by two vessels, a `No-story:` category or a bodiless `Story:` commit Keelokit refuses);
+`LEDGER_UNAVAILABLE` means main's ledger can't answer, and the ok fails closed. The ok is bound to the convoy's
+exact tip: a fix after it makes it stale, and the sail refuses `OK_STALE` until the harbormaster gives the ok
+again on the new tip.
+
 ## verify (integrator)
 
 `python3 "$H" --session <id> convoy verify <n>`, in the background with a log, then one `until` on
 its exit. A one-vessel convoy whose seal already covers the ok's level runs nothing. Red: the fix is
 a commit on `convoy/<n>` — a failing test first by Keelokit's verifier, then the builder — pushed,
-then verify again: at `changed` it reruns only what failed plus what the fix touches, and Keelokit
+then verify again (with the ledger, that fix makes the ok stale: ask the harbormaster for the ok again before
+sailing): at `changed` it reruns only what failed plus what the fix touches, and Keelokit
 seals it when that completes the plan; at `all` the rerun is `--all --rerun-failed`, which keeps level `all`. Don't run vessel seals on this machine while it verifies.
 
 ## sail (integrator)

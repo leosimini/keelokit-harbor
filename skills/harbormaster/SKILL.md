@@ -63,9 +63,11 @@ gatekeeper each one once; fixing history is theirs (`ledger.py correct`). `ledge
 `ledger: … not available (why)` (a ledger that can't answer) is one line and the round goes on; but while the
 ledger can't answer, the ok fails closed (`LEDGER_UNAVAILABLE`): say so to the gatekeeper.
 
-The ok asks the ledger too: `LEDGER_DIFF` names each vessel the ledger holds back (`UNATTRIBUTED` commit,
-`UNKNOWN_STORY`, `DONE_TWICE`: its story already on the trunk). Never work around it: tell the vessel's owner to fix
-its commits, or the skipper to take it out of the convoy, then assemble and give the ok again.
+The ok asks main's ledger too, run on the convoy as if it had landed: `LEDGER_DIFF` names what it holds back
+(`UNATTRIBUTED` commit, `UNKNOWN_STORY`, `DONE_TWICE`: a story already on the trunk or closed by two vessels,
+`BAD_CATEGORY`, `STORY_NO_BODY`). Never work around it: tell the vessel's owner to fix its commits, or the skipper
+to take it out of the convoy, then assemble and give the ok again. `OK_STALE` at the sail: a commit came after your
+ok (a fix); give the ok again on the new tip, which asks the ledger again.
 
 After those lines, control prints what is late: `escalated: …` (a late question, a message for the gatekeeper, or one
 queued past `escalate_minutes`), `late: …`, `account A: no watcher` and `account A: no heartbeat recorded`. Tell the
