@@ -1385,9 +1385,38 @@ class TestHRB3Ok(Phase6Ok):
                 self.stories(**{"QA-1": "in-progress", "QA-3": state})
                 self.assertIn(f"DONE_TWICE: QA-3 is {state}", self.refused(self.ok_changed(), "LEDGER_DIFF"))
 
-    def test_the_stories_are_compared_without_case(self):
-        self.stories(**{"qa-1": "in-progress", "qa-3": "on-trunk"})
-        self.assertIn("DONE_TWICE", self.refused(self.ok_changed(), "LEDGER_DIFF"))
+    def test_ids_compare_with_case_as_keelokits_do(self):
+        """Keelokit's ids are case-sensitive (EPIC-NNN): a ledger story `qa-3` is not the vessel's QA-3."""
+        self.stories(**{"QA-1": "in-progress", "qa-3": "in-progress"})
+        self.assertIn("UNKNOWN_STORY: QA-3", self.refused(self.ok_changed(), "LEDGER_DIFF"))
+
+    def test_a_ledger_listing_ids_that_differ_only_in_case_is_read_exactly(self):
+        """Breaker round 1, F3: the first case variant must not hide the exact id's state."""
+        os.environ["HARBOR_FAKE_STORIES_RAW"] = json.dumps([
+            {"id": "QA-1", "state": "in-progress"}, {"id": "qa-3", "state": "in-progress"},
+            {"id": "QA-3", "state": "on-trunk", "commit": "f" * 40}])
+        self.assertIn("DONE_TWICE: QA-3", self.refused(self.ok_changed(), "LEDGER_DIFF"))
+
+    def test_a_ledger_listing_one_id_twice_fails_closed(self):
+        os.environ["HARBOR_FAKE_STORIES_RAW"] = json.dumps([
+            {"id": "QA-1", "state": "in-progress"}, {"id": "QA-3", "state": "in-progress"},
+            {"id": "QA-3", "state": "on-trunk", "commit": "f" * 40}])
+        self.assertIn("QA-3", self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE"))
+
+    def test_an_unattributed_fix_on_the_convoy_branch_is_refused(self):
+        """Breaker round 1, F4: an integrator's fix commit on convoy/<n> reaches main too."""
+        sh(self.a, "git", "fetch", "--quiet", "origin")
+        sh(self.a, "git", "checkout", "--quiet", "-B", "convoy/1", "origin/convoy/1")
+        (self.a / "fix.txt").write_text("fix\n")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "fix: make it build")
+        fix = sh(self.a, "git", "rev-parse", "HEAD")
+        sh(self.a, "git", "push", "--quiet", "origin", "convoy/1")
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.assertEqual(self.convoy()["state"], "ready")
+        err = self.refused(self.ok_changed(), "LEDGER_DIFF")
+        self.assertIn(f"UNATTRIBUTED: {fix[:9]}", err)
+        self.assertIn("convoy/1", err)
 
     def test_a_done_twice_from_check_naming_the_story_is_refused_whatever_its_level(self):
         self.checks(diff("DONE_TWICE", "QA-3: Story: commits abc1234, def5678 arrived separately", level="warning"))
@@ -1483,6 +1512,31 @@ class TestHRB3Vessels(Phase6Ok):
         self.ready_with(("apps/web/a.ts", "fix: a\n\nPart-of: QA-1"))
         self.stories(**{"QA-1": "on-trunk", "QA-3": "in-progress"})
         ok(self.ok_changed(env={"HARBOR_FAKE_ATTRIBUTION": "usage"}))
+
+    def test_a_merge_in_the_vessel_closing_a_story_on_the_trunk_is_done_twice(self):
+        """Breaker round 1, F1: Keelokit counts a merge's Story: too."""
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3"))
+        self.branch("claude/qa-1", ("apps/web/a.ts", "feat: a\n\nPart-of: QA-1"))
+        sh(self.a, "git", "checkout", "--quiet", "-b", "sub")
+        (self.a / "apps/web/s.ts").write_text("s\n")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "feat: s\n\nPart-of: QA-1")
+        sh(self.a, "git", "checkout", "--quiet", "claude/qa-1")
+        sh(self.a, "git", "merge", "--quiet", "--no-ff", "-m", "feat: finish QA-1\n\ndone\n\nStory: QA-1", "sub")
+        sh(self.a, "git", "push", "--quiet", "origin", "claude/qa-1")
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", "1", "claude/qa-1"))
+        self.deliver(1, "claude/qa-3", "apps/web/c.ts", "QA-3")
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.stories(**{"QA-1": {"state": "on-trunk", "commit": "f" * 40}, "QA-3": "in-progress"})
+        for env in ({}, {"HARBOR_FAKE_ATTRIBUTION": "usage"}):
+            with self.subTest(env=env):
+                self.assertIn("DONE_TWICE: QA-1", self.refused(self.ok_changed(env=env), "LEDGER_DIFF"))
+
+    def test_a_lowercase_story_trailer_is_not_the_story(self):
+        """Breaker round 1, F2: `Story: qa-1` is no id to Keelokit (STORY_ID is upper case)."""
+        self.ready_with(("apps/web/a.ts", "feat: a\n\nStory: qa-1"), at_add={"HARBOR_FAKE_ATTRIBUTION": "usage"})
+        self.assertIn("UNKNOWN_STORY: qa-1", self.refused(self.ok_changed(), "LEDGER_DIFF"))
 
     def test_a_closing_commit_of_a_story_on_the_trunk_is_done_twice_under_another_vessel_story(self):
         self.ready_with(("apps/web/a.ts", "feat: a\n\nStory: QA-1"), ("apps/web/b.ts", "feat: b\n\nStory: QA-5"))
