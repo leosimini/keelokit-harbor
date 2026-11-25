@@ -67,7 +67,8 @@ person's decision: never install, set or change anything yourself.
    `STORY_TAKEN` (an active worker or another taken request holds the story; it names it) or, with Keelokit's
    ledger, `STORY_ON_TRUNK` (the story is already on the trunk) refuses a vessel request: leave it open, start nothing for it, and tell
    `harbormaster` with `msg send --to harbormaster "<id>: <the refusal line>"`. A vessel's prompt then starts
-   with `python3 .keelokit/bin/ledger.py take <ID>`, and its register line carries `--request <id>`, which ties the
+   with `python3 .keelokit/bin/ledger.py take <ID>` (on Keelokit's main it asks `harbor.py story take` first, with
+   the vessel's session, and a `STORY_TAKEN` or `STORY_ON_TRUNK` there stops the vessel: it reports the line), and its register line carries `--request <id>`, which ties the
    request to that one session: pass it unchanged, as always. A `REQUEST_CLAIMED` your vessel reports means another
    session claimed the request first: tell `harbormaster`.
 3. **Silent workers.** `python3 "$H" log` lists the workers of this account with their last seen. For each

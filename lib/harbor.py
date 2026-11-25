@@ -2625,6 +2625,34 @@ def main_blob(main_tip: str, path: str) -> tuple[str, str] | None:
     return (found[0], found[2]) if found and found[1] == "blob" else None
 
 
+def judge_rules(base: Path, env: dict, main_tip: str, closed: str) -> tuple[tuple[str, ...], list[dict]]:
+    """Whether main's ledger reads its rules from a given commit (Keelokit LEDGER-013's `check --rules-ref <rev>`), and
+    main's own `check --ci --json` differences: (("--rules-ref", main_tip), diffs) or ((), diffs). Decided by main's
+    ledger.py itself, as the judge's clone of main holds it (main's blob): a ledger whose text names `--rules-ref`
+    has it (Keelokit 0.16.0's doesn't), with no run and no clock, so nothing of the convoy's, and no slow answer, can
+    turn it off. Once it has it, every check is `check --ci --rules-ref <main tip> --json`, and one that doesn't answer
+    is LEDGER_UNAVAILABLE: the ok never falls back to the convoy's rules. (Keelokit's `check --help` prints only its
+    first docstring line, so it can't tell.)"""
+    try:
+        has = b"--rules-ref" in (base / LEDGER_TOOL).read_bytes()
+    except OSError as e:
+        raise HarborError("LEDGER_UNAVAILABLE", f"{LEDGER_TOOL} of {TRUNK}: {one(e, 160)}; {closed}")
+    if not has:
+        diffs, why = ledger_check("--ci", root=base, env=env)
+        if diffs is None:
+            raise HarborError("LEDGER_UNAVAILABLE", f"{why}; {closed}")
+        print(f"harbor: ledger: {TRUNK}'s ledger has no check --rules-ref (Keelokit before LEDGER-013): the convoy's own "
+              "critical.toml, review files and corrections are read as landed")
+        return (), diffs
+    flags = ("--rules-ref", main_tip)
+    diffs, why = ledger_check("--ci", *flags, root=base, env=env)
+    if diffs is None:
+        raise HarborError("LEDGER_UNAVAILABLE", f"{why}; {TRUNK}'s ledger has check --rules-ref and didn't answer it "
+                          f"on {TRUNK}; {closed}")
+    print(f"harbor: ledger: the convoy is judged by {TRUNK}'s rules (check --rules-ref, rules from {short(main_tip)})")
+    return flags, diffs
+
+
 def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | None:
     """HRB-3: the ok asks MAIN's ledger, never the convoy's. Whether there is one is main's tree: no
     `.keelokit/bin/ledger.py` on the trunk tip, or one that answers another integer schema, is 0.5's ok (None). Else
@@ -2656,9 +2684,7 @@ def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | Non
         if facts["trunk_sha"] != main_tip:
             raise HarborError("LEDGER_UNAVAILABLE", f"`ledger.py --json` read {TRUNK} at {short(facts['trunk_sha'])}, "
                               f"the ok is for {short(main_tip)}: the ok fails closed; fetch and give the ok again")
-        diffs, why = ledger_check("--ci", root=base, env=env)
-        if diffs is None:
-            raise HarborError("LEDGER_UNAVAILABLE", f"{why}; {closed}")
+        rules, diffs = judge_rules(base, env, main_tip, closed)
         stories = {}
         for r in facts["stories"]:
             if r["id"] in stories:
@@ -2670,7 +2696,7 @@ def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | Non
                 landed = judge_tree(Path(tmp), "convoy", tip, main_tip, env)
             except (OSError, subprocess.SubprocessError, ValueError) as e:
                 raise HarborError("LEDGER_UNAVAILABLE", f"the judge's clone of {c.get('branch')}: {one(e, 160)}; {closed}")
-            after, why = ledger_check("--ci", root=landed, env=env)
+            after, why = ledger_check("--ci", *rules, root=landed, env=env)
             if after is None:
                 raise HarborError("LEDGER_UNAVAILABLE", f"main's ledger on {c.get('branch')} as landed: {why}; {closed}")
             had = {(d["code"], d["detail"]) for d in diffs}  # a level is the project's enforce, not the difference

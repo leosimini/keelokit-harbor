@@ -164,10 +164,14 @@ done
   sus niveles y su trailer `Story:`. Cuando el ledger de Keelokit responde `ledger.py --json` con schema 1, el
   merge de cada vessel en un convoy lleva `Convoy: <n>`, y `convoy add` le pide a `ledger.py attribution` los
   commits del vessel: rechaza uno con un commit sin atribuir (`NO_STORY`) y toma la historia del vessel del
-  ledger. Keelokit 0.16.0 todavía no responde `attribution`: hasta que lo haga, `convoy add` lo dice y lee los
-  trailers `Story:`, como 0.5. Tomar una historia es un candado en la bitácora (`story take`, `worker register
-  --story`): un segundo worker recibe `STORY_TAKEN` con quien la tiene, una historia que el ledger ve en el trunk
-  `STORY_ON_TRUNK`, y el prompt de un vessel empieza con `ledger.py take <ID>`. Sin ese ledger, Harbor se comporta como 0.5. Sin `.keelokit/`, la capa de flota corre desde `.harbor/` (ver «Harbor sin
+  ledger. Keelokit 0.16.0 no responde `attribution`: ahí `convoy add` lo dice y lee los trailers `Story:`, como
+  0.5; el main de Keelokit (LEDGER-013, para 0.17.0) lo responde. Tomar una historia es un candado en la bitácora
+  (`story take`, `worker register --story`): un segundo worker recibe `STORY_TAKEN` con quien la tiene, una
+  historia que el ledger ve en el trunk `STORY_ON_TRUNK`, y el prompt de un vessel empieza con `ledger.py take
+  <ID>`, que en el main de Keelokit corre `harbor.py story take <ID>` (la ruta que cada sesión anota en `git config
+  harbor.py`, la sesión en `HARBOR_SESSION`) y frena al vessel ante cualquiera de los dos rechazos. El ok corre el
+  ledger de main, y cuando tiene `check --rules-ref` (el main de Keelokit) cada archivo de reglas que lee,
+  correcciones incluidas, es el de main. Sin ese ledger, Harbor se comporta como 0.5. Sin `.keelokit/`, la capa de flota corre desde `.harbor/` (ver «Harbor sin
   Keelokit») y un repositorio sin ninguno de los dos directorios se deja en paz, sin decir nada.
 - Los hooks corren `lib/harbor.py sync --hook` desde el plugin y leen la configuración y la identidad del
   proyecto (`.keelokit/state.toml` y `.keelokit/local.toml`, o `.harbor/config.toml` y `.harbor/local.toml`).
