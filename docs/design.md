@@ -1234,14 +1234,15 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   convoy's, which Harbor can't replace without rewriting it. Keelokit's `check --rules-ref <rev>` reads every one of
   them from `<rev>`'s committed tree instead, and counts a correction row only when `<rev>`'s own file holds it, so
   the ok passes `--rules-ref <main tip>` to both checks: a convoy can't relax `critical.toml`, approve itself, or
-  attribute its own commit with a row of its own. **Feature detection** happens only in the judge's clone of main,
-  with main's ledger: the probe is the check itself, `check --ci --rules-ref <main tip> --json` on main, whose answer
-  (schema 1, exit 0 or 1) is main's differences. When it doesn't answer, `check --help` decides: a usage that names
-  `--rules-ref` is a ledger that has it and couldn't answer, and the ok fails closed (`LEDGER_UNAVAILABLE`, as does
-  a help that doesn't answer); one that doesn't name it is Keelokit 0.16.0, judged as before with plain
-  `check --ci --json` (the ok says so: `main's ledger has no check --rules-ref`). Nothing of the convoy's is read
-  to decide, so a convoy can't turn `--rules-ref` off (its own `ledger.py` never runs in the judge); once main's
-  ledger has it, a landed check that refuses it (exit 2) is `LEDGER_UNAVAILABLE`, never a check without it. The
+  attribute its own commit with a row of its own. **Feature detection** reads main's `ledger.py` (the blob the judge's
+  clone of main holds): a ledger whose text names `--rules-ref` has it (Keelokit 0.16.0's text doesn't), with no run
+  and no clock. Running something to decide was the first design, and the breaker on 8a5e21b broke it: Keelokit's
+  `check --help` prints only its docstring's first line, so a probe that timed out (a big history; refs anyone can
+  push slow the run) or exited 2 fell back to the convoy's rules. Now, once main's ledger has it, both checks are
+  `check --ci --rules-ref <main tip> --json`, and either one not answering (a timeout, exit 2) is
+  `LEDGER_UNAVAILABLE`, never a check without it. A main whose ledger doesn't name it is judged as before with plain
+  `check --ci --json` (the ok says so: `main's ledger has no check --rules-ref`). Nothing of the convoy's is read to
+  decide, so a convoy can't turn `--rules-ref` off (its own `ledger.py` never runs or is read in the judge). The
   per-vessel `attribution` runs in the clone of main, whose corrections and `[ledger]` are main's already. The
   round and `convoy add` read the checkout's ledger as before: they decide nothing that reaches main.
   Residual, only on a main whose ledger has no `--rules-ref` (Keelokit 0.16.0): those rule files are the convoy's

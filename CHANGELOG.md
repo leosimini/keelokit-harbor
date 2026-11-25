@@ -63,12 +63,11 @@
   `HARBOR_LEDGER_SECONDS` is clamped (a finite number above 0, at most 600; else 60). The ledger now runs in its own
   process group, killed whole at the timeout.
 - **With Keelokit's LEDGER-013 (its main, for 0.17.0): the ok reads main's rules, `take` reaches Harbor.** When
-  main's ledger answers `check --ci --rules-ref <main tip> --json` (asked only of main's ledger, in the judge's
-  clone of main), the ok passes `--rules-ref <main tip>` to both of its checks, so `critical.toml`, the approval,
+  main's `ledger.py` names `--rules-ref` (its text, as main holds it: no run decides), the ok passes `--rules-ref <main tip>` to both of its checks, so `critical.toml`, the approval,
   the review files, the story files and the corrections all come from main's committed tree: a convoy can no longer
-  relax them, or attribute its own commit with a correction row of its own, which closes HRB-3's residual. A ledger
-  whose `check --help` names `--rules-ref` but that doesn't answer it fails the ok closed (`LEDGER_UNAVAILABLE`),
-  never falls back; one that doesn't name it (Keelokit 0.16.0) is judged as before, and the ok says
+  relax them, or attribute its own commit with a correction row of its own, which closes HRB-3's residual. A check with
+  `--rules-ref` that doesn't answer (a timeout, exit 2) fails the ok closed (`LEDGER_UNAVAILABLE`), never falls
+  back; a ledger that doesn't name it (Keelokit 0.16.0) is judged as before, and the ok says
   `main's ledger has no check --rules-ref`. Nothing the convoy contains decides it. Keelokit's `ledger.py take <ID>`
   (a vessel prompt's first line) now runs `harbor.py story take <ID>` through `git config harbor.py`, which every
   SessionStart records, with the session in `HARBOR_SESSION`: Harbor reads it as the session (tests through a
