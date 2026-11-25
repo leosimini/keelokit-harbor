@@ -1205,7 +1205,9 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   convoy's own commits (`<main>..<convoy head>` that no vessel brings: the integrator's fixes, as if a vessel of
   `convoy/<n>`), `ledger.py attribution <main>..<head> --json` when it answers (Keelokit 0.16.0 doesn't: then the commits'
   `Story:`/`Part-of:`/`No-story:` trailers, read by git from the message's last paragraph, stand in; a commit only
-  a trailered merge of the vessel attributes is then counted unattributed). It refuses `LEDGER_DIFF` (exit 1,
+  a trailered merge of the vessel attributes is then counted unattributed). The commits and their parents come
+  from `git rev-list --parents`, their messages from `git log -z` (NUL-separated: a message can't hold a NUL), and
+  the two must name the same commits in the same order, so no text in a message can forge or hide a commit. It refuses `LEDGER_DIFF` (exit 1,
   one line per vessel, all of them) when a vessel has:
   - `UNATTRIBUTED`: an own commit, not a merge, with no `Story:`, `Part-of:` or `No-story:` (a merge's trailers still
     count: its `Story:` closes a story, its ids must be known);

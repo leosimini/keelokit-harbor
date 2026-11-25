@@ -2407,18 +2407,25 @@ def own_commits(head: str, *exclude: str) -> list[dict]:
     """The commits `head` brings that none of `exclude` has (main, and for a convoy's own commits its vessels), merges
     too (`merge`: a merge's Story: closes a story as any other's; it is never unattributed itself, the ledger
     attributes what it brings), each with its Story:, Part-of: and No-story: trailers as git reads them (the message's
-    last paragraph)."""
-    fmt = "%x1e%H%x1f%P%x1f%s" + "".join(f"%x1f%(trailers:key={k},valueonly,separator=%x2C)"
-                                         for k in ("Story", "Part-of", "No-story"))
-    out = run("git", "log", f"--format={fmt}%x1fend", head, *(f"^{x}" for x in exclude), "--").stdout  # unstripped:
-    commits = []  # \x1e and \x1f are whitespace to str.strip, and an empty last field must stay a field
-    for rec in out.split("\x1e")[1:]:
-        parts = rec.split("\x1f")
-        if len(parts) != 7 or parts[6].strip() != "end":
-            raise HarborError("GIT", f"git log of {short(head)} gave a record Harbor can't read")
-        sha, parents, subject, story, part_of, no_story = parts[:6]
-        ids = lambda v: [x.strip() for x in v.replace("\n", ",").split(",") if x.strip()]  # noqa: E731
-        commits.append({"sha": sha, "merge": len(parents.split()) > 1, "subject": subject, "story": ids(story),
+    last paragraph). The commits and their parents come from `rev-list` (no text a committer writes); the messages
+    from `log -z`, NUL-separated (a message can't hold a NUL), and the two must name the same commits in the same
+    order, or Harbor can't read them (a refusal)."""
+    revs = [head, *(f"^{x}" for x in exclude)]
+    graph = [line.split() for line in run("git", "rev-list", "--parents", *revs, "--").stdout.splitlines() if line.strip()]
+    keys = ("Story", "Part-of", "No-story")
+    fmt = "%H%x00%s" + "".join(f"%x00%(trailers:key={k},valueonly,separator=%x2C)" for k in keys)
+    tokens = run("git", "log", "-z", f"--format={fmt}", *revs, "--").stdout.split("\0")
+    if tokens and tokens[-1] == "":
+        tokens.pop()
+    width = 2 + len(keys)
+    if len(tokens) != width * len(graph) or [tokens[i * width] for i in range(len(graph))] != [g[0] for g in graph]:
+        raise HarborError("GIT", f"git log of {short(head)} doesn't name the commits git rev-list does: Harbor can't "
+                          "read their messages")
+    ids = lambda v: [x.strip() for x in v.replace("\n", ",").split(",") if x.strip()]  # noqa: E731
+    commits = []
+    for i, g in enumerate(graph):
+        _, subject, story, part_of, no_story = tokens[i * width:(i + 1) * width]
+        commits.append({"sha": g[0], "merge": len(g) > 2, "subject": subject, "story": ids(story),
                         "part_of": ids(part_of), "no_story": bool(no_story.strip())})
     return commits
 
