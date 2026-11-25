@@ -1216,13 +1216,14 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
     Keelokit's `DONE_TWICE` counts `Story:` commits, so a `Part-of:` follow-up of a done story is not one;
   - a `check --json` difference naming one of its stories at level `error`, or with code `DONE_TWICE`,
     `UNKNOWN_STORY` or `UNATTRIBUTED` at any level (0.16.0 gives `DONE_TWICE` as a warning). A difference names a
-    story through its `story`/`stories` fields when the ledger gives them; 0.16.0 gives neither, so a
+    story through its `story`/`stories` fields when the ledger gives them (with case); 0.16.0 gives neither, so a
     `DONE_TWICE`'s story is the id before the colon of its detail (`QA-1: Story: commits … arrived separately`).
 - **Fails closed** (Leo's decision): with a `ledger.py` whose `--json` answers schema 1, anything else at the ok
   is `LEDGER_UNAVAILABLE` and no ok: `--json` or `check --json` timing out, exiting otherwise, answering text
   that is not UTF-8 JSON, a schema that is not the integer 1 (an integer other than 1 is another ledger: below),
-  more than the cap, `stories` or `diffs` of the wrong types, no full `trunk_sha`, or a `trunk_sha` other than
-  the `main` the ok fetched. With no `ledger.py`, or one answering another integer schema, there is no schema-1
+  more than the cap, `stories` or `diffs` of the wrong types (a story's id must be one plain word: letters,
+  digits, `. _ -`), no full `trunk_sha`, a `trunk_sha` other than the `main` the ok fetched, or a `ledger.py`
+  that is there but is no file (a directory, a dangling link). With no `ledger.py`, or one answering another integer schema, there is no schema-1
   ledger: the ok is 0.5's, and asks nothing more.
 - **Races.** The ledger is asked outside the ok's transaction; the transaction refuses `CONVOY_MOVED` unless the
   convoy's vessels (branch, head, story) are exactly the ones checked, besides its own head, base and state

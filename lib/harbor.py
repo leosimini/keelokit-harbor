@@ -2037,8 +2037,11 @@ def ledger_answer(*args: str, answers: tuple[int, ...] = (0, 1)) -> tuple[dict |
     (None, why, kind): kind "absent" (no ledger.py), "other" (an object with another integer schema: a ledger Harbor
     doesn't speak, which is no ledger) or "broken" (a ledger that can't answer: a timeout, an exit outside
     `answers`, more than the cap, text that isn't UTF-8 JSON, anything but an object with an integer schema)."""
-    if not (ROOT / LEDGER_TOOL).is_file():
+    tool = ROOT / LEDGER_TOOL
+    if not os.path.lexists(tool):
         return None, f"no {LEDGER_TOOL}", "absent"
+    if not tool.is_file():  # there, but a directory or a dangling link: a ledger that can't answer, not no ledger
+        return None, f"{LEDGER_TOOL} is not a file", "broken"
     what = f"`ledger.py {' '.join(args)}`"
     try:
         code, out, err, why = _ledger_process(args, ledger_seconds(), ledger_max_bytes())
@@ -2365,10 +2368,11 @@ def ledger_facts() -> tuple[dict | None, str, str]:
         if not (isinstance(trunk, str) and SHA.fullmatch(trunk)):
             data, why, kind = None, "`ledger.py --json` gives no full trunk_sha", "broken"
         elif not (isinstance(stories, list) and all(
-                isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("state"), str)
+                isinstance(r, dict) and isinstance(r.get("id"), str) and NAME.fullmatch(r["id"])
+                and isinstance(r.get("state"), str)
                 and (r.get("commit") is None or isinstance(r.get("commit"), str)) for r in stories)):
-            data, why, kind = None, ("`ledger.py --json` gives stories that are not a list of objects with a string id "
-                                     "and state"), "broken"
+            data, why, kind = None, ("`ledger.py --json` gives stories that are not a list of objects with an id (one "
+                                     "plain word: letters, digits, . _ -) and a string state"), "broken"
     _LEDGER[str(ROOT)] = data
     return data, why, kind
 
@@ -2387,15 +2391,15 @@ def ledger_check() -> tuple[list[dict] | None, str]:
 
 
 def diff_stories(d: dict) -> set[str]:
-    """The stories a difference names (casefolded): its `story`/`stories` when the ledger gives them; for 0.16.0's
-    DONE_TWICE, whose detail is "<ID>: Story: commits … arrived separately", the id before the colon."""
+    """The stories a difference names (with case, as Keelokit's ids): its `story`/`stories` when the ledger gives them;
+    for 0.16.0's DONE_TWICE, whose detail is "<ID>: Story: commits … arrived separately", the id before the colon."""
     found = set()
     for key in ("story", "stories"):
         v = d.get(key)
-        found |= {x.strip().casefold() for x in ([v] if isinstance(v, str) else v if isinstance(v, list) else [])
+        found |= {x.strip() for x in ([v] if isinstance(v, str) else v if isinstance(v, list) else [])
                   if isinstance(x, str) and x.strip()}
     if d["code"] == "DONE_TWICE" and (m := re.match(r"\s*([^\s:,]+):", d["detail"])):
-        found.add(m.group(1).casefold())
+        found.add(m.group(1))
     return found
 
 
@@ -2466,7 +2470,7 @@ def vessel_ledger_diffs(v: dict, main_tip: str, stories: dict, diffs: list[dict]
             out.append(f"DONE_TWICE: {one(sid, 40)} is {rec['state']}" + (f" at {short(one(at, 40))}" if at else "")
                        + ": this vessel's Story: commit would close it again")
         for d in diffs:
-            if (d["level"] == "error" or d["code"] in REFUSING_CODES) and sid.casefold() in diff_stories(d):
+            if (d["level"] == "error" or d["code"] in REFUSING_CODES) and sid in diff_stories(d):
                 out.append(f"{one(d['code'], 40)}: {one(d['detail'], 120)} (ledger.py check)")
     return list(dict.fromkeys(out))
 
