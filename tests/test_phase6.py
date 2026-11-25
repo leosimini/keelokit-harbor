@@ -1531,7 +1531,8 @@ class TestHRB3Ok(Phase6Ok):
         once = self.tmp / "redelivered"  # the judge asks check twice (main, the convoy as landed): one redelivery
         hook = (f"[ -e {once} ] || (cd {b} && touch {once} && git fetch -q origin harbor/log && "
                 f"git checkout -q -B log origin/harbor/log && sed -i 's/^story = \"QA-1\"$/story = \"QA-1, QA-3\"/' "
-                f"harbor/convoys/1.toml && git commit -qam 'a redelivery' && git push -q origin log:harbor/log)")
+                f"harbor/convoys/1.toml && git -c user.name=t -c user.email=t@example.com commit -qam 'a redelivery' && "
+                f"git push -q origin log:harbor/log)")  # the judge's env has no GIT_AUTHOR_*: an identity of its own
         err = self.refused(self.ok_changed(env={"HARBOR_FAKE_CHECK_HOOK": hook}), "CONVOY_MOVED")
         self.assertIn("vessels changed", err)
 
