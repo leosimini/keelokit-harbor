@@ -74,10 +74,10 @@ Harbor depends on Keelokit and copies none of its code. It uses these as interfa
 | `touches`, `critical.toml` | an early hotspot warning, before any code *(phase 2)* |
 | the `Story:` trailer | which story a vessel carries, read from its commits (without the ledger, below) |
 | `ledger.py --json` answering `"schema": 1` *(6)* | the switch for every phase-6 behaviour; any other answer, a timeout, an exit other than 0 or 1, or no `ledger.py`: Harbor behaves as 0.5 |
-| `ledger.py attribution <seal_base>..<head> --json` *(6)* | `convoy add`: `NO_STORY` for a vessel's unattributed commit, and the vessel's story. The contract is in "Phase 6: Keelokit's ledger"; Keelokit builds it in LEDGER-013 (in its docs/ledger.md, not in its 0.16.0 code): until it answers, `convoy add` notes it and reads the `Story:` trailers |
-| `ledger.py show <ID> --json`, else the story's `state` in `ledger.py --json` *(6)* | `story take`, `worker register --story`, `wanted take`: `STORY_ON_TRUNK` from `on-trunk` on (HRB-2). Keelokit 0.16.0 has `show <ID> [--full]` only, so the facts of `--json` answer; a ledger that can't say is a note, never a refusal |
-| `ledger.py check --json` and the stories' `commit` and `state` in `ledger.py --json` *(6)* | HRB-3: the round's `ledger:` lines and a loose move's stories and unattributed commits; the ok's `LEDGER_DIFF`. Keelokit 0.16.0 answers `{"schema": 1, "diffs": [{"level", "code", "detail"}]}` with no story field, and `--json` counts unattributed commits without listing them, so Harbor reads the story of a `DONE_TWICE` from its detail and a loose move's unattributed commits from `check`'s `UNATTRIBUTED` details. At the ok a schema-1 ledger that can't answer is `LEDGER_UNAVAILABLE` (it fails closed) |
-| `ledger.py take <ID>` *(6)* | the first line of a vessel's prompt (`wanted prompt`); with LEDGER-013 it calls `harbor.py story take` |
+| `ledger.py attribution <seal_base>..<head> --json` *(6)* | `convoy add`: `NO_STORY` for a vessel's unattributed commit, and the vessel's story. The contract is in "Phase 6: Keelokit's ledger". Keelokit's main answers it since LEDGER-013 (fc9692f; 0.17.0), with the additive keys `since` and `diffs`, which Harbor ignores; 0.16.0 has no such command: `convoy add` then says `attribution not available` and reads the `Story:` trailers |
+| `ledger.py show <ID> --json`, else the story's `state` in `ledger.py --json` *(6)* | `story take`, `worker register --story`, `wanted take`: `STORY_ON_TRUNK` from `on-trunk` on (HRB-2). Keelokit's main (LEDGER-013) answers `show <ID> --json` (schema 1, the record's `state`), which Harbor asks first; 0.16.0 has `show <ID> [--full]` only, so the facts of `--json` answer; a ledger that can't say is a note, never a refusal |
+| `ledger.py check --json` and the stories' `commit` and `state` in `ledger.py --json` *(6)* | HRB-3: the round's `ledger:` lines and a loose move's stories and unattributed commits; the ok's `LEDGER_DIFF`. Keelokit 0.16.0 answers `{"schema": 1, "diffs": [{"level", "code", "detail"}]}` with no story field, and `--json` counts unattributed commits without listing them, so Harbor reads the story of a `DONE_TWICE` from its detail and a loose move's unattributed commits from `check`'s `UNATTRIBUTED` details. At the ok a schema-1 ledger that can't answer is `LEDGER_UNAVAILABLE` (it fails closed). When main's ledger has `check --rules-ref <rev>` (Keelokit LEDGER-013), the ok passes `--rules-ref <main tip>`: every rule file comes from main ("The judge reads main's rules") |
+| `ledger.py take <ID>` *(6)* | the first line of a vessel's prompt (`wanted prompt`). Keelokit's main (LEDGER-013) runs `harbor.py story take <ID>` first when `git config --local harbor.py` names an absolute harbor.py (every SessionStart records this one's) and `harbor.py story take --help` exits 0; the session goes in the environment as `HARBOR_SESSION` (Claude Code's `CLAUDE_CODE_SESSION_ID` handed over), which Harbor reads like `--session`. Harbor's exit 1 (`STORY_TAKEN`, `STORY_ON_TRUNK`) is relayed as one line, exit 1, and `keelokit.story` is not set; for a session not yet registered the take is Harbor's check only (its `worker register --story --request` is the take). Keelokit 0.16.0's `take` only sets `keelokit.story` |
 | the `Convoy: <n>` trailer *(6)* | ends each vessel's merge into `convoy/<n>`; the ledger reads from it which convoy sailed a commit (Keelokit 0.15 already reads it) |
 
 Harbor needs **Keelokit 0.12.0** or later: the landing policy, shared seals, the pre-push that lets the
@@ -762,8 +762,8 @@ Read-only: fetches and prints `LOGBOOK.md`, or `convoys/<n>.md`.
 ### `harbor.py` without a slash command
 
 `account set|pause|resume`, `worker register|end`, `seal`, `import-board` are run by the skills.
-*(6, HRB-2)* `story take|release ID [--worker W]` is run by a vessel (with Keelokit's LEDGER-013, by
-`ledger.py take`), and by the harbormaster to release a stuck lock ("HRB-2: taking a story is a lock in the logbook").
+*(6, HRB-2)* `story take|release ID [--worker W]` is run by a vessel (on Keelokit's main, LEDGER-013, by
+`ledger.py take` and `take --clear`, with the session in `HARBOR_SESSION`), and by the harbormaster to release a stuck lock ("HRB-2: taking a story is a lock in the logbook").
 `sync --hook` is the entry of every Claude Code hook (§"Fresh reads"); `check --hook` is its SessionStart
 part, never fails the session and prints one to three lines.
 
@@ -1092,7 +1092,10 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   history incomplete), times out, prints no JSON, or its commits lack a sha or a boolean `attributed`, `convoy add`
   prints `harbor: ledger: attribution not available (<why>)` and goes on as 0.5 (the `Story:` trailers). A ledger
   that can't answer must not stop every convoy; HRB-3's ok checks the ledger again before the sail.
-- **The contract with Keelokit's `ledger.py attribution` (LEDGER-013).** Both sides build against this one shape:
+- **The contract with Keelokit's `ledger.py attribution` (LEDGER-013).** Both sides build against this one shape
+  (Keelokit's main answers it since fc9692f, adding `since` and `diffs`, and `--rules-ref <rev>`; Harbor reads
+  neither, and `convoy add` asks it without `--rules-ref`, from the checkout, where `[ledger]` comes from the
+  trunk's committed `state.toml` anyway):
   `python3 .keelokit/bin/ledger.py attribution <a>..<b> --json` exits 0 when it answered, even if some commits are
   unattributed; 2 for usage or unsupported (also a range whose ends don't resolve); 3 when the history is
   incomplete.
@@ -1211,7 +1214,7 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   them, with no caller `GIT_*`, no GitHub pull-request variables and Keelokit's hardened git
   (`safe.bareRepository=explicit`, `protocol.ext.allow=never`, `core.hooksPath=/dev/null`, `GIT_NO_LAZY_FETCH=1`),
   it runs `--json` and `check --ci --json` on main as it is, and `check --ci --json` on the convoy as if it had
-  landed. Every difference the convoy run has that main's doesn't (same code and detail; the level is the
+  landed (both with `--rules-ref <main tip>` when main's ledger has it, below). Every difference the convoy run has that main's doesn't (same code and detail; the level is the
   project's `enforce`, not the difference), at level `error` or with code `DONE_TWICE`, `UNKNOWN_STORY`,
   `UNATTRIBUTED`, `BAD_CATEGORY` or `STORY_NO_BODY` at any level, is the convoy's: `LEDGER_DIFF`. That is Keelokit's
   own rules on what would reach main: two vessels each closing one story (`DONE_TWICE`: they arrive in two
@@ -1224,9 +1227,25 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   (`LEDGER_UNAVAILABLE`): a link met on the way to `ledger.py` counts as a ledger, never as none. A vessel's commits
   are read as bytes and decoded leniently (git prints a message it can't convert in its own encoding). Refs are read and written as bytes (a branch name need not be UTF-8), and the
   clone's own refs (origin refs and local branches; its HEAD is detached) are deleted in a transaction of their own
-  before this clone's are written, so a local `topic` and a remote `topic/x`, or `main/wip` and `main`, don't clash. Residual: Keelokit 0.16.0 reads some rules from the trunk's committed
-  tree (`[ledger.approval]` in its committed `state.toml`, `critical.toml`, the review files); in the landed clone
-  that tree is the convoy's, which Harbor can't replace without rewriting it.
+  before this clone's are written, so a local `topic` and a remote `topic/x`, or `main/wip` and `main`, don't clash. 
+- **The judge reads main's rules** (phase 6 follow-up, with Keelokit's LEDGER-013). Keelokit reads some rules from
+  the trunk's committed tree (`[ledger.approval]` in its committed `state.toml`, `critical.toml`, the review files,
+  the story files' touches and dimensions, and the corrections file); in the landed clone that tree is the
+  convoy's, which Harbor can't replace without rewriting it. Keelokit's `check --rules-ref <rev>` reads every one of
+  them from `<rev>`'s committed tree instead, and counts a correction row only when `<rev>`'s own file holds it, so
+  the ok passes `--rules-ref <main tip>` to both checks: a convoy can't relax `critical.toml`, approve itself, or
+  attribute its own commit with a row of its own. **Feature detection** happens only in the judge's clone of main,
+  with main's ledger: the probe is the check itself, `check --ci --rules-ref <main tip> --json` on main, whose answer
+  (schema 1, exit 0 or 1) is main's differences. When it doesn't answer, `check --help` decides: a usage that names
+  `--rules-ref` is a ledger that has it and couldn't answer, and the ok fails closed (`LEDGER_UNAVAILABLE`, as does
+  a help that doesn't answer); one that doesn't name it is Keelokit 0.16.0, judged as before with plain
+  `check --ci --json` (the ok says so: `main's ledger has no check --rules-ref`). Nothing of the convoy's is read
+  to decide, so a convoy can't turn `--rules-ref` off (its own `ledger.py` never runs in the judge); once main's
+  ledger has it, a landed check that refuses it (exit 2) is `LEDGER_UNAVAILABLE`, never a check without it. The
+  per-vessel `attribution` runs in the clone of main, whose corrections and `[ledger]` are main's already. The
+  round and `convoy add` read the checkout's ledger as before: they decide nothing that reaches main.
+  Residual, only on a main whose ledger has no `--rules-ref` (Keelokit 0.16.0): those rule files are the convoy's
+  in the landed clone.
 - **The ok is bound to the convoy's exact tip.** An ok that asked the ledger records `ledger = "checked"` and its
   `head`; any later commit on `convoy/<n>` (a fix `convoy verify` records, anything) makes it stale: verify marks
   it (`stale`, event `ok-stale`), and the sail refuses `OK_STALE` until `convoy sail N --ok` is given again on the
@@ -1602,8 +1621,10 @@ claimed_by = "acct1/mbp/session_01Ve"  # (6, HRB-2) optional: the vessel session
   the request's fields only (role, story, convoy, title, model, the dispatcher's worker id for
   `--spawned-by`), never from free text: a request can only start what the project already describes.
   *(6, HRB-2)* With Keelokit's ledger, a vessel's prompt starts with the line
-  `python3 .keelokit/bin/ledger.py take <ID>` (with LEDGER-013 it calls `harbor.py story take`); its
-  `worker register --story <ID>` is the take in the logbook.
+  `python3 .keelokit/bin/ledger.py take <ID>`. On Keelokit's main (LEDGER-013) that line runs `harbor.py story
+  take <ID>` for the new, still unregistered session: Harbor's check only, so a story another worker holds or one
+  on the trunk stops the vessel there (`STORY_TAKEN` / `STORY_ON_TRUNK`, exit 1) before it registers. With 0.16.0
+  it only sets `keelokit.story`. Its `worker register --story <ID>` is the take in the logbook.
 - `wanted started ID --session S` — the taker records the session it started.
 - `wanted drop ID` — the requester or the watch holder gives it up. *(6, HRB-2)* A started request nobody claimed
   is dropped by its taker or the harbormaster.

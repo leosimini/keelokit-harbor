@@ -69,8 +69,9 @@ that vessel waits for the holder to sail and then rebases; `VESSEL_TAKEN` means 
 convoy. With Keelokit's ledger (`ledger.py --json` schema 1), add asks `ledger.py attribution` for the vessel's
 commits: `NO_STORY` names each commit with no `Story:`, `Part-of:` or `No-story:` (merges don't count) and goes
 back to the vessel, which rewords them, seals the new tip and delivers again; the vessel's story is the ledger's
-(`--story` still overrides). `harbor: ledger: attribution not available (…)` means the ledger couldn't answer:
-the add goes on with the `Story:` trailers, as before.
+(`--story` still overrides). `harbor: ledger: attribution not available (…)` means the ledger couldn't answer
+(Keelokit 0.16.0 has no `attribution`, so there it is every add; Keelokit's main answers it): the add goes on with
+the `Story:` trailers, as before.
 
 ## status
 

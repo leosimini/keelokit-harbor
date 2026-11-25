@@ -63,7 +63,11 @@ gatekeeper each one once; fixing history is theirs (`ledger.py correct`). `ledge
 `ledger: … not available (why)` (a ledger that can't answer) is one line and the round goes on; but while the
 ledger can't answer, the ok fails closed (`LEDGER_UNAVAILABLE`): say so to the gatekeeper.
 
-The ok asks main's ledger too, run on the convoy as if it had landed: `LEDGER_DIFF` names what it holds back
+The ok asks main's ledger too, run on the convoy as if it had landed (`harbor: ledger: the convoy is judged by
+main's rules` means it read every rule file, corrections and approvals included, from main with `check --rules-ref`;
+`main's ledger has no check --rules-ref` means Keelokit 0.16.0, where the convoy's own rule files count, so look at
+what the convoy changes under `.keelokit/` and `backlog/ledger-corrections.toml` before the ok): `LEDGER_DIFF`
+names what it holds back
 (`UNATTRIBUTED` commit, `UNKNOWN_STORY`, `DONE_TWICE`: a story already on the trunk or closed by two vessels,
 `BAD_CATEGORY`, `STORY_NO_BODY`). Never work around it: tell the vessel's owner to fix its commits, or the skipper
 to take it out of the convoy, then assemble and give the ok again. `OK_STALE` at the sail: a commit came after your

@@ -49,8 +49,10 @@ is refused with `NO_STORY`; [S3] a project on Keelokit 0.15 behaves as Harbor 0.
   `harbor.py story release ID` clears it; a worker that ends or is marked `lost` releases its story.
 - `worker register --story ID` does the same at registration.
 - `wanted take`: refuse a vessel request whose story is taken or on the trunk.
-- `wanted prompt`: the prompt for a vessel starts with `python3 .keelokit/bin/ledger.py take <ID>` (which,
-  with LEDGER-013, calls `harbor.py story take`).
+- `wanted prompt`: the prompt for a vessel starts with `python3 .keelokit/bin/ledger.py take <ID>`. Keelokit's
+  LEDGER-013 (its main since fc9692f) makes that line run `harbor.py story take <ID>` (found through `git config
+  --local harbor.py`, the session in `HARBOR_SESSION`): `STORY_TAKEN` or `STORY_ON_TRUNK` stop the vessel there,
+  exit 1, before it registers.
 - `LOGBOOK.md` shows each worker's story.
 
 Scenarios: [S1] two sessions take the same story at once: one wins, the other gets `STORY_TAKEN` with the
