@@ -1211,11 +1211,20 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   them, with no caller `GIT_*`, no GitHub pull-request variables and Keelokit's hardened git
   (`safe.bareRepository=explicit`, `protocol.ext.allow=never`, `core.hooksPath=/dev/null`, `GIT_NO_LAZY_FETCH=1`),
   it runs `--json` and `check --ci --json` on main as it is, and `check --ci --json` on the convoy as if it had
-  landed. Every difference the convoy run has that main's doesn't (same level, code and detail), at level `error`
-  or with code `DONE_TWICE`, `UNKNOWN_STORY` or `UNATTRIBUTED`, is the convoy's: `LEDGER_DIFF`. That is Keelokit's
+  landed. Every difference the convoy run has that main's doesn't (same code and detail; the level is the
+  project's `enforce`, not the difference), at level `error` or with code `DONE_TWICE`, `UNKNOWN_STORY`,
+  `UNATTRIBUTED`, `BAD_CATEGORY` or `STORY_NO_BODY` at any level, is the convoy's: `LEDGER_DIFF`. That is Keelokit's
   own rules on what would reach main: two vessels each closing one story (`DONE_TWICE`: they arrive in two
-  first-parent merges), `BAD_CATEGORY`, `STORY_NO_BODY`, a corrections file the convoy breaks. Which of them are
-  errors is the project's `enforce` (main's), except the three codes above, refused at any level.
+  first-parent merges), a `No-story:` category it doesn't know, a bodiless `Story:` commit, a corrections file the
+  convoy breaks.
+- **What the judge's clones copy.** A link in main's `.keelokit/bin/` (or `state.toml`) is never written as a link
+  (in the landed clone it would lead into the convoy's files): it is the blob it points to inside main's tree,
+  links followed up to eight times; one pointing out of the tree, or at nothing, leaves no file, and the ok fails
+  closed (`LEDGER_UNAVAILABLE`). Refs are read and written as bytes (a branch name need not be UTF-8), and the
+  clone's own origin refs are deleted in a transaction of their own before this clone's are written, so a local
+  `topic` and a remote `topic/x` don't clash. Residual: Keelokit 0.16.0 reads some rules from the trunk's committed
+  tree (`[ledger.approval]` in its committed `state.toml`, `critical.toml`, the review files); in the landed clone
+  that tree is the convoy's, which Harbor can't replace without rewriting it.
 - **The ok is bound to the convoy's exact tip.** An ok that asked the ledger records `ledger = "checked"` and its
   `head`; any later commit on `convoy/<n>` (a fix `convoy verify` records, anything) makes it stale: verify marks
   it (`stale`, event `ok-stale`), and the sail refuses `OK_STALE` until `convoy sail N --ok` is given again on the
@@ -1254,7 +1263,8 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   checks. A ledger that read another `main` is refused above; `main` moving after the ok voids it at verify and
   sail, as before.
 - **The ledger's process** runs in its own process group, killed whole at the timeout or when its answer passes
-  the cap; its stderr is kept to 64 KiB.
+  the cap; its stderr is kept to 64 KiB. `HARBOR_LEDGER_SECONDS` counts only when it is a finite number above 0,
+  and at most 600 (`LEDGER_MAX_SECONDS`); anything else is the default 60.
 
 ## Phase 5: the fleet layer without Keelokit *(0.5.0)*
 

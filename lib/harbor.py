@@ -70,6 +70,7 @@ import datetime as dt  # noqa: E402
 import fnmatch  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
+import math  # noqa: E402
 import os  # noqa: E402
 import random  # noqa: E402
 import re  # noqa: E402
@@ -1973,11 +1974,16 @@ LEDGER_SECONDS = 60  # the ledger makes a fixed number of git calls; HARBOR_LEDG
 _LEDGER: dict[str, dict | None] = {}  # ledger.py --json, once per run: the facts, or None (no ledger)
 
 
+LEDGER_MAX_SECONDS = 600  # the ok fails closed on a ledger that doesn't answer: it must stop waiting
+
+
 def ledger_seconds() -> float:
+    """HARBOR_LEDGER_SECONDS when it is a finite number above 0 (at most LEDGER_MAX_SECONDS), else LEDGER_SECONDS."""
     try:
-        return max(float(os.environ.get("HARBOR_LEDGER_SECONDS") or LEDGER_SECONDS), 0.1)
+        v = float(os.environ.get("HARBOR_LEDGER_SECONDS") or LEDGER_SECONDS)
     except ValueError:
         return LEDGER_SECONDS
+    return min(v, LEDGER_MAX_SECONDS) if math.isfinite(v) and v > 0 else LEDGER_SECONDS
 
 
 LEDGER_MAX_BYTES = 32 * 1024 * 1024  # an answer larger than this is no answer; HARBOR_LEDGER_MAX_BYTES overrides it
@@ -2359,6 +2365,7 @@ def ledger_attribution(base: str, tip: str, trunk_tip: str) -> tuple[list[str], 
 
 LEDGER_ROUND_LINES = 5
 REFUSING_CODES = ("DONE_TWICE", "UNKNOWN_STORY", "UNATTRIBUTED")  # a story's, whatever level Keelokit gives them
+BROUGHT_CODES = REFUSING_CODES + ("BAD_CATEGORY", "STORY_NO_BODY")  # what a convoy brings, by Keelokit's rules, any level
 SHA = re.compile(r"[0-9a-f]{40}")
 
 
@@ -2515,15 +2522,30 @@ def judge_tree(tmp: Path, name: str, sha: str, main_tip: str, env: dict) -> Path
 
     g("clone", "--quiet", "--shared", "--no-checkout", "--", str(ROOT), str(d), cwd=tmp)
     g("checkout", "--quiet", "--detach", sha)
-    mine = {line.split()[0]: line.split()[1] for line in git(
-        "for-each-ref", "--format=%(refname) %(objectname)", f"refs/remotes/{REMOTE}/").splitlines()
-        if len(line.split()) == 2 and not line.startswith(f"refs/remotes/{REMOTE}/HEAD ")}
-    want = {r.replace(f"refs/remotes/{REMOTE}/", "refs/remotes/origin/", 1): o for r, o in mine.items()}
-    want.update({f"refs/remotes/origin/{TRUNK}": sha, f"refs/heads/{TRUNK}": sha})
-    have = {line.split()[0] for line in g("for-each-ref", "--format=%(refname)", "refs/remotes/origin/").splitlines()
-            if line.strip()}
-    g("update-ref", "--no-deref", "--stdin", data="".join(f"delete {r}\n" for r in sorted(have - set(want)))
-      + "".join(f"update {r} {o}\n" for r, o in sorted(want.items())))
+
+    def refs(cwd: Path, prefix: str) -> dict[bytes, bytes]:  # bytes: a ref name need not be UTF-8
+        res = subprocess.run(["git", "for-each-ref", "--format=%(objectname) %(refname)", prefix], cwd=cwd, env=env,
+                             capture_output=True)
+        if res.returncode != 0:
+            raise HarborError("LEDGER_UNAVAILABLE", "the judge's clone: git for-each-ref failed")
+        return {line.split(b" ", 1)[1]: line.split(b" ", 1)[0] for line in res.stdout.splitlines() if b" " in line}
+
+    def update(lines: list[bytes]) -> None:
+        if not lines:
+            return
+        res = subprocess.run(["git", "update-ref", "--no-deref", "--stdin", "-z"], cwd=d, env=env, capture_output=True,
+                             input=b"".join(lines))
+        if res.returncode != 0:
+            raise HarborError("LEDGER_UNAVAILABLE", f"the judge's clone: git update-ref failed "
+                              f"({one(res.stderr.decode(errors='replace'), 160)})")
+
+    src, dst = f"refs/remotes/{REMOTE}/".encode(), b"refs/remotes/origin/"
+    want = {dst + r[len(src):]: o for r, o in refs(ROOT, src.decode()).items() if r != src + b"HEAD"}
+    want.update({dst + TRUNK.encode(): sha.encode(), f"refs/heads/{TRUNK}".encode(): sha.encode()})
+    # Two transactions: the clone's own origin refs (this clone's branches) go first, so none clashes by name
+    # (`topic` and `topic/x`) with the ones written after.
+    update([b"delete " + r + b"\0\0" for r in refs(d, "refs/remotes/origin/")])
+    update([b"update " + r + b"\0" + o + b"\0\0" for r, o in sorted(want.items())])
     kk = d / ".keelokit"
     if kk.is_symlink() or (os.path.lexists(kk) and not kk.is_dir()):
         kk.unlink()
@@ -2545,13 +2567,35 @@ def judge_tree(tmp: Path, name: str, sha: str, main_tip: str, env: dict) -> Path
                 or not os.path.realpath(target.parent).startswith(os.path.realpath(kk)):
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "120000":  # never a link (the landed clone would follow it into the convoy's files): main's bytes
+            found = main_blob(main_tip, path)
+            if found is None:
+                continue  # a link to nothing of main's: no file here, and the ok fails closed on it
+            mode, obj = found
         data = subprocess.run(["git", "cat-file", "blob", obj], cwd=ROOT, capture_output=True, check=True).stdout
-        if mode == "120000":
-            os.symlink(data.decode("utf-8", "surrogateescape"), target)
-        else:
-            target.write_bytes(data)
-            target.chmod(0o755 if mode == "100755" else 0o644)
+        target.write_bytes(data)
+        target.chmod(0o755 if mode == "100755" else 0o644)
     return d
+
+
+def main_blob(main_tip: str, path: str, hops: int = 8) -> tuple[str, str] | None:
+    """The (mode, blob) a link at `path` in main's tree stands for: its target resolved inside main's tree, links
+    followed up to `hops` times. None for a target outside the tree, a directory, or nothing."""
+    for _ in range(hops):
+        out = run("git", "ls-tree", "-z", main_tip, "--", path, check=False).stdout.split("\0")[0]
+        if "\t" not in out:
+            return None
+        mode, kind, obj = out.split("\t", 1)[0].split()
+        if kind != "blob":
+            return None
+        if mode != "120000":
+            return mode, obj
+        link = subprocess.run(["git", "cat-file", "blob", obj], cwd=ROOT, capture_output=True).stdout.decode("utf-8", "replace")
+        resolved = os.path.normpath(os.path.join(os.path.dirname(path), link))
+        if link.startswith("/") or resolved.startswith("..") or resolved in (".", ""):
+            return None
+        path = resolved
+    return None
 
 
 def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | None:
@@ -2573,8 +2617,10 @@ def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | Non
         except (OSError, subprocess.SubprocessError, ValueError) as e:
             raise HarborError("LEDGER_UNAVAILABLE", f"the judge's clone of {TRUNK}: {one(e, 160)}; {closed}")
         facts, why, kind = ledger_facts(base, env)
-        if kind in ("absent", "other"):
+        if kind == "other":
             return None
+        if kind == "absent":  # main's tree has it, but no file of main's could stand for it (a link out of the tree)
+            why = f"{LEDGER_TOOL} on {TRUNK} is a link to nothing of {TRUNK}'s"
         if facts is None:
             raise HarborError("LEDGER_UNAVAILABLE", f"{why}; {closed}")
         if facts["trunk_sha"] != main_tip:
@@ -2597,9 +2643,9 @@ def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | Non
             after, why = ledger_check("--ci", root=landed, env=env)
             if after is None:
                 raise HarborError("LEDGER_UNAVAILABLE", f"main's ledger on {c.get('branch')} as landed: {why}; {closed}")
-            had = {(d["level"], d["code"], d["detail"]) for d in diffs}
-            brought = [d for d in after if (d["level"], d["code"], d["detail"]) not in had
-                       and (d["level"] == "error" or d["code"] in REFUSING_CODES)]
+            had = {(d["code"], d["detail"]) for d in diffs}  # a level is the project's enforce, not the difference
+            brought = [d for d in after if (d["code"], d["detail"]) not in had
+                       and (d["level"] == "error" or d["code"] in BROUGHT_CODES)]
         bad, vessels = [], c.get("vessels") or []
         for v in vessels:
             if found := vessel_ledger_diffs(v, main_tip, stories, diffs, judge=(base, env)):

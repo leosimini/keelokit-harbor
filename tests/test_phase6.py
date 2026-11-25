@@ -1949,10 +1949,11 @@ class TestHRB3Breaker4(Phase6Ok):
         ok(harbor(self.a, "seal"))
         ok(harbor(self.a, "convoy", "add", "1", "claude/qa-3"))
         ok(harbor(self.a, "convoy", "assemble", "1"))
+        mark = self.tmp / "mark"
+        mark.unlink(missing_ok=True)  # add and assemble run the checkout's ledger, as in HRB-1: only the ok is the judge
         err = self.refused(self.ok_changed(), "LEDGER_DIFF")
         self.assertIn("BAD_CATEGORY", err)
-        mark = self.tmp / "mark"
-        self.assertFalse(mark.exists() and "CONVOY CODE RAN" in mark.read_text(), "the convoy's code judged it")
+        self.assertFalse(mark.exists(), "the convoy's code ran as the ok's judge")
 
     def test_a_link_in_mains_bin_out_of_the_tree_fails_closed(self):
         sh(self.a, "git", "checkout", "--quiet", "main")
