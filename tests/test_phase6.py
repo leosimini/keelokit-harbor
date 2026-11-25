@@ -1603,3 +1603,49 @@ class TestHRB3Round(Phase6Ok):
         loose = next(l for l in out.splitlines() if "a loose push, recorded" in l)
         self.assertIn("ledger", loose)
         self.assertNotIn("stories", self.repo.log_toml("harbor/main.toml")["moves"][-1])
+
+
+class TestHRB3Breaker2(Phase6Ok):
+    """Breaker round 2: a story id that can't be written, case in check's story field, a ledger.py that isn't a file."""
+
+    def test_a_story_id_that_is_not_one_plain_word_is_no_answer_and_the_round_completes(self):
+        ok(harbor(self.a, "harbormaster", "control"))
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        sh(self.a, "git", "pull", "--quiet", "origin", "main")
+        (self.a / "hot.txt").write_text("x\n")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "fix: hot\n\nStory: QA-4")
+        c = sh(self.a, "git", "rev-parse", "HEAD")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        os.environ["HARBOR_FAKE_STORIES_RAW"] = '[{"id": "QA-\\ud800", "state": "on-trunk", "commit": "%s"}]' % c
+        res = harbor(self.a, "harbormaster", "control")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+        self.assertEqual(len(self.round_ledger_lines(res.stdout)), 1, res.stdout)
+        self.assertNotIn("stories", self.repo.log_toml("harbor/main.toml")["moves"][-1])
+
+    def test_a_story_id_that_is_not_one_plain_word_fails_the_ok_closed(self):
+        self.two_vessels_ready()
+        os.environ["HARBOR_FAKE_STORIES_RAW"] = json.dumps([{"id": "QA-1", "state": "in-progress"},
+                                                            {"id": "QA-3", "state": "in-progress"},
+                                                            {"id": "QA 9\n", "state": "on-trunk"}])
+        self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
+
+    def test_a_check_difference_naming_another_case_of_the_id_is_not_the_storys(self):
+        self.two_vessels_ready()
+        self.stories(**{"QA-1": "in-progress", "QA-3": "in-progress", "qa-1": "in-progress"})
+        self.checks(diff("X", "something about qa-1", story="qa-1"),
+                    diff("DONE_TWICE", "qa-3: Story: commits abc1234, def5678 arrived separately", level="warning"))
+        ok(self.ok_changed())
+
+    def test_a_ledger_py_that_is_not_a_file_fails_the_ok_closed(self):
+        self.two_vessels_ready()
+        tool = self.a / ".keelokit/bin/ledger.py"
+        for make in (lambda: tool.symlink_to("/nonexistent/ledger.py"), tool.mkdir):
+            with self.subTest(make=make):
+                if tool.is_symlink() or tool.is_file():
+                    tool.unlink()
+                elif tool.is_dir():
+                    tool.rmdir()
+                make()
+                self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
