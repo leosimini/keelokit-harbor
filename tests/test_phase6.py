@@ -46,11 +46,12 @@ from test_phase2 import STATUS, Phase2
 # `show ID --json`: Keelokit 0.16.0 has no such command (usage, exit 2); HARBOR_FAKE_SHOW = {"ID": "state", ...}
 #   makes it answer {"schema": 1, "id", "state"} (exit 1 for an id it doesn't list).
 # `check ... --rules-ref REV` (Keelokit LEDGER-013): only with HARBOR_FAKE_RULES_REF set (else usage, exit 2, as
-#   0.16.0). With it the usage (`check --help`) names --rules-ref, an unresolved REV is exit 2, and the rule files
-#   below are read from REV's committed tree; without --rules-ref, from the checkout (0.16.0 reads them from the
-#   trunk's committed tree, which in the judge's landed clone is the convoy's). HARBOR_FAKE_RULES_REF = broken: the
-#   usage names it but every --rules-ref run is exit 2; = landed-exit2: exit 2 when REV is not HEAD (the landed
-#   clone only); = help-sleep: `check --help` never answers.
+#   0.16.0). With it an unresolved REV is exit 2, and the rule files below are read from REV's committed tree;
+#   without --rules-ref, from the checkout (0.16.0 reads them from the trunk's committed tree, which in the judge's
+#   landed clone is the convoy's). HARBOR_FAKE_RULES_REF = broken: every --rules-ref run is exit 2; = landed-exit2:
+#   exit 2 when REV is not HEAD (the landed clone only); = probe-sleep: a --rules-ref run never answers. As the real
+#   one, `check --help` prints a line that doesn't name --rules-ref. The text of this fake never names it either
+#   (FLAG is built): a test marks main's ledger as one that has it by committing it with RULES_REF_MARK appended.
 #   Rule files: backlog/ledger-corrections.toml (`commit = "<sha>"` lines attribute that commit) and
 #   .keelokit/critical.toml (`path = "<prefix>"` lines: from HARBOR_FAKE_SINCE on, a commit touching one with no
 #   `Reviewed-by:` trailer is the error CRITICAL_UNREVIEWED).
@@ -63,15 +64,16 @@ if os.environ.get("HARBOR_FAKE_LEDGER_LOG"):
 def git(*a):
     return subprocess.run(["git", *a], capture_output=True, text=True, check=True).stdout
 RULES_REF_MODE = os.environ.get("HARBOR_FAKE_RULES_REF", "")
+FLAG = "--rules" + "-ref"
 rules_ref = None
+if sys.argv[1:] == ["check", "--help"]:
+    print("Keelokit ledger. Stdlib only (Python 3.11+ for tomllib).")
+    sys.exit(2)
 if sys.argv[1:2] == ["check"] and RULES_REF_MODE:
-    if sys.argv[2:] == ["--help"]:
-        if RULES_REF_MODE == "help-sleep":
+    if FLAG in sys.argv:
+        if RULES_REF_MODE == "probe-sleep":
             time.sleep(30)
-        print("usage: ledger.py check [--ci] [--json] [--rules-ref REV]", file=sys.stderr)
-        sys.exit(2)
-    if "--rules-ref" in sys.argv:
-        at = sys.argv.index("--rules-ref")
+        at = sys.argv.index(FLAG)
         if at + 1 >= len(sys.argv) or sys.argv[at + 1].startswith("-"):
             print("usage: ledger.py ...", file=sys.stderr)
             sys.exit(2)
@@ -81,7 +83,7 @@ if sys.argv[1:2] == ["check"] and RULES_REF_MODE:
                                   capture_output=True, text=True).stdout.strip()
         head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         if not resolved or RULES_REF_MODE == "broken" or (RULES_REF_MODE == "landed-exit2" and resolved != head):
-            print(f"Keelokit: check: --rules-ref {rules_ref!r} does not resolve to a commit here", file=sys.stderr)
+            print(f"Keelokit: check: {FLAG} {rules_ref!r} does not resolve to a commit here", file=sys.stderr)
             sys.exit(2)
 def rule_file(path):
     if rules_ref is not None:
@@ -2090,6 +2092,9 @@ class TestHRB3Breaker5(Phase6Ok):
         self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
 
 
+RULES_REF_MARK = "\n# usage: ledger.py check [--ci] [--json] [--rules-ref REV]\n"
+
+
 class TestHRB3RulesRef(Phase6Ok):
     """Phase 6 follow-up (Keelokit LEDGER-013): the judge passes `--rules-ref <main tip>` to `check` whenever main's
     ledger supports it, so every rule file (critical.toml, the corrections, the approval, the review files) comes from
@@ -2102,6 +2107,7 @@ class TestHRB3RulesRef(Phase6Ok):
         os.environ["HARBOR_FAKE_RULES_REF"] = "1"
         self.mark = self.tmp / "pwn.mark"
         os.environ["PWN_MARK"] = str(self.mark)
+        self.on_main(".keelokit/bin/ledger.py", FAKE_LEDGER + RULES_REF_MARK)  # main's ledger has check --rules-ref
 
     def on_main(self, path: str, text: str) -> str:
         sh(self.a, "git", "checkout", "--quiet", "main")
@@ -2149,8 +2155,8 @@ class TestHRB3RulesRef(Phase6Ok):
         calls = self.rules_ref_checks(main_tip)
         self.assertEqual(len(calls), 2, self.ledger_calls())  # main as it is, and the convoy as landed
         self.assertTrue(all("--ci" in c and c[-1] == "--json" for c in calls), calls)
-        self.assertFalse([c for c in self.ledger_calls() if c[:1] == ["check"] and "--rules-ref" not in c
-                          and c != ["check", "--help"]], "no check without --rules-ref when main's ledger has it")
+        self.assertFalse([c for c in self.ledger_calls() if c[:1] == ["check"] and "--rules-ref" not in c],
+                         "no check without --rules-ref when main's ledger has it")
         self.assertIn(f"rules from {main_tip[:9]}", res)
         self.assertEqual(self.convoy()["ok"]["ledger"], "checked")
 
@@ -2162,13 +2168,11 @@ class TestHRB3RulesRef(Phase6Ok):
 
     def test_HRB_3_RR3_without_rules_ref_the_ok_is_as_before_and_reads_the_convoys_rules(self):
         os.environ["HARBOR_FAKE_RULES_REF"] = ""  # Keelokit 0.16.0: check knows no --rules-ref
+        self.on_main(".keelokit/bin/ledger.py", FAKE_LEDGER)  # and its text never names it
         self.critical_convoy()
-        main_tip = self.repo.main_sha()
         res = ok(self.ok_changed())  # the documented residual: the convoy's critical.toml is read
         checks = [c for c in self.ledger_calls() if c[:1] == ["check"]]
-        # the probe (usage, exit 2), the help, then main and the convoy as landed as before
-        self.assertEqual(checks, [["check", "--ci", "--rules-ref", main_tip, "--json"], ["check", "--help"],
-                                  ["check", "--ci", "--json"], ["check", "--ci", "--json"]])
+        self.assertEqual(checks, [["check", "--ci", "--json"], ["check", "--ci", "--json"]])  # main, then as landed
         self.assertIn("no check --rules-ref", res)
 
     def test_HRB_3_RR4_a_correction_row_the_convoy_adds_attributes_nothing(self):
@@ -2219,7 +2223,7 @@ class TestHRB3RulesRef(Phase6Ok):
         err = self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
         self.assertIn("--rules-ref", err)
         self.assertFalse([c for c in self.ledger_calls() if c[:1] == ["check"] and "--rules-ref" not in c
-                          and c != ["check", "--help"]], "never a fallback to the convoy's rules")
+                          ], "never a fallback to the convoy's rules")
 
     def test_HRB_3_RR7_the_landed_check_refusing_rules_ref_fails_closed(self):
         self.two_vessels_ready()
@@ -2227,12 +2231,36 @@ class TestHRB3RulesRef(Phase6Ok):
         err = self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
         self.assertIn("as landed", err)
         self.assertFalse([c for c in self.ledger_calls() if c[:1] == ["check"] and "--rules-ref" not in c
-                          and c != ["check", "--help"]], "never a fallback to the convoy's rules")
+                          ], "never a fallback to the convoy's rules")
 
-    def test_HRB_3_RR8_a_help_that_never_answers_fails_closed(self):
+    def test_HRB_3_RR8_a_probe_that_times_out_fails_closed_while_plain_check_would_answer(self):
+        """Breaker round 1: a slow --rules-ref probe (a big history, refs anyone can push) must not downgrade the ok
+        to the convoy's rules; the real ledger's `check --help` doesn't name --rules-ref, so it can't decide."""
         self.two_vessels_ready()
-        os.environ.update(HARBOR_FAKE_RULES_REF="help-sleep", HARBOR_FAKE_CHECK="exit2", HARBOR_LEDGER_SECONDS="2")
+        os.environ.update(HARBOR_FAKE_RULES_REF="probe-sleep", HARBOR_LEDGER_SECONDS="2")
+        err = self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
+        self.assertIn("--rules-ref", err)
+        self.assertFalse([c for c in self.ledger_calls() if c[:1] == ["check"] and "--rules-ref" not in c],
+                         "never a check without --rules-ref")
+
+    def test_HRB_3_RR10_the_check_help_of_the_real_ledger_decides_nothing(self):
+        self.two_vessels_ready()
+        os.environ["HARBOR_FAKE_RULES_REF"] = "broken"  # every --rules-ref run exits 2, as for an unknown rev
         self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
+        self.assertFalse([c for c in self.ledger_calls() if c[:1] == ["check"] and "--rules-ref" not in c],
+                         "never a check without --rules-ref")
+
+    def test_HRB_3_RR11_a_convoy_whose_ledger_text_names_no_rules_ref_changes_nothing(self):
+        """Support is read from main's ledger.py only: the convoy's copy, without the mark, is never looked at."""
+        self.critical_convoy(relax=True)
+        sh(self.a, "git", "fetch", "--quiet", "origin")
+        sh(self.a, "git", "checkout", "--quiet", "-B", "convoy/1", "origin/convoy/1")
+        (self.a / ".keelokit/bin/ledger.py").write_text(FAKE_LEDGER)
+        sh(self.a, "git", "commit", "--quiet", "-am", "chore: a ledger of the convoy's", "-m", "No-story: harness")
+        sh(self.a, "git", "push", "--quiet", "origin", "convoy/1")
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        err = self.refused(self.ok_changed(), "LEDGER_DIFF")
+        self.assertIn("as landed, by main's ledger: CRITICAL_UNREVIEWED", err)
 
     def test_HRB_3_RR9_the_round_never_passes_rules_ref(self):
         ok(harbor(self.a, "harbormaster", "control"))
