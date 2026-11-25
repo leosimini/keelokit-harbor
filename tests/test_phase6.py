@@ -40,11 +40,14 @@ from test_phase2 import STATUS, Phase2
 # `check --json` (Keelokit 0.16.0's shape: {"schema": 1, "diffs": [{"level", "code", "detail"}]}, exit 1 on an
 #   error-level one): HARBOR_FAKE_CHECK = the JSON list of diffs (default []), any other JSON value printed as is,
 #   or sleep | bad | exit2 | binary. HARBOR_FAKE_CHECK_HOOK: a shell command run before it answers (a race).
+#   To that list it adds what Keelokit's check finds in origin/main's history by its rules (computed_diffs:
+#   DONE_TWICE, UNKNOWN_STORY; from HARBOR_FAKE_SINCE on UNATTRIBUTED, BAD_CATEGORY, STORY_NO_BODY). `check --ci
+#   --json` answers the same.
 # `show ID --json`: Keelokit 0.16.0 has no such command (usage, exit 2); HARBOR_FAKE_SHOW = {"ID": "state", ...}
 #   makes it answer {"schema": 1, "id", "state"} (exit 1 for an id it doesn't list).
 # Every call is logged to HARBOR_FAKE_LEDGER_LOG.
 FAKE_LEDGER = """\
-import json, os, subprocess, sys, time
+import json, os, re, subprocess, sys, time
 if os.environ.get("HARBOR_FAKE_LEDGER_LOG"):
     with open(os.environ["HARBOR_FAKE_LEDGER_LOG"], "a") as f:
         f.write(json.dumps(sys.argv[1:]) + "\\n")
@@ -75,7 +78,63 @@ if sys.argv[1:] == ["--json"]:
     print(json.dumps({"schema": json.loads(mode), "trunk": "main", "trunk_sha": trunk, "stories": stories_v,
                       "diffs": [{"level": "warning"}]}))
     sys.exit(1)
-if sys.argv[1:] == ["check", "--json"]:
+def computed_diffs():
+    # What Keelokit's check finds in origin/main's history, by its rules: DONE_TWICE (a warning) for a known story
+    # whose Story: commits arrived in more than one first-parent commit; UNKNOWN_STORY for an id no story has; from
+    # HARBOR_FAKE_SINCE on, UNATTRIBUTED, BAD_CATEGORY and STORY_NO_BODY (errors: enforce = "block").
+    trunk = subprocess.run(["git", "rev-parse", "--verify", "-q", "refs/remotes/origin/main^{commit}"],
+                           capture_output=True, text=True).stdout.strip()
+    if not trunk:
+        return []
+    known = set(json.loads(os.environ.get("HARBOR_FAKE_STORIES") or "{}"))
+    def tr(sha, key):
+        out = git("log", "-1", f"--format=%(trailers:key={key},valueonly,separator=%x2C)", sha)
+        return [v.strip() for v in out.replace("\\n", ",").split(",") if v.strip()]
+    def parents(sha):
+        return git("rev-list", "--parents", "-n", "1", sha).split()[1:]
+    out, seen = [], {}
+    for f in reversed(git("rev-list", "--first-parent", trunk).split()):
+        ps = parents(f)
+        for c in ([f] if len(ps) < 2 else git("rev-list", f, f"^{ps[0]}").split()):
+            for sid in tr(c, "Story"):
+                if sid in known:
+                    seen.setdefault(sid, {}).setdefault(f, c)
+    out += [{"level": "warning", "code": "DONE_TWICE",
+             "detail": f"{sid}: Story: commits {', '.join(c[:9] for c in found.values())} arrived separately"}
+            for sid, found in sorted(seen.items()) if len(found) > 1]
+    since = os.environ.get("HARBOR_FAKE_SINCE", "")
+    rng = git("rev-list", trunk, *([f"^{since}"] if since else [])).split()
+    subject = lambda c: git("log", "-1", "--format=%s", c).strip()[:80]
+    for c in rng:
+        unknown = sorted({i for i in tr(c, "Story") + tr(c, "Part-of") if i not in known})
+        if unknown:
+            out.append({"level": "error", "code": "UNKNOWN_STORY",
+                        "detail": f"{c[:9]} {subject(c)!r}: names {', '.join(unknown)}, which no story file of the trunk has"})
+    if not since:
+        return out
+    has = lambda c: bool(tr(c, "Story") or tr(c, "Part-of") or tr(c, "No-story"))
+    covered = set()
+    for c in rng:
+        ps = parents(c)
+        if len(ps) > 1 and has(c):
+            covered |= set(git("rev-list", c, f"^{ps[0]}").split())
+    loose = {c for c in rng if len(parents(c)) < 2 and not has(c) and c not in covered}
+    for c in rng:
+        ps = parents(c)
+        if c in loose or (len(ps) > 1 and not has(c) and set(git("rev-list", c, f"^{ps[0]}").split()) & loose):
+            out.append({"level": "error", "code": "UNATTRIBUTED",
+                        "detail": f"{c[:9]} {subject(c)!r}: no Story:, Part-of: or No-story:"})
+        for v in tr(c, "No-story"):
+            cat = re.split(r"[\\s:,-]", v.strip(), maxsplit=1)[0].strip()
+            if cat not in ("harness", "docs", "release", "deps", "ci"):
+                out.append({"level": "error", "code": "BAD_CATEGORY", "detail": f"{c[:9]} {subject(c)!r}: No-story: {v!r}"})
+        if tr(c, "Story"):
+            paras = [p for p in re.split(r"\\n[ \\t]*\\n", git("log", "-1", "--format=%B", c).strip()) if p.strip()]
+            if len(paras) <= 2:
+                out.append({"level": "error", "code": "STORY_NO_BODY",
+                            "detail": f"{c[:9]} {subject(c)!r}: closes {', '.join(tr(c, 'Story'))} with no body"})
+    return out
+if sys.argv[1:2] == ["check"] and sys.argv[-1:] == ["--json"] and set(sys.argv[2:-1]) <= {"--ci"} and len(sys.argv) <= 4:
     if os.environ.get("HARBOR_FAKE_CHECK_HOOK"):
         subprocess.run(os.environ["HARBOR_FAKE_CHECK_HOOK"], shell=True, check=True, stdout=subprocess.DEVNULL)
     mode = os.environ.get("HARBOR_FAKE_CHECK", "[]")
@@ -91,6 +150,8 @@ if sys.argv[1:] == ["check", "--json"]:
         sys.stdout.buffer.write(b'{"schema": 1, "diffs": [], "x": "' + bytes([255]) + b'"}')
         sys.exit(0)
     diffs = json.loads(mode)
+    if isinstance(diffs, list):
+        diffs = diffs + computed_diffs()
     print(json.dumps(diffs if not isinstance(diffs, list) else {"schema": 1, "diffs": diffs}, indent=1))
     sys.exit(1 if isinstance(diffs, list) and any(isinstance(d, dict) and d.get("level") == "error" for d in diffs)
              else 0)
@@ -1638,17 +1699,25 @@ class TestHRB3Breaker2(Phase6Ok):
                     diff("DONE_TWICE", "qa-3: Story: commits abc1234, def5678 arrived separately", level="warning"))
         ok(self.ok_changed())
 
-    def test_a_ledger_py_that_is_not_a_file_fails_the_ok_closed(self):
-        self.two_vessels_ready()
+    def test_a_ledger_py_on_main_that_is_not_a_file_fails_the_ok_closed(self):
+        """The ok judges with main's ledger: main's ledger.py a dangling link is a ledger that can't answer."""
         tool = self.a / ".keelokit/bin/ledger.py"
-        for make in (lambda: tool.symlink_to("/nonexistent/ledger.py"), tool.mkdir):
-            with self.subTest(make=make):
-                if tool.is_symlink() or tool.is_file():
-                    tool.unlink()
-                elif tool.is_dir():
-                    tool.rmdir()
-                make()
-                self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        tool.unlink()
+        tool.symlink_to("/nonexistent/ledger.py")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "a broken ledger", "-m", "No-story: harness")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        self.two_vessels_ready()
+        self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
+
+    def test_a_ledger_py_in_the_checkout_that_is_not_a_file_is_one_line_in_the_round(self):
+        tool = self.a / ".keelokit/bin/ledger.py"
+        tool.unlink()
+        tool.mkdir()
+        out = ok(harbor(self.a, "harbormaster", "control"))
+        self.assertEqual(len(self.round_ledger_lines(out)), 1, out)
+        self.assertIn("not available", self.round_ledger_lines(out)[0])
 
 
 class TestHRB3Breaker3(Phase6Ok):
@@ -1681,3 +1750,136 @@ class TestHRB3Breaker3(Phase6Ok):
                 self.assertIn(f"UNATTRIBUTED: {evil[:9]}", res.stderr)
                 self.assertNotIn("ok", self.convoy(n))
                 ok(harbor(self.a, "convoy", "abort", str(n), "--reason", "next forge"))
+
+
+class TestHRB3Judge(Phase6Ok):
+    """The coordinator's breaker on 88f5aab: the judge is main's ledger, run on the convoy as if it had landed, and the
+    ok is bound to the exact convoy tip."""
+
+    def vessel_branch(self, name: str, *commits: tuple[str, str], at_add: dict | None = None, n: int = 1) -> str:
+        head = self.branch(name, *commits)
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", str(n), name, env=at_add))
+        return head
+
+    def test_A2_a_vessel_that_deletes_the_ledger_is_judged_by_mains(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3"))
+        self.branch("claude/qa-1", ("apps/web/a.ts", "feat: a\n\nStory: QA-1"))
+        sh(self.a, "git", "rm", "--quiet", ".keelokit/bin/ledger.py")
+        sh(self.a, "git", "commit", "--quiet", "-m", "chore: no ledger")
+        late = sh(self.a, "git", "rev-parse", "HEAD")
+        sh(self.a, "git", "push", "--quiet", "origin", "claude/qa-1")
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", "1", "claude/qa-1"))
+        self.deliver(1, "claude/qa-3", "apps/web/c.ts", "QA-3")
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        self.assertFalse((self.a / ".keelokit/bin/ledger.py").exists(), "the checkout is the convoy's, without it")
+        err = self.refused(self.ok_changed(), "LEDGER_DIFF")
+        self.assertIn(f"UNATTRIBUTED: {late[:9]}", err)
+
+    def test_A2b_a_vessel_whose_ledger_answers_another_schema_or_nothing_is_judged_by_mains(self):
+        for n, body in enumerate(('import json; print(json.dumps({"schema": 2}))',
+                                  'import json, sys\nprint(json.dumps({"schema": 1, "trunk_sha": "", "stories": [], '
+                                  '"diffs": []}))'), start=1):
+            with self.subTest(body=body):
+                ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3"))
+                self.branch(f"claude/qa-1-{n}", ("apps/web/a.ts", "feat: a\n\nStory: QA-1"))
+                (self.a / ".keelokit/bin/ledger.py").write_text(body + "\n")
+                sh(self.a, "git", "commit", "--quiet", "-am", "chore: my own ledger")
+                late = sh(self.a, "git", "rev-parse", "HEAD")
+                sh(self.a, "git", "push", "--quiet", "origin", f"claude/qa-1-{n}")
+                ok(harbor(self.a, "seal"))
+                harbor(self.a, "convoy", "add", str(n), f"claude/qa-1-{n}")
+                self.deliver(n, f"claude/qa-3-{n}", "apps/web/c.ts", "QA-3")
+                ok(harbor(self.a, "convoy", "assemble", str(n)))
+                res = self.ok_changed(n)
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertIn("harbor: LEDGER_DIFF: ", res.stderr)
+                self.assertIn(f"UNATTRIBUTED: {late[:9]}", res.stderr)
+                self.assertNotIn("ok", self.convoy(n))
+                ok(harbor(self.a, "convoy", "abort", str(n), "--reason", "next"))
+
+    def test_A1_a_commit_after_the_ok_voids_it(self):
+        self.two_vessels_ready()
+        ok(self.ok_changed())
+        before = self.repo.main_sha()
+        sh(self.a, "git", "fetch", "--quiet", "origin")
+        sh(self.a, "git", "checkout", "--quiet", "-B", "convoy/1", "origin/convoy/1")
+        (self.a / "late.txt").write_text("late\n")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "fix: late, no trailer")
+        late = sh(self.a, "git", "rev-parse", "HEAD")
+        sh(self.a, "git", "push", "--quiet", "origin", "convoy/1")
+        ok(harbor(self.a, "convoy", "verify", "1"))
+        self.assertIn("stale", self.convoy()["ok"])
+        res = harbor(self.a, "convoy", "sail", "1")
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("harbor: OK_STALE: ", res.stderr)
+        self.assertEqual(self.repo.main_sha(), before, "main did not move")
+        res = self.ok_changed()
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("harbor: LEDGER_DIFF: ", res.stderr)
+        self.assertIn(f"UNATTRIBUTED: {late[:9]}", res.stderr)
+
+    def test_a_fix_after_the_ok_sails_once_a_new_ok_checks_it(self):
+        self.two_vessels_ready()
+        ok(self.ok_changed())
+        sh(self.a, "git", "fetch", "--quiet", "origin")
+        sh(self.a, "git", "checkout", "--quiet", "-B", "convoy/1", "origin/convoy/1")
+        (self.a / "late.txt").write_text("late\n")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "fix: late\n\nPart-of: QA-1")
+        tip = sh(self.a, "git", "rev-parse", "HEAD")
+        sh(self.a, "git", "push", "--quiet", "origin", "convoy/1")
+        ok(harbor(self.a, "convoy", "verify", "1"))
+        self.assertIn("OK_STALE", harbor(self.a, "convoy", "sail", "1").stderr)
+        ok(self.ok_changed())
+        self.assertEqual((self.convoy()["ok"]["head"], self.convoy()["state"]), (tip, "verifying"))
+        self.assertNotIn("stale", self.convoy()["ok"])
+        ok(harbor(self.a, "convoy", "verify", "1"))
+        ok(harbor(self.a, "convoy", "sail", "1"))
+        self.assertEqual(self.repo.main_sha(), tip)
+
+    def test_A3_two_vessels_closing_one_story_are_a_done_twice_on_main(self):
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1"))
+        self.vessel_branch("claude/qa-1a", ("apps/web/a.ts", "feat: a\n\nStory: QA-1"))
+        self.vessel_branch("claude/qa-1b", ("apps/web/b.ts", "feat: b\n\nStory: QA-1"))
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        err = self.refused(self.ok_changed(), "LEDGER_DIFF")
+        self.assertIn("DONE_TWICE", err)
+        self.assertIn("QA-1", err)
+
+    def since_ready(self, *qa1: tuple[str, str]):
+        os.environ["HARBOR_FAKE_SINCE"] = self.repo.main_sha()
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3"))
+        self.vessel_branch("claude/qa-1", *qa1)
+        self.vessel_branch("claude/qa-3", ("apps/web/c.ts", "feat: c\n\nThe change.\n\nStory: QA-3"))
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+
+    def test_F4_a_no_story_category_keelokit_refuses_is_refused(self):
+        self.since_ready(("apps/web/a.ts", "feat: a\n\nThe change.\n\nStory: QA-1"),
+                         ("apps/web/b.ts", "chore: b\n\nNo-story: anything goes"))
+        self.assertIn("BAD_CATEGORY", self.refused(self.ok_changed(), "LEDGER_DIFF"))
+
+    def test_F4_a_story_commit_with_no_body_is_refused(self):
+        self.since_ready(("apps/web/a.ts", "feat: a\n\nStory: QA-1"))
+        self.assertIn("STORY_NO_BODY", self.refused(self.ok_changed(), "LEDGER_DIFF"))
+
+    def test_a_convoy_that_follows_keelokits_rules_passes_with_since(self):
+        self.since_ready(("apps/web/a.ts", "feat: a\n\nThe change.\n\nStory: QA-1"),
+                         ("apps/web/b.ts", "docs: b\n\nNo-story: docs"))
+        ok(self.ok_changed())
+        self.assertEqual(self.convoy()["ok"]["ledger"], "checked")
+
+    def test_a_difference_main_already_has_is_not_the_convoys(self):
+        os.environ["HARBOR_FAKE_SINCE"] = self.repo.main_sha()
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        (self.a / "old.txt").write_text("old\n")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "chore: on main already, no trailer")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3"))
+        self.vessel_branch("claude/qa-1", ("apps/web/a.ts", "feat: a\n\nThe change.\n\nStory: QA-1"))
+        self.vessel_branch("claude/qa-3", ("apps/web/c.ts", "feat: c\n\nThe change.\n\nStory: QA-3"))
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        ok(self.ok_changed())
