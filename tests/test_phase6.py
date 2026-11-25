@@ -1913,3 +1913,71 @@ class TestHRB3Coordinator(Phase6Ok):
             self.assertEqual(mod.ledger_seconds(), mod.LEDGER_MAX_SECONDS)
         with mock.patch.dict(os.environ, {"HARBOR_LEDGER_SECONDS": "2.5"}):
             self.assertEqual(mod.ledger_seconds(), 2.5)
+
+
+PWN_LEDGER = """import json, os, sys
+open(os.environ["PWN_MARK"], "a").write("CONVOY CODE RAN " + " ".join(sys.argv[1:]) + "\\n")
+print(json.dumps({"schema": 1, "diffs": []})); sys.exit(0)
+"""
+
+
+class TestHRB3Breaker4(Phase6Ok):
+    """Breaker on ad486dc: a link in main's .keelokit/bin must not run the convoy's code; refs the judge's clone copies
+    must not lock every ok out."""
+
+    def test_a_link_in_mains_bin_never_runs_the_convoys_code(self):
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        lib = self.a / ".keelokit/lib"
+        lib.mkdir(parents=True, exist_ok=True)
+        (lib / "impl.py").write_text(FAKE_LEDGER)
+        (self.a / ".keelokit/bin/ledger.py").unlink()
+        os.symlink("../lib/impl.py", self.a / ".keelokit/bin/ledger.py")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "ledger via a link", "-m", "No-story: harness")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        os.environ["PWN_MARK"] = str(self.tmp / "mark")
+        os.environ["HARBOR_FAKE_SINCE"] = self.repo.main_sha()
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3"))
+        self.branch("claude/qa-1", ("apps/web/a.ts", "feat: a\n\nThe change.\n\nStory: QA-1"),
+                    ("apps/web/b.ts", "chore: b\n\nNo-story: anything goes"))
+        (self.a / ".keelokit/lib/impl.py").write_text(PWN_LEDGER)
+        sh(self.a, "git", "commit", "--quiet", "-am", "chore: tidy\n\nNo-story: harness")
+        sh(self.a, "git", "push", "--quiet", "origin", "claude/qa-1")
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", "1", "claude/qa-1"))
+        self.branch("claude/qa-3", ("apps/web/c.ts", "feat: c\n\nThe change.\n\nStory: QA-3"))
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", "1", "claude/qa-3"))
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        err = self.refused(self.ok_changed(), "LEDGER_DIFF")
+        self.assertIn("BAD_CATEGORY", err)
+        mark = self.tmp / "mark"
+        self.assertFalse(mark.exists() and "CONVOY CODE RAN" in mark.read_text(), "the convoy's code judged it")
+
+    def test_a_link_in_mains_bin_out_of_the_tree_fails_closed(self):
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        (self.a / ".keelokit/bin/ledger.py").unlink()
+        os.symlink("../../../outside.py", self.a / ".keelokit/bin/ledger.py")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "a link out", "-m", "No-story: harness")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        self.two_vessels_ready()
+        self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
+
+    def ok_despite(self):
+        self.two_vessels_ready()
+        res = self.ok_changed()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.convoy()["ok"]["ledger"], "checked")
+
+    def test_a_remote_branch_whose_name_is_not_utf8_does_not_lock_the_ok_out(self):
+        subprocess.run([b"git", b"update-ref", b"refs/heads/claude/caf\xe9", self.repo.main_sha().encode()],
+                       cwd=self.repo.remote, check=True)
+        sh(self.a, "git", "fetch", "--quiet", "origin")
+        self.ok_despite()
+
+    def test_a_local_branch_and_a_remote_one_below_it_do_not_lock_the_ok_out(self):
+        sh(self.a, "git", "branch", "topic", self.repo.main_sha())
+        sh(self.repo.remote, "git", "update-ref", "refs/heads/topic/x", self.repo.main_sha())
+        sh(self.a, "git", "fetch", "--quiet", "origin")
+        self.ok_despite()
