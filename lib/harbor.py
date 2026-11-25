@@ -65,15 +65,18 @@ if sys.version_info < (3, 11):
     sys.exit(2)
 
 import argparse  # noqa: E402
+import contextlib  # noqa: E402
 import datetime as dt  # noqa: E402
 import fnmatch  # noqa: E402
 import hashlib  # noqa: E402
 import json  # noqa: E402
+import math  # noqa: E402
 import os  # noqa: E402
 import random  # noqa: E402
 import re  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
+import signal  # noqa: E402
 import ssl  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
@@ -1971,38 +1974,112 @@ LEDGER_SECONDS = 60  # the ledger makes a fixed number of git calls; HARBOR_LEDG
 _LEDGER: dict[str, dict | None] = {}  # ledger.py --json, once per run: the facts, or None (no ledger)
 
 
+LEDGER_MAX_SECONDS = 600  # the ok fails closed on a ledger that doesn't answer: it must stop waiting
+
+
 def ledger_seconds() -> float:
+    """HARBOR_LEDGER_SECONDS when it is a finite number above 0 (at most LEDGER_MAX_SECONDS), else LEDGER_SECONDS."""
     try:
-        return max(float(os.environ.get("HARBOR_LEDGER_SECONDS") or LEDGER_SECONDS), 0.1)
+        v = float(os.environ.get("HARBOR_LEDGER_SECONDS") or LEDGER_SECONDS)
     except ValueError:
         return LEDGER_SECONDS
+    return min(v, LEDGER_MAX_SECONDS) if math.isfinite(v) and v > 0 else LEDGER_SECONDS
 
 
-def run_ledger(*args: str, answers: tuple[int, ...] = (0, 1)) -> tuple[dict | None, str]:
+LEDGER_MAX_BYTES = 32 * 1024 * 1024  # an answer larger than this is no answer; HARBOR_LEDGER_MAX_BYTES overrides it
+
+
+def ledger_max_bytes() -> int:
+    try:
+        return max(int(os.environ.get("HARBOR_LEDGER_MAX_BYTES") or LEDGER_MAX_BYTES), 1024)
+    except ValueError:
+        return LEDGER_MAX_BYTES
+
+
+def _ledger_process(args: tuple[str, ...], seconds: float, cap: int, root: Path,
+                    env: dict | None = None) -> tuple[int | None, bytes, bytes, str]:
+    """Runs `root`'s ledger.py in its own process group: (exit, stdout, stderr, "") or (None, …, why) on a timeout or
+    an answer over `cap` bytes. The whole group is killed (the ledger's git calls too), so nothing outlives the run."""
+    proc = subprocess.Popen([sys.executable, str(root / LEDGER_TOOL), *args], cwd=root, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env=env)
+    out, err, over = bytearray(), bytearray(), []
+
+    def kill():
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+
+    def pump(stream, buf: bytearray, limit: int, fatal: bool):
+        while chunk := stream.read(65536):
+            if len(buf) + len(chunk) > limit:
+                if fatal:
+                    over.append(True)
+                    kill()
+                    break
+                buf += chunk[:max(limit - len(buf), 0)]
+                continue
+            buf += chunk
+
+    pumps = [threading.Thread(target=pump, args=(proc.stdout, out, cap, True), daemon=True),
+             threading.Thread(target=pump, args=(proc.stderr, err, 64 * 1024, False), daemon=True)]
+    for t in pumps:
+        t.start()
+    try:
+        proc.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        kill()
+        proc.wait()
+        for t in pumps:
+            t.join(2)
+        return None, b"", b"", f"did not answer in {seconds:g} s"
+    for t in pumps:
+        t.join(2)
+    kill()  # anything the ledger left behind holding its pipes
+    if over:
+        return None, b"", b"", f"answered more than {cap} bytes"
+    return proc.returncode, bytes(out), bytes(err), ""
+
+
+def ledger_answer(*args: str, answers: tuple[int, ...] = (0, 1), root: Path | None = None,
+                  env: dict | None = None) -> tuple[dict | None, str, str]:
+    """The project's ledger.py answering `args`: (its JSON, "", "ok") when it is an object with schema 1. Otherwise
+    (None, why, kind): kind "absent" (no ledger.py), "other" (an object with another integer schema: a ledger Harbor
+    doesn't speak, which is no ledger) or "broken" (a ledger that can't answer: a timeout, an exit outside
+    `answers`, more than the cap, text that isn't UTF-8 JSON, anything but an object with an integer schema)."""
+    root = root or ROOT
+    tool = root / LEDGER_TOOL
+    if not os.path.lexists(tool):
+        return None, f"no {LEDGER_TOOL}", "absent"
+    if not tool.is_file():  # there, but a directory or a dangling link: a ledger that can't answer, not no ledger
+        return None, f"{LEDGER_TOOL} is not a file", "broken"
+    what = f"`ledger.py {' '.join(args)}`"
+    try:
+        code, out, err, why = _ledger_process(args, ledger_seconds(), ledger_max_bytes(), root, env)
+    except OSError as e:
+        return None, f"{what}: {e}", "broken"
+    if why:
+        return None, f"{what} {why}", "broken"
+    if code not in answers:
+        first = one((err.decode(errors="replace").strip().splitlines() or [""])[0], 160)
+        return None, f"{what}: exit {code}" + (f" ({first})" if first else ""), "broken"
+    try:
+        data = json.loads(out.decode("utf-8"))
+    except (ValueError, RecursionError):  # UnicodeDecodeError too: JSON is UTF-8
+        return None, f"{what} answered with text that is not JSON", "broken"
+    schema = data.get("schema") if isinstance(data, dict) else None
+    if type(schema) is int and schema == 1:
+        return data, "", "ok"
+    if type(schema) is int:
+        return None, f"{what} answered schema {schema}, not 1", "other"
+    return None, f"{what} did not answer schema 1", "broken"
+
+
+def run_ledger(*args: str, answers: tuple[int, ...] = (0, 1), root: Path | None = None,
+               env: dict | None = None) -> tuple[dict | None, str]:
     """The project's ledger.py answering `args`: (its JSON, "") when it is an object with schema 1, else (None, why).
     The exits in `answers` are answers (`--json`: 0, or 1 for differences); any other exit, a timeout or text that
     isn't JSON is none."""
-    tool = ROOT / LEDGER_TOOL
-    if not tool.is_file():
-        return None, f"no {LEDGER_TOOL}"
-    what, seconds = f"`ledger.py {' '.join(args)}`", ledger_seconds()
-    try:
-        res = subprocess.run([sys.executable, str(tool), *args], cwd=ROOT, capture_output=True,
-                             timeout=seconds, stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return None, f"{what} did not answer in {seconds:g} s"
-    except OSError as e:
-        return None, f"{what}: {e}"
-    if res.returncode not in answers:
-        why = (res.stderr.decode(errors="replace").strip().splitlines() or [""])[0][:160]
-        return None, f"{what}: exit {res.returncode}" + (f" ({why})" if why else "")
-    try:
-        data = json.loads(res.stdout.decode("utf-8"))
-    except ValueError:  # UnicodeDecodeError too: JSON is UTF-8
-        return None, f"{what} answered with text that is not JSON"
-    if not isinstance(data, dict) or type(data.get("schema")) is not int or data["schema"] != 1:
-        return None, f"{what} did not answer schema 1"
-    return data, ""
+    data, why, _ = ledger_answer(*args, answers=answers, root=root, env=env)
+    return data, why
 
 
 def has_ledger() -> bool:
@@ -2279,6 +2356,406 @@ def ledger_attribution(base: str, tip: str, trunk_tip: str) -> tuple[list[str], 
     return sorted(stories), bad
 
 
+# --- HRB-3: the ledger in the harbormaster's round and in the ok ---------------------------------------
+# The round adds `ledger.py check --json`'s error-level differences (at most LEDGER_ROUND_LINES lines) and, for a
+# loose move of main, the stories that entered and its unattributed commits. A ledger that can't answer is one
+# line there. The ok (`convoy sail N --ok`) is what decides what reaches main, so it fails closed: with a ledger
+# that answers schema 1 it refuses LEDGER_DIFF for a vessel whose story has an error difference, and
+# LEDGER_UNAVAILABLE when that ledger can't answer; without a schema-1 ledger at all it is 0.5's ok.
+
+LEDGER_ROUND_LINES = 5
+REFUSING_CODES = ("DONE_TWICE", "UNKNOWN_STORY", "UNATTRIBUTED")  # a story's, whatever level Keelokit gives them
+BROUGHT_CODES = REFUSING_CODES + ("BAD_CATEGORY", "STORY_NO_BODY")  # what a convoy brings, by Keelokit's rules, any level
+SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def ledger_facts(root: Path | None = None, env: dict | None = None) -> tuple[dict | None, str, str]:
+    """`ledger.py --json` asked now (and remembered for the run), as ledger_answer, with what HRB-3 reads of it
+    checked: `trunk_sha` a full sha and `stories` a list of objects with a string id and state (and a string or
+    null commit). An answer that has them wrong is a ledger that can't answer ("broken")."""
+    data, why, kind = ledger_answer("--json", root=root, env=env)
+    if data is not None:
+        stories, trunk = data.get("stories"), data.get("trunk_sha")
+        if not (isinstance(trunk, str) and SHA.fullmatch(trunk)):
+            data, why, kind = None, "`ledger.py --json` gives no full trunk_sha", "broken"
+        elif not (isinstance(stories, list) and all(
+                isinstance(r, dict) and isinstance(r.get("id"), str) and NAME.fullmatch(r["id"])
+                and isinstance(r.get("state"), str)
+                and (r.get("commit") is None or isinstance(r.get("commit"), str)) for r in stories)):
+            data, why, kind = None, ("`ledger.py --json` gives stories that are not a list of objects with an id (one "
+                                     "plain word: letters, digits, . _ -) and a string state"), "broken"
+    if root is None:
+        _LEDGER[str(ROOT)] = data
+    return data, why, kind
+
+
+def ledger_check(*flags: str, root: Path | None = None, env: dict | None = None) -> tuple[list[dict] | None, str]:
+    """`ledger.py check --json` (Keelokit 0.16.0: {"schema": 1, "diffs": [{"level", "code", "detail"}]}, exit 1 on
+    an error-level one): (its differences, "") or (None, why)."""
+    data, why, _ = ledger_answer("check", *flags, "--json", root=root, env=env)
+    if data is None:
+        return None, why
+    diffs = data.get("diffs")
+    if not (isinstance(diffs, list) and all(
+            isinstance(d, dict) and all(isinstance(d.get(k), str) for k in ("level", "code", "detail")) for d in diffs)):
+        return None, "`ledger.py check --json` gives differences that are not objects with a string level, code and detail"
+    return diffs, ""
+
+
+def diff_stories(d: dict) -> set[str]:
+    """The stories a difference names (with case, as Keelokit's ids): its `story`/`stories` when the ledger gives them;
+    for 0.16.0's DONE_TWICE, whose detail is "<ID>: Story: commits … arrived separately", the id before the colon."""
+    found = set()
+    for key in ("story", "stories"):
+        v = d.get(key)
+        found |= {x.strip() for x in ([v] if isinstance(v, str) else v if isinstance(v, list) else [])
+                  if isinstance(x, str) and x.strip()}
+    if d["code"] == "DONE_TWICE" and (m := re.match(r"\s*([^\s:,]+):", d["detail"])):
+        found.add(m.group(1))
+    return found
+
+
+def git_bytes(*args: str) -> bytes:
+    """git's output as bytes; pathspecs are literal (a path is never a pattern)."""
+    res = subprocess.run(["git", "--literal-pathspecs", *args], cwd=ROOT, capture_output=True)
+    if res.returncode != 0:
+        raise HarborError("GIT", f"git {args[0]}… failed: {one(res.stderr.decode(errors='replace'), 300)}")
+    return res.stdout
+
+
+def own_commits(head: str, *exclude: str) -> list[dict]:
+    """The commits `head` brings that none of `exclude` has (main, and for a convoy's own commits its vessels), merges
+    too (`merge`: a merge's Story: closes a story as any other's; it is never unattributed itself, the ledger
+    attributes what it brings), each with its Story:, Part-of: and No-story: trailers as git reads them (the message's
+    last paragraph). The commits and their parents come from `rev-list` (no text a committer writes); the messages
+    from `log -z`, NUL-separated (a message can't hold a NUL), and the two must name the same commits in the same
+    order, or Harbor can't read them (a refusal)."""
+    revs = [head, *(f"^{x}" for x in exclude)]
+    graph = [line.split() for line in git_bytes("rev-list", "--parents", *revs, "--").decode("ascii", "replace").splitlines()
+             if line.strip()]
+    keys = ("Story", "Part-of", "No-story")
+    fmt = "%H%x00%s" + "".join(f"%x00%(trailers:key={k},valueonly,separator=%x2C)" for k in keys)
+    # bytes, decoded leniently: git prints a message in its own encoding when it can't convert it to UTF-8
+    tokens = git_bytes("log", "-z", f"--format={fmt}", *revs, "--").decode("utf-8", "replace").split("\0")
+    if tokens and tokens[-1] == "":
+        tokens.pop()
+    width = 2 + len(keys)
+    if len(tokens) != width * len(graph) or [tokens[i * width] for i in range(len(graph))] != [g[0] for g in graph]:
+        raise HarborError("GIT", f"git log of {short(head)} doesn't name the commits git rev-list does: Harbor can't "
+                          "read their messages")
+    ids = lambda v: [x.strip() for x in v.replace("\n", ",").split(",") if x.strip()]  # noqa: E731
+    commits = []
+    for i, g in enumerate(graph):
+        _, subject, story, part_of, no_story = tokens[i * width:(i + 1) * width]
+        commits.append({"sha": g[0], "merge": len(g) > 2, "subject": subject, "story": ids(story),
+                        "part_of": ids(part_of), "no_story": bool(no_story.strip())})
+    return commits
+
+
+def ledger_attributions(main_tip: str, head: str, judge: tuple = ()) -> dict[str, dict]:
+    """`ledger.py attribution <main>..<head> --json`, when it answers (Keelokit 0.16.0 doesn't): sha -> its record
+    (`attributed` a boolean). {} otherwise: the vessel's trailers stand in for it. `judge`: (root, env) to run it in."""
+    data, _ = run_ledger("attribution", f"{main_tip}..{head}", "--json", answers=(0,), **dict(zip(("root", "env"), judge)))
+    commits = data.get("commits") if data else None
+    if not isinstance(commits, list):
+        return {}
+    return {c["sha"].lower(): c for c in commits if isinstance(c, dict) and isinstance(c.get("sha"), str)
+            and len(c["sha"]) >= 7 and isinstance(c.get("attributed"), bool)}
+
+
+def id_list(v) -> list[str]:
+    return [x.strip() for x in v if isinstance(x, str) and x.strip()] if isinstance(v, list) else []
+
+
+def vessel_ledger_diffs(v: dict, main_tip: str, stories: dict, diffs: list[dict], exclude: tuple = (),
+                        judge: tuple = ()) -> list[str]:
+    """What the ledger holds against one vessel (or, with `exclude` its vessels' heads, a convoy's own commits): its
+    own commits unattributed, its stories unknown or of unknown state, a story its Story: commit (a merge's too)
+    closes already on the trunk (DONE_TWICE: Keelokit counts Story: commits; a Part-of: follow-up of a done story is
+    not one), and `check`'s differences naming one of its stories. Ids compare with case, as Keelokit's do."""
+    head = v.get("head")
+    if not isinstance(head, str) or not SHA.fullmatch(head):
+        raise HarborError("LEDGER_UNAVAILABLE", f"{v.get('branch')} has no commit for a head in the logbook: the ok "
+                          "can't ask the ledger about it")
+    found = ledger_attributions(main_tip, head, judge)
+    closing, ids, out = set(), dict.fromkeys(stories_of(v.get("story"))), []
+    for c in own_commits(head, main_tip, *exclude):
+        rec = next((r for s, r in found.items() if c["sha"].startswith(s)), None)
+        story, part_of = c["story"] + id_list((rec or {}).get("story")), c["part_of"] + id_list((rec or {}).get("part_of"))
+        closing |= set(story)
+        ids.update(dict.fromkeys(story + part_of))
+        if c["merge"]:
+            continue
+        if not (rec["attributed"] if rec else bool(c["story"] or c["part_of"] or c["no_story"])):
+            out.append(f"UNATTRIBUTED: {short(c['sha'])} {one(c['subject'], 60)!r}: no Story:, Part-of: or No-story: "
+                       "in its message's last paragraph")
+    for sid in ids:
+        rec = stories.get(sid)
+        if rec is None:
+            out.append(f"UNKNOWN_STORY: {one(sid, 40)}: no story file of {TRUNK} has it (ids compare with case)")
+        elif rec["state"] == "unknown":
+            out.append(f"UNKNOWN_STORY: {one(sid, 40)}'s state is unknown ({one(rec.get('reason') or 'no reason', 80)})")
+        elif sid in closing and rec["state"] in ON_TRUNK_STATES:
+            at = rec.get("commit")
+            out.append(f"DONE_TWICE: {one(sid, 40)} is {rec['state']}" + (f" at {short(one(at, 40))}" if at else "")
+                       + ": this vessel's Story: commit would close it again")
+        for d in diffs:
+            if (d["level"] == "error" or d["code"] in REFUSING_CODES) and sid in diff_stories(d):
+                out.append(f"{one(d['code'], 40)}: {one(d['detail'], 120)} (ledger.py check)")
+    return list(dict.fromkeys(out))
+
+
+JUDGE_GIT = {"GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "safe.bareRepository", "GIT_CONFIG_VALUE_0": "explicit",
+             "GIT_CONFIG_KEY_1": "protocol.ext.allow", "GIT_CONFIG_VALUE_1": "never",
+             "GIT_CONFIG_KEY_2": "core.hooksPath", "GIT_CONFIG_VALUE_2": "/dev/null",
+             "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
+
+
+def judge_env() -> dict:
+    """The environment of the ok's judge: no GIT_* of the caller (a hook's GIT_DIR would point the ledger at this
+    clone), no GitHub pull-request variables (`check --ci` would read the run's merge), Keelokit's hardened git."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k not in ("GITHUB_EVENT_NAME", "GITHUB_BASE_REF")}
+    return {**env, **JUDGE_GIT}
+
+
+def judge_tree(tmp: Path, name: str, sha: str, main_tip: str, env: dict) -> Path:
+    """A throwaway clone of this one (objects shared), checked out at `sha`, whose origin/<trunk> is `sha` (its other
+    origin refs are this clone's), with MAIN's `.keelokit/bin/` and `.keelokit/state.toml` (the trunk tip's bytes):
+    main's ledger, with main's rules, reading the history as if `sha` had landed. Raises OSError or HarborError."""
+    d = tmp / name
+
+    def g(*a: str, cwd: Path = d, data: str | None = None) -> str:
+        res = subprocess.run(["git", *a], cwd=cwd, env=env, capture_output=True, text=True, input=data)
+        if res.returncode != 0:
+            raise HarborError("LEDGER_UNAVAILABLE", f"the judge's clone: git {a[0]} failed ({one(res.stderr, 160)})")
+        return res.stdout
+
+    g("clone", "--quiet", "--shared", "--no-checkout", "--", str(ROOT), str(d), cwd=tmp)
+    g("checkout", "--quiet", "--detach", sha)
+
+    def refs(cwd: Path, prefix: str) -> dict[bytes, bytes]:  # bytes: a ref name need not be UTF-8
+        res = subprocess.run(["git", "for-each-ref", "--format=%(objectname) %(refname)", prefix], cwd=cwd, env=env,
+                             capture_output=True)
+        if res.returncode != 0:
+            raise HarborError("LEDGER_UNAVAILABLE", "the judge's clone: git for-each-ref failed")
+        return {line.split(b" ", 1)[1]: line.split(b" ", 1)[0] for line in res.stdout.splitlines() if b" " in line}
+
+    def update(lines: list[bytes]) -> None:
+        if not lines:
+            return
+        res = subprocess.run(["git", "update-ref", "--no-deref", "--stdin", "-z"], cwd=d, env=env, capture_output=True,
+                             input=b"".join(lines))
+        if res.returncode != 0:
+            raise HarborError("LEDGER_UNAVAILABLE", f"the judge's clone: git update-ref failed "
+                              f"({one(res.stderr.decode(errors='replace'), 160)})")
+
+    src, dst = f"refs/remotes/{REMOTE}/".encode(), b"refs/remotes/origin/"
+    want = {dst + r[len(src):]: o for r, o in refs(ROOT, src.decode()).items() if r != src + b"HEAD"}
+    want.update({dst + TRUNK.encode(): sha.encode(), f"refs/heads/{TRUNK}".encode(): sha.encode()})
+    # Two transactions: the clone's own refs (its origin refs, this clone's branches, and its local branch: HEAD is
+    # detached) go first, so none clashes by name (`topic` and `topic/x`, `main/wip` and `main`) with those written.
+    update([b"delete " + r + b"\0\0" for r in {**refs(d, "refs/remotes/origin/"), **refs(d, "refs/heads/")}])
+    update([b"update " + r + b"\0" + o + b"\0\0" for r, o in sorted(want.items())])
+    kk = d / ".keelokit"
+    if kk.is_symlink() or (os.path.lexists(kk) and not kk.is_dir()):
+        kk.unlink()
+    kk.mkdir(exist_ok=True)
+    for p in (kk / "bin", kk / "state.toml"):
+        if p.is_symlink() or p.is_file():
+            p.unlink()
+        elif p.is_dir():
+            shutil.rmtree(p)
+    (kk / "bin").mkdir()
+    files: dict[str, tuple[str, str]] = {}  # where in the clone -> (mode, blob of main's)
+    bin_dir, _ = main_resolve(main_tip, ".keelokit/bin")
+    if bin_dir and bin_dir[1] == "tree":
+        for entry in git_bytes("ls-tree", "-r", "-z", main_tip, "--", bin_dir[3] + "/").split(b"\0"):
+            meta, _, path = entry.decode("utf-8", "surrogateescape").partition("\t")
+            if not path or not path.startswith(bin_dir[3] + "/"):
+                continue
+            rel = path[len(bin_dir[3]) + 1:]
+            if ".." in Path(rel).parts or rel.startswith("/"):
+                continue
+            if (found := main_blob(main_tip, path)) is not None:  # a link: what it points to in main's tree
+                files[f"bin/{rel}"] = found
+    if (found := main_blob(main_tip, ".keelokit/state.toml")) is not None:
+        files["state.toml"] = found
+    for rel, (mode, obj) in files.items():
+        target = kk / rel
+        if not os.path.realpath(target.parent).startswith(os.path.realpath(kk) + os.sep) \
+                and os.path.realpath(target.parent) != os.path.realpath(kk):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink() or target.exists():
+            continue
+        target.write_bytes(git_bytes("cat-file", "blob", obj))
+        target.chmod(0o755 if mode == "100755" else 0o644)
+    return d
+
+
+def main_resolve(main_tip: str, path: str, hops: int = 8) -> tuple[tuple[str, str, str, str] | None, bool]:
+    """`path` in main's tree, every link on the way (a directory's too) resolved inside main's tree, up to `hops`
+    links: ((mode, kind, object, resolved path) or None, whether a link was met). None for nothing there, or a link
+    out of the tree."""
+    parts, met = [p for p in path.split("/") if p], False
+    cur: list[str] = []
+    while parts:
+        cand = "/".join(cur + [parts[0]])
+        out = git_bytes("ls-tree", "-z", main_tip, "--", cand).split(b"\0")[0].decode("utf-8", "surrogateescape")
+        if "\t" not in out:
+            return None, met
+        mode, kind, obj = out.split("\t", 1)[0].split()
+        if mode == "120000":
+            met, hops = True, hops - 1
+            link = git_bytes("cat-file", "blob", obj).decode("utf-8", "surrogateescape")
+            resolved = os.path.normpath(os.path.join("/".join(cur), link, *parts[1:]))
+            if hops < 0 or link.startswith("/") or resolved == ".." or resolved.startswith("../") or resolved == ".":
+                return None, met
+            parts, cur = [p for p in resolved.split("/") if p], []
+            continue
+        cur.append(parts.pop(0))
+        if parts and kind != "tree":
+            return None, met
+    return (mode, kind, obj, "/".join(cur)), met
+
+
+def main_blob(main_tip: str, path: str) -> tuple[str, str] | None:
+    """The (mode, blob) at `path` in main's tree, links resolved inside it; None otherwise."""
+    found, _ = main_resolve(main_tip, path)
+    return (found[0], found[2]) if found and found[1] == "blob" else None
+
+
+def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | None:
+    """HRB-3: the ok asks MAIN's ledger, never the convoy's. Whether there is one is main's tree: no
+    `.keelokit/bin/ledger.py` on the trunk tip, or one that answers another integer schema, is 0.5's ok (None). Else
+    the judge (judge_tree) runs main's ledger twice: on main as it is (`--json`, `check --ci --json`) and on the convoy
+    as if it had landed (`check --ci --json`). Refuses LEDGER_DIFF for a vessel with an error difference (the per-vessel
+    rules) and for any difference the convoy brings that main's own check doesn't have (an error, or DONE_TWICE /
+    UNKNOWN_STORY / UNATTRIBUTED at any level); LEDGER_UNAVAILABLE (fails closed) when the ledger can't answer.
+    Returns the vessels it checked, as (branch, head, story), which the ok's transaction must still find."""
+    if not main_tip:
+        return None
+    found, met = main_resolve(main_tip, LEDGER_TOOL)
+    if found is None and not met:  # no ledger.py on main, and no link on its way that might have led to one
+        return None
+    closed = (f"the ok fails closed while main's ledger can't answer: run python3 {LEDGER_TOOL} --json and check --ci "
+              f"--json on {TRUNK} by hand, fix what stops them, and give the ok again")
+    env = judge_env()
+    with tempfile.TemporaryDirectory(prefix="harbor-judge-") as tmp:
+        try:
+            base = judge_tree(Path(tmp), "main", main_tip, main_tip, env)
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
+            raise HarborError("LEDGER_UNAVAILABLE", f"the judge's clone of {TRUNK}: {one(e, 160)}; {closed}")
+        facts, why, kind = ledger_facts(base, env)
+        if kind == "other":
+            return None
+        if kind == "absent":  # main's tree has it, but no file of main's could stand for it (a link out of the tree)
+            why = f"{LEDGER_TOOL} on {TRUNK} is a link to nothing of {TRUNK}'s"
+        if facts is None:
+            raise HarborError("LEDGER_UNAVAILABLE", f"{why}; {closed}")
+        if facts["trunk_sha"] != main_tip:
+            raise HarborError("LEDGER_UNAVAILABLE", f"`ledger.py --json` read {TRUNK} at {short(facts['trunk_sha'])}, "
+                              f"the ok is for {short(main_tip)}: the ok fails closed; fetch and give the ok again")
+        diffs, why = ledger_check("--ci", root=base, env=env)
+        if diffs is None:
+            raise HarborError("LEDGER_UNAVAILABLE", f"{why}; {closed}")
+        stories = {}
+        for r in facts["stories"]:
+            if r["id"] in stories:
+                raise HarborError("LEDGER_UNAVAILABLE", f"`ledger.py --json` lists {one(r['id'], 40)} twice; {closed}")
+            stories[r["id"]] = r
+        brought = []
+        if tip:
+            try:
+                landed = judge_tree(Path(tmp), "convoy", tip, main_tip, env)
+            except (OSError, subprocess.SubprocessError, ValueError) as e:
+                raise HarborError("LEDGER_UNAVAILABLE", f"the judge's clone of {c.get('branch')}: {one(e, 160)}; {closed}")
+            after, why = ledger_check("--ci", root=landed, env=env)
+            if after is None:
+                raise HarborError("LEDGER_UNAVAILABLE", f"main's ledger on {c.get('branch')} as landed: {why}; {closed}")
+            had = {(d["code"], d["detail"]) for d in diffs}  # a level is the project's enforce, not the difference
+            brought = [d for d in after if (d["code"], d["detail"]) not in had
+                       and (d["level"] == "error" or d["code"] in BROUGHT_CODES)]
+        bad, vessels = [], c.get("vessels") or []
+        for v in vessels:
+            if found := vessel_ledger_diffs(v, main_tip, stories, diffs, judge=(base, env)):
+                bad.append(f"{v.get('branch')} ({v.get('story') or 'no story'}): " + "; ".join(found))
+        heads = tuple(v["head"] for v in vessels)  # each checked above: a full sha
+        if tip and (found := vessel_ledger_diffs({"branch": c.get("branch"), "head": tip}, main_tip, stories, diffs,
+                                                 heads, judge=(base, env))):
+            bad.append(f"{c.get('branch')} (its own commits: the integrator's fixes): " + "; ".join(found))
+        if brought:
+            bad.append(f"{c.get('branch')} as landed, by main's ledger: " + "; ".join(
+                f"{one(d['code'], 40)}: {one(d['detail'], 120)}" for d in brought[:10])
+                + (f" (+{len(brought) - 10} more)" if len(brought) > 10 else ""))
+    if bad:
+        raise HarborError("LEDGER_DIFF", f"convoy {c['number']}: the ledger holds it back:\n  " + "\n  ".join(bad)
+                          + "\nFix the vessel's commits (or take it out of the convoy: convoy defer before assembling "
+                          "again), assemble again, then the ok")
+    return [(v.get("branch"), v.get("head"), v.get("story")) for v in c.get("vessels") or []]
+
+
+def listed(items: list[str], n: int = 5) -> str:
+    return ", ".join(items[:n]) + (f" (+{len(items) - n} more)" if len(items) > n else "") if items else "none"
+
+
+def round_ledger(files: dict, main_tip: str | None) -> tuple[list[str], dict | None]:
+    """The round's ledger lines (`check --json`'s error-level differences, at most LEDGER_ROUND_LINES, or one line
+    saying it can't) and, when main moved since the logbook's head, what the ledger says entered: {"from", "stories",
+    "unattributed"} or {"from", "why"}. ([one line], None) without a schema-1 ledger."""
+    facts, why, kind = ledger_facts()
+    if kind in ("absent", "other"):
+        return ["ledger: not available"], None
+    before = (load(files, "harbor/main.toml") or {}).get("head")
+    moved = isinstance(before, str) and bool(main_tip) and before != main_tip
+    if facts is None:
+        return [f"ledger: not available ({one(why, 160)})"], ({"from": before, "why": "not available"} if moved else None)
+    diffs, why = ledger_check()
+    if diffs is None:
+        lines = [f"ledger: check not available ({one(why, 160)})"]
+    else:
+        errors = [d for d in diffs if d["level"] == "error"]
+        shown = errors if len(errors) <= LEDGER_ROUND_LINES else errors[:LEDGER_ROUND_LINES - 1]
+        lines = [f"ledger: {one(d['code'], 40)} {one(d['detail'], 180)}" for d in shown]
+        if len(errors) > len(shown):
+            lines.append(f"ledger: (+{len(errors) - len(shown)} more: python3 {LEDGER_TOOL} check)")
+    if not moved:
+        return lines, None
+    if facts["trunk_sha"] != main_tip:
+        return lines, {"from": before, "why": f"it read {TRUNK} at {short(facts['trunk_sha'])}"}
+    res = run("git", "rev-list", main_tip, f"^{before}", "--", check=False) if SHA.fullmatch(before) else None
+    if not res or res.returncode != 0:
+        return lines, {"from": before, "why": f"{short(before)} is not in this clone"}
+    order = res.stdout.split()[::-1]
+    entered = set(order)
+
+    def full(prefix) -> str | None:
+        p = prefix.lower() if isinstance(prefix, str) else ""
+        return next((s for s in order if s.startswith(p)), None) if len(p) >= 7 else None
+
+    stories = sorted({r["id"] for r in facts["stories"] if full(r.get("commit")) in entered})
+    unattributed = None
+    if diffs is not None:
+        loose = {full(m.group(1)) for d in diffs if d["code"] == "UNATTRIBUTED"
+                 and (m := re.match(r"\s*([0-9a-fA-F]{7,40})\b", d["detail"]))}
+        unattributed = [s for s in order if s in loose]
+    return lines, {"from": before, "stories": stories, "unattributed": unattributed}
+
+
+def loose_report(loose: dict | None, before: str | None) -> tuple[str, dict]:
+    """The loose move's line tail and the keys its row in main.toml gets ("" and {} without a ledger)."""
+    if loose is None:
+        return "", {}
+    if loose["from"] != before:
+        return "; ledger: not read for this move", {}
+    if "why" in loose:
+        return f"; ledger: {loose['why']}", {}
+    un = loose["unattributed"]
+    tail = f"; stories that entered: {listed([one(s, 40) for s in loose['stories']])}; unattributed: " \
+           + (listed([short(s) for s in un]) if un is not None else "not available (ledger.py check)")
+    return tail, {"stories": loose["stories"], **({"unattributed": un} if un is not None else {})}
+
+
 # --- HRB-4: the ok's level from Keelokit's two plans -----------------------------------------------
 # Keelokit's `verify_tools.py plan` prints the steps a change calls for ("all" for every step); `plan --all`
 # prints every step. It says nothing of packages, so Harbor asks pnpm for them with the selectors Keelokit's
@@ -2385,13 +2862,17 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
     tip = fetch(c["branch"])
     # A convoy never runs a scoped verify and then --all on the same head: once the ok's run is green, asking
     # for a level it already covers is refused, so nobody starts a second run on that head.
-    if c.get("state") == "verifying" and tip:
+    old = c.get("ok") or {}
+    stale = c.get("state") == "verifying" and old.get("ledger") == "checked" and old.get("head") != tip
+    if c.get("state") == "verifying" and tip and not stale:
         want = args.level or (c.get("ok") or {}).get("level")
         record = run_of(files, tip)
         if want and whole_green(record, main_tip) and covers(record.get("level"), want):
             raise HarborError("ALREADY_COVERED", f"{short(tip)} already has a green {level_text(record)} run against "
                               f"{short(main_tip)}, which covers {want}: sail it (convoy sail {args.number})")
     plans, why_not, level, by, reason, plan_line = None, "", args.level, "harbormaster", (args.reason or "").strip(), None
+    if stale and not level:  # the ok again, on the tip a fix moved it to: its level and reason stand
+        level, reason = old.get("level"), reason or old.get("reason") or ""
     if c.get("state") == "ready" and tip and tip == c.get("head") and c.get("base") == main_tip:
         plans, why_not = ok_plans(cfg, main_tip, tip)
     if plans:
@@ -2410,15 +2891,24 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
     ci, line = ci_health(cfg)
     if ci == "red":
         raise HarborError("MAIN_RED", f"{line}: {TRUNK} gets fixed before any convoy sails")
+    checked = ok_ledger_gate(c, main_tip, tip)  # HRB-3: outside the transaction (it takes time); the vessels are re-checked
 
     def mutate(files, h):
         c2 = convoy_of(files, args.number)
+        if checked is not None and [(v.get("branch"), v.get("head"), v.get("story"))
+                                    for v in c2.get("vessels") or []] != checked:
+            raise HarborError("CONVOY_MOVED", f"convoy {args.number}'s vessels changed while the ledger was asked: give "
+                              "the ok again")
         if not holds_watch(files, me):
             hm = watch(files)
             raise HarborError("NOT_HARBORMASTER", f"the watch is {hm.get('worker') or 'empty'}"
                               + (f" (expires {hm.get('expires')})" if hm.get("worker") else "")
                               + "; the ok comes from the harbormaster holding an unexpired watch")
-        require_open(c2, "ready")
+        o2 = c2.get("ok") or {}
+        if c2.get("state") == "verifying" and o2.get("ledger") == "checked" and o2.get("head") != c2.get("head"):
+            require_open(c2, "verifying")  # a stale ok: given again on the new tip
+        else:
+            require_open(c2, "ready")
         if c2.get("base") != main_tip:
             raise HarborError("MAIN_MOVED", f"{TRUNK} is at {short(main_tip)}, the convoy at {short(c2.get('base'))}: assemble again")
         if not c2.get("head") or tip != c2["head"]:
@@ -2430,6 +2920,8 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
                     "head": tip, "ci": line, "needs_person": needs_person(c2, cfg)}
         if plans:
             c2["ok"].update(level_by=by, plan=plan_line)
+        if checked is not None:
+            c2["ok"]["ledger"] = "checked"  # HRB-3: bound to this exact tip; any later commit makes it stale
         c2["state"] = "verifying"
         c2.setdefault("events", []).append(event(me["id"], "ok", f"{level}: {reason}"))
         save_convoy(files, c2)
@@ -2442,6 +2934,15 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
         print(f"harbor: it also needs the gatekeeper's yes before it sails ({why}): they review it and run, in their own "
               f"terminal, python3 <harbor.py> convoy approve {args.number}. The verify can run meanwhile")
     return 0
+
+
+def stale_ok(c: dict, tip: str, me: dict) -> None:
+    """HRB-3: an ok the ledger checked is bound to its tip; a commit after it (a fix, anything) makes it stale: the
+    sail refuses OK_STALE until a new ok, which asks the ledger again, is given on the new tip."""
+    ok = c.get("ok") or {}
+    if ok.get("ledger") == "checked" and ok.get("head") != tip and not ok.get("stale"):
+        ok["stale"] = f"{short(tip)} came after the ok at {short(ok.get('head'))}"
+        c.setdefault("events", []).append(event(me["id"], "ok-stale", f"{ok['stale']}: convoy sail {c['number']} --ok again"))
 
 
 def convoy_verify(args, cfg: dict, me: dict) -> int:
@@ -2469,6 +2970,7 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
             c2 = convoy_of(files, args.number)
             c2["head"] = tip
             record_fixes(c2, found, me)
+            stale_ok(c2, tip, me)
             c2.setdefault("events", []).append(event(me["id"], "verify-pass", f"{short(tip)}: its seal ({level_text(seal)}) "
                                                      "already covers it, nothing ran"))
             save_convoy(files, c2)
@@ -2494,6 +2996,7 @@ def convoy_verify(args, cfg: dict, me: dict) -> int:
         c2 = convoy_of(files, args.number)
         c2["head"] = tip
         record_fixes(c2, found, me)
+        stale_ok(c2, tip, me)
         c2.setdefault("events", []).append(event(me["id"], "verify-start", f"{short(tip)} on {me['host']}: "
                                                  f"`{template.format(base=main_tip, head=tip, branch=c['branch'])}`"))
         save_convoy(files, c2)
@@ -2655,10 +3158,11 @@ def preflight(c: dict, base: str, head: str, cfg: dict) -> tuple[list[str], list
     return failures, notes
 
 
-def record_main_move(files: dict, before: str | None, after: str, by: str, cause: str) -> None:
+def record_main_move(files: dict, before: str | None, after: str, by: str, cause: str, more: dict | None = None) -> None:
     mt = load(files, "harbor/main.toml") or {"schema": SCHEMA}
     if before and before != after:
-        mt.setdefault("moves", []).append({"from": before, "to": after, "seen": now(), "by": by, "cause": cause})
+        mt.setdefault("moves", []).append({"from": before, "to": after, "seen": now(), "by": by, "cause": cause,
+                                           **(more or {})})
     mt["head"] = after
     save(files, "harbor/main.toml", mt)
 
@@ -2682,6 +3186,9 @@ def convoy_sail(args, cfg: dict, me: dict) -> int:
     tip = fetch(c["branch"])
     if tip != c.get("head"):
         raise HarborError("CONVOY_MOVED", f"{c['branch']} is at {short(tip)}, its verify was for {short(c.get('head'))}: verify again")
+    if ok.get("ledger") == "checked" and ok.get("head") != tip:
+        raise HarborError("OK_STALE", f"the ok was for {short(ok.get('head'))} and {c['branch']} is at {short(tip)}: "
+                          f"a commit after the ok goes through the ledger too; convoy sail {args.number} --ok again")
     if ok.get("needs_person"):
         person = ok.get("person") or {}
         if person.get("head") != tip:
@@ -3505,6 +4012,7 @@ def cmd_harbormaster(args) -> int:
             for v in c.get("vessels") or []:
                 tips[v["branch"]] = fetch(v["branch"])
     ci, ci_line = ci_health(cfg) if has_keelokit() else ("", "")
+    ledger_lines, loose = round_ledger(files, main_tip) if has_keelokit() else ([], None)  # HRB-3
 
     def mutate(files, h):
         hm = watch(files)
@@ -3516,7 +4024,7 @@ def cmd_harbormaster(args) -> int:
         lines = [f"watch: {me['id']} until {hm['expires']}"] + ([f"{TRUNK}: {short(main_tip)} · {ci_line}"] if has_keelokit() else [])
         mt = load(files, "harbor/main.toml") or {}
         cs = convoys(files)
-        cause = ""
+        cause, more = "", {}
         if mt.get("head") and main_tip and mt["head"] != main_tip:
             cause = next((f"convoy {n}" for n, c in cs.items() if (c.get("sail") or {}).get("main_after") == main_tip), None)
             if not cause:
@@ -3530,9 +4038,11 @@ def cmd_harbormaster(args) -> int:
                         cause = f"convoy {n}"
             cause = cause or "loose"
             if cause == "loose":
-                lines.append(f"{TRUNK} moved {short(mt['head'])} → {short(main_tip)} with no convoy: a loose push, recorded")
+                tail, more = loose_report(loose, mt["head"])
+                lines.append(f"{TRUNK} moved {short(mt['head'])} → {short(main_tip)} with no convoy: a loose push, "
+                             f"recorded{tail}")
         if main_tip:
-            record_main_move(files, mt.get("head"), main_tip, me["id"], cause)
+            record_main_move(files, mt.get("head"), main_tip, me["id"], cause, more)
         limit = parse_ts(now()) - expiry(cfg)
         for wid, wk in workers(files).items():
             if wk.get("state") == "active" and wid != me["id"] and parse_ts(wk.get("last_seen") or now()) < limit:
@@ -3598,6 +4108,8 @@ def cmd_harbormaster(args) -> int:
 
     lines, urgent = transact(f"harbormaster control by {me['id']}", me["id"], mutate)
     print("\n".join(lines[:10]) + (f"\n… {len(lines) - 10} more in the logbook" if len(lines) > 10 else ""))
+    if ledger_lines:  # its own few lines (at most LEDGER_ROUND_LINES), never cut with the rest
+        print("\n".join(ledger_lines))
     # Late and escalated messages and dead watchers are never cut with the rest: they are what the gatekeeper is told.
     if urgent:
         print("\n".join(urgent[:10]) + (f"\n… {len(urgent) - 10} more: harbor.py msg status" if len(urgent) > 10 else ""))

@@ -20,6 +20,8 @@
 #   - taking a story is a lock in the logbook (HRB-2): two machines take one story, the second gets STORY_TAKEN
 #     with the holder; once the story is on main, Keelokit's real ledger makes a take STORY_ON_TRUNK (0.16.0 has
 #     no `show <ID> --json`: the state comes from `ledger.py --json`).
+#   - the ledger in the round and the ok (HRB-3): the ok asks the real `ledger.py --json` and `check --json` and
+#     records `ledger = "checked"`; the round reads `check --json` (never "not available" with the ledger).
 # In a container whose Playwright browsers don't match the template's, point PLAYWRIGHT_BROWSERS_PATH
 # at a folder with the right version name linked to the browser you have.
 set -euo pipefail
@@ -207,6 +209,10 @@ if [ -n "$ledger" ]; then
   echo "each vessel's merge ends with Convoy: 1"
 fi
 H s1 convoy sail 1 --ok --level changed --reason "apps/web and docs only"
+if [ -n "$ledger" ]; then  # HRB-3: the ok asked Keelokit's real ledger (check --json) and found nothing against the vessels
+  git -C "$a" show origin/harbor/log:harbor/convoys/1.toml | grep -q '^ledger = "checked"' || fail "the ok didn't ask the ledger"
+  echo "the ok asked ledger.py --json and check --json"
+fi
 H s1 convoy verify 1 >"$work/convoy-verify.log" 2>&1 || { tail -60 "$work/convoy-verify.log"; fail "the convoy verify is red"; }
 tail -3 "$work/convoy-verify.log"
 grep -q "nothing to run" "$work/convoy-verify.log" || fail "the convoy verify ran again what assemble's push had verified"
@@ -236,8 +242,14 @@ git -C "$a" checkout -q -b scratch
 printf 'export const notVerified = 1;\n' >"$a/apps/web/src/not-verified.ts"
 git -C "$a" add -A && git -C "$a" commit -qm "work in progress, never verified" -m "No-story: harness"
 before=$(history_lines "$a")
-H s1 harbormaster control
+out=$(H s1 harbormaster control)
+echo "$out"
 [ "$(history_lines "$a")" = "$before" ] || fail "a logbook write ran a verify"
+if [ -n "$ledger" ]; then  # HRB-3: the round read Keelokit's real check --json
+  ! grep -q "ledger: .*not available" <<<"$out" || fail "the round could not read the real ledger: $out"
+else
+  [ "$(grep -c "ledger: not available" <<<"$out")" = 1 ] || fail "without the ledger the round should say so once"
+fi
 outside=$(git -C "$a" ls-tree -r --name-only origin/harbor/log | grep -v '^harbor/' || true)
 [ -z "$outside" ] || fail "logbook files outside harbor/: $outside"
 
