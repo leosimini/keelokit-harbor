@@ -49,8 +49,9 @@
   as `stories`/`unattributed` in its row of `main.toml`. `convoy sail N --ok` refuses with `LEDGER_DIFF` a vessel
   with an unattributed own commit (`ledger.py attribution` when it answers, else its trailers: 0.16.0 has no
   `attribution`), a story the ledger doesn't know or whose state is unknown, a story its `Story:` commit closes
-  that is already on the trunk (`DONE_TWICE`; a `Part-of:` follow-up is not one), or a `check` difference naming
-  its story (0.16.0's `DONE_TWICE` warning included). **The ok fails closed:** when `ledger.py --json` answers
+  that is already on the trunk (`DONE_TWICE`, a merge's `Story:` included; a `Part-of:` follow-up is not one), or
+  a `check` difference naming its story; ids compare with case, as Keelokit's do. The convoy's own commits (the
+  integrator's fixes) are checked as a vessel's (0.16.0's `DONE_TWICE` warning included). **The ok fails closed:** when `ledger.py --json` answers
   schema 1 but the ledger then can't answer (a timeout, another exit, not UTF-8 JSON, wrong types, over 32 MiB,
   `main` read at another commit), it is `LEDGER_UNAVAILABLE`; with no schema-1 ledger the ok is 0.5's. The ok
   refuses `CONVOY_MOVED` when the vessels changed while the ledger was asked. The ledger now runs in its own

@@ -1536,7 +1536,12 @@ class TestHRB3Vessels(Phase6Ok):
     def test_a_lowercase_story_trailer_is_not_the_story(self):
         """Breaker round 1, F2: `Story: qa-1` is no id to Keelokit (STORY_ID is upper case)."""
         self.ready_with(("apps/web/a.ts", "feat: a\n\nStory: qa-1"), at_add={"HARBOR_FAKE_ATTRIBUTION": "usage"})
-        self.assertIn("UNKNOWN_STORY: qa-1", self.refused(self.ok_changed(), "LEDGER_DIFF"))
+        self.assertEqual(self.convoy()["state"], "waiting", "QA-1 is expected and qa-1 is not it")
+        res = self.ok_changed()
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("harbor: LEDGER_DIFF: ", res.stderr)
+        self.assertIn("UNKNOWN_STORY: qa-1", res.stderr)
+        self.assertNotIn("ok", self.convoy())
 
     def test_a_closing_commit_of_a_story_on_the_trunk_is_done_twice_under_another_vessel_story(self):
         self.ready_with(("apps/web/a.ts", "feat: a\n\nStory: QA-1"), ("apps/web/b.ts", "feat: b\n\nStory: QA-5"))

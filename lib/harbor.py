@@ -2399,20 +2399,23 @@ def diff_stories(d: dict) -> set[str]:
     return found
 
 
-def own_commits(head: str, main_tip: str) -> list[dict]:
-    """The commits `head` brings that main doesn't have, merges left out (the ledger attributes what a merge
-    brings), each with its Story:, Part-of: and No-story: trailers as git reads them (the message's last paragraph)."""
-    fmt = "%x1e%H%x1f%s" + "".join(f"%x1f%(trailers:key={k},valueonly,separator=%x2C)" for k in ("Story", "Part-of", "No-story"))
-    out = run("git", "log", "--no-merges", f"--format={fmt}%x1fend", head, f"^{main_tip}", "--").stdout  # unstripped:
+def own_commits(head: str, *exclude: str) -> list[dict]:
+    """The commits `head` brings that none of `exclude` has (main, and for a convoy's own commits its vessels), merges
+    too (`merge`: a merge's Story: closes a story as any other's; it is never unattributed itself, the ledger
+    attributes what it brings), each with its Story:, Part-of: and No-story: trailers as git reads them (the message's
+    last paragraph)."""
+    fmt = "%x1e%H%x1f%P%x1f%s" + "".join(f"%x1f%(trailers:key={k},valueonly,separator=%x2C)"
+                                         for k in ("Story", "Part-of", "No-story"))
+    out = run("git", "log", f"--format={fmt}%x1fend", head, *(f"^{x}" for x in exclude), "--").stdout  # unstripped:
     commits = []  # \x1e and \x1f are whitespace to str.strip, and an empty last field must stay a field
     for rec in out.split("\x1e")[1:]:
         parts = rec.split("\x1f")
-        if len(parts) != 6 or parts[5].strip() != "end":
+        if len(parts) != 7 or parts[6].strip() != "end":
             raise HarborError("GIT", f"git log of {short(head)} gave a record Harbor can't read")
-        sha, subject, story, part_of, no_story = parts[:5]
+        sha, parents, subject, story, part_of, no_story = parts[:6]
         ids = lambda v: [x.strip() for x in v.replace("\n", ",").split(",") if x.strip()]  # noqa: E731
-        commits.append({"sha": sha, "subject": subject, "story": ids(story), "part_of": ids(part_of),
-                        "no_story": bool(no_story.strip())})
+        commits.append({"sha": sha, "merge": len(parents.split()) > 1, "subject": subject, "story": ids(story),
+                        "part_of": ids(part_of), "no_story": bool(no_story.strip())})
     return commits
 
 
@@ -2431,31 +2434,34 @@ def id_list(v) -> list[str]:
     return [x.strip() for x in v if isinstance(x, str) and x.strip()] if isinstance(v, list) else []
 
 
-def vessel_ledger_diffs(v: dict, main_tip: str, stories: dict, diffs: list[dict]) -> list[str]:
-    """What the ledger holds against one vessel: its own commits unattributed, its stories unknown or of unknown
-    state, a story its Story: commit closes already on the trunk (DONE_TWICE: Keelokit counts Story: commits; a
-    Part-of: follow-up of a done story is not one), and `check`'s differences naming one of its stories."""
+def vessel_ledger_diffs(v: dict, main_tip: str, stories: dict, diffs: list[dict], exclude: tuple = ()) -> list[str]:
+    """What the ledger holds against one vessel (or, with `exclude` its vessels' heads, a convoy's own commits): its
+    own commits unattributed, its stories unknown or of unknown state, a story its Story: commit (a merge's too)
+    closes already on the trunk (DONE_TWICE: Keelokit counts Story: commits; a Part-of: follow-up of a done story is
+    not one), and `check`'s differences naming one of its stories. Ids compare with case, as Keelokit's do."""
     head = v.get("head")
     if not isinstance(head, str) or not SHA.fullmatch(head):
         raise HarborError("LEDGER_UNAVAILABLE", f"{v.get('branch')} has no commit for a head in the logbook: the ok "
                           "can't ask the ledger about it")
     found = ledger_attributions(main_tip, head)
     closing, ids, out = set(), dict.fromkeys(stories_of(v.get("story"))), []
-    for c in own_commits(head, main_tip):
+    for c in own_commits(head, main_tip, *exclude):
         rec = next((r for s, r in found.items() if c["sha"].startswith(s)), None)
         story, part_of = c["story"] + id_list((rec or {}).get("story")), c["part_of"] + id_list((rec or {}).get("part_of"))
-        closing |= {s.casefold() for s in story}
+        closing |= set(story)
         ids.update(dict.fromkeys(story + part_of))
+        if c["merge"]:
+            continue
         if not (rec["attributed"] if rec else bool(c["story"] or c["part_of"] or c["no_story"])):
             out.append(f"UNATTRIBUTED: {short(c['sha'])} {one(c['subject'], 60)!r}: no Story:, Part-of: or No-story: "
                        "in its message's last paragraph")
     for sid in ids:
-        rec = stories.get(sid.casefold())
+        rec = stories.get(sid)
         if rec is None:
-            out.append(f"UNKNOWN_STORY: {one(sid, 40)}: no story file of {TRUNK} has it")
+            out.append(f"UNKNOWN_STORY: {one(sid, 40)}: no story file of {TRUNK} has it (ids compare with case)")
         elif rec["state"] == "unknown":
             out.append(f"UNKNOWN_STORY: {one(sid, 40)}'s state is unknown ({one(rec.get('reason') or 'no reason', 80)})")
-        elif sid.casefold() in closing and rec["state"] in ON_TRUNK_STATES:
+        elif sid in closing and rec["state"] in ON_TRUNK_STATES:
             at = rec.get("commit")
             out.append(f"DONE_TWICE: {one(sid, 40)} is {rec['state']}" + (f" at {short(one(at, 40))}" if at else "")
                        + ": this vessel's Story: commit would close it again")
@@ -2465,7 +2471,7 @@ def vessel_ledger_diffs(v: dict, main_tip: str, stories: dict, diffs: list[dict]
     return list(dict.fromkeys(out))
 
 
-def ok_ledger_gate(c: dict, main_tip: str | None) -> list | None:
+def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | None:
     """HRB-3: the ok asks the ledger. None without a schema-1 ledger (0.5's ok); else the vessels it checked, as
     (branch, head, story), which the ok's transaction must still find. Refuses LEDGER_DIFF for a vessel with an
     error difference, LEDGER_UNAVAILABLE (fails closed) when the ledger can't answer."""
@@ -2484,11 +2490,16 @@ def ok_ledger_gate(c: dict, main_tip: str | None) -> list | None:
         raise HarborError("LEDGER_UNAVAILABLE", f"{why}; {closed}")
     stories = {}
     for r in facts["stories"]:
-        stories.setdefault(r["id"].casefold(), r)
-    bad = []
-    for v in c.get("vessels") or []:
+        if r["id"] in stories:
+            raise HarborError("LEDGER_UNAVAILABLE", f"`ledger.py --json` lists {one(r['id'], 40)} twice; {closed}")
+        stories[r["id"]] = r
+    bad, vessels = [], c.get("vessels") or []
+    for v in vessels:
         if found := vessel_ledger_diffs(v, main_tip, stories, diffs):
             bad.append(f"{v.get('branch')} ({v.get('story') or 'no story'}): " + "; ".join(found))
+    heads = tuple(v["head"] for v in vessels)  # each checked above: a full sha
+    if tip and (found := vessel_ledger_diffs({"branch": c.get("branch"), "head": tip}, main_tip, stories, diffs, heads)):
+        bad.append(f"{c.get('branch')} (its own commits: the integrator's fixes): " + "; ".join(found))
     if bad:
         raise HarborError("LEDGER_DIFF", f"convoy {c['number']}: the ledger holds {len(bad)} vessel(s) back:\n  "
                           + "\n  ".join(bad) + "\nFix the vessel's commits (or take it out of the convoy: convoy defer "
@@ -2688,7 +2699,7 @@ def convoy_ok(args, cfg: dict, me: dict) -> int:
     ci, line = ci_health(cfg)
     if ci == "red":
         raise HarborError("MAIN_RED", f"{line}: {TRUNK} gets fixed before any convoy sails")
-    checked = ok_ledger_gate(c, main_tip)  # HRB-3: outside the transaction (it takes time); the vessels are re-checked
+    checked = ok_ledger_gate(c, main_tip, tip)  # HRB-3: outside the transaction (it takes time); the vessels are re-checked
 
     def mutate(files, h):
         c2 = convoy_of(files, args.number)

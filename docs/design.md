@@ -1201,14 +1201,17 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   (optional keys; the logbook stays schema 1). A ledger that can't answer, or that read `main` at another commit
   than the round fetched, is said on the line and nothing is recorded.
 - **The ok** (`convoy sail N --ok`) decides what reaches main, so it fails closed. It asks `ledger.py --json`
-  and `check --json` before its transaction, then, for each vessel's own commits (`<main>..<head>`, merges left
-  out), `ledger.py attribution <main>..<head> --json` when it answers (Keelokit 0.16.0 doesn't: then the commits'
+  and `check --json` before its transaction, then, for each vessel's own commits (`<main>..<head>`), and for the
+  convoy's own commits (`<main>..<convoy head>` that no vessel brings: the integrator's fixes, as if a vessel of
+  `convoy/<n>`), `ledger.py attribution <main>..<head> --json` when it answers (Keelokit 0.16.0 doesn't: then the commits'
   `Story:`/`Part-of:`/`No-story:` trailers, read by git from the message's last paragraph, stand in; a commit only
   a trailered merge of the vessel attributes is then counted unattributed). It refuses `LEDGER_DIFF` (exit 1,
   one line per vessel, all of them) when a vessel has:
-  - `UNATTRIBUTED`: an own commit with no `Story:`, `Part-of:` or `No-story:`;
+  - `UNATTRIBUTED`: an own commit, not a merge, with no `Story:`, `Part-of:` or `No-story:` (a merge's trailers still
+    count: its `Story:` closes a story, its ids must be known);
   - `UNKNOWN_STORY`: a story (its recorded `story`, or an id its commits name) no story of `ledger.py --json` has
-    (ids compare without case), or one whose state is `unknown` (a cut history: the reason is given);
+    (ids compare with case, as Keelokit's `EPIC-NNN` do: `Story: qa-1` is no id to it), or one whose state is
+    `unknown` (a cut history: the reason is given); a ledger listing one id twice is `LEDGER_UNAVAILABLE`;
   - `DONE_TWICE`: a story one of its commits closes with `Story:` that the ledger says is `on-trunk` or later.
     Keelokit's `DONE_TWICE` counts `Story:` commits, so a `Part-of:` follow-up of a done story is not one;
   - a `check --json` difference naming one of its stories at level `error`, or with code `DONE_TWICE`,
