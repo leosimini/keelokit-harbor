@@ -1982,3 +1982,57 @@ class TestHRB3Breaker4(Phase6Ok):
         sh(self.repo.remote, "git", "update-ref", "refs/heads/topic/x", self.repo.main_sha())
         sh(self.a, "git", "fetch", "--quiet", "origin")
         self.ok_despite()
+
+
+class TestHRB3Breaker5(Phase6Ok):
+    """Breaker on d6dd828: a message git prints in another encoding, the clone's own branch below the trunk's name,
+    a link at directory level in main's tree."""
+
+    def test_a_message_that_is_not_utf8_is_no_traceback(self):
+        self.two_vessels_ready()
+        sh(self.a, "git", "fetch", "--quiet", "origin")
+        sh(self.a, "git", "checkout", "--quiet", "-B", "convoy/1", "origin/convoy/1")
+        (self.a / "fix.txt").write_text("fix\n")
+        sh(self.a, "git", "add", "-A")
+        msg = self.tmp / "msg"
+        msg.write_bytes(b"fix: caf\xe9 build\n\nPart-of: QA-1\n")
+        sh(self.a, "git", "-c", "i18n.commitEncoding=x-bogus", "commit", "--quiet", "-F", str(msg))
+        sh(self.a, "git", "push", "--quiet", "origin", "convoy/1")
+        ok(harbor(self.a, "convoy", "assemble", "1"))
+        res = self.ok_changed()
+        self.assertNotIn("Traceback", res.stderr)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_the_clones_own_branch_below_the_trunks_name_does_not_lock_the_ok_out(self):
+        self.two_vessels_ready()
+        sh(self.a, "git", "branch", "-D", "main")
+        sh(self.a, "git", "checkout", "--quiet", "-B", "main/wip", "origin/main")
+        res = self.ok_changed()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(self.convoy()["ok"]["ledger"], "checked")
+
+    def test_a_link_at_directory_level_in_main_is_resolved_in_mains_tree(self):
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        real = self.a / "tools/kkbin"
+        real.mkdir(parents=True)
+        (real / "ledger.py").write_text(FAKE_LEDGER)
+        sh(self.a, "git", "rm", "-q", "-r", ".keelokit/bin")
+        os.symlink("../tools/kkbin", self.a / ".keelokit/bin")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "bin via a link", "-m", "No-story: harness")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        self.stories(**{"QA-3": "in-progress"})  # QA-1 unknown: main's ledger refuses it
+        self.two_vessels_ready()
+        err = self.refused(self.ok_changed(), "LEDGER_DIFF")
+        self.assertIn("UNKNOWN_STORY: QA-1", err)
+        self.assertIn(["check", "--ci", "--json"], self.ledger_calls())
+
+    def test_a_link_at_directory_level_out_of_mains_tree_fails_closed(self):
+        sh(self.a, "git", "checkout", "--quiet", "main")
+        sh(self.a, "git", "rm", "-q", "-r", ".keelokit/bin")
+        os.symlink("/usr/lib", self.a / ".keelokit/bin")
+        sh(self.a, "git", "add", "-A")
+        sh(self.a, "git", "commit", "--quiet", "-m", "bin out of the tree", "-m", "No-story: harness")
+        sh(self.a, "git", "push", "--quiet", "origin", "main")
+        self.two_vessels_ready()
+        self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
