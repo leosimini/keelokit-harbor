@@ -2415,6 +2415,14 @@ def diff_stories(d: dict) -> set[str]:
     return found
 
 
+def git_bytes(*args: str) -> bytes:
+    """git's output as bytes; pathspecs are literal (a path is never a pattern)."""
+    res = subprocess.run(["git", "--literal-pathspecs", *args], cwd=ROOT, capture_output=True)
+    if res.returncode != 0:
+        raise HarborError("GIT", f"git {args[0]}… failed: {one(res.stderr.decode(errors='replace'), 300)}")
+    return res.stdout
+
+
 def own_commits(head: str, *exclude: str) -> list[dict]:
     """The commits `head` brings that none of `exclude` has (main, and for a convoy's own commits its vessels), merges
     too (`merge`: a merge's Story: closes a story as any other's; it is never unattributed itself, the ledger
@@ -2423,10 +2431,12 @@ def own_commits(head: str, *exclude: str) -> list[dict]:
     from `log -z`, NUL-separated (a message can't hold a NUL), and the two must name the same commits in the same
     order, or Harbor can't read them (a refusal)."""
     revs = [head, *(f"^{x}" for x in exclude)]
-    graph = [line.split() for line in run("git", "rev-list", "--parents", *revs, "--").stdout.splitlines() if line.strip()]
+    graph = [line.split() for line in git_bytes("rev-list", "--parents", *revs, "--").decode("ascii", "replace").splitlines()
+             if line.strip()]
     keys = ("Story", "Part-of", "No-story")
     fmt = "%H%x00%s" + "".join(f"%x00%(trailers:key={k},valueonly,separator=%x2C)" for k in keys)
-    tokens = run("git", "log", "-z", f"--format={fmt}", *revs, "--").stdout.split("\0")
+    # bytes, decoded leniently: git prints a message in its own encoding when it can't convert it to UTF-8
+    tokens = git_bytes("log", "-z", f"--format={fmt}", *revs, "--").decode("utf-8", "replace").split("\0")
     if tokens and tokens[-1] == "":
         tokens.pop()
     width = 2 + len(keys)
@@ -2542,9 +2552,9 @@ def judge_tree(tmp: Path, name: str, sha: str, main_tip: str, env: dict) -> Path
     src, dst = f"refs/remotes/{REMOTE}/".encode(), b"refs/remotes/origin/"
     want = {dst + r[len(src):]: o for r, o in refs(ROOT, src.decode()).items() if r != src + b"HEAD"}
     want.update({dst + TRUNK.encode(): sha.encode(), f"refs/heads/{TRUNK}".encode(): sha.encode()})
-    # Two transactions: the clone's own origin refs (this clone's branches) go first, so none clashes by name
-    # (`topic` and `topic/x`) with the ones written after.
-    update([b"delete " + r + b"\0\0" for r in refs(d, "refs/remotes/origin/")])
+    # Two transactions: the clone's own refs (its origin refs, this clone's branches, and its local branch: HEAD is
+    # detached) go first, so none clashes by name (`topic` and `topic/x`, `main/wip` and `main`) with those written.
+    update([b"delete " + r + b"\0\0" for r in {**refs(d, "refs/remotes/origin/"), **refs(d, "refs/heads/")}])
     update([b"update " + r + b"\0" + o + b"\0\0" for r, o in sorted(want.items())])
     kk = d / ".keelokit"
     if kk.is_symlink() or (os.path.lexists(kk) and not kk.is_dir()):
@@ -2556,46 +2566,63 @@ def judge_tree(tmp: Path, name: str, sha: str, main_tip: str, env: dict) -> Path
         elif p.is_dir():
             shutil.rmtree(p)
     (kk / "bin").mkdir()
-    for entry in git("ls-tree", "-r", "-z", main_tip, "--", ".keelokit/bin", ".keelokit/state.toml").split("\0"):
-        if not entry:
-            continue
-        meta, path = entry.split("\t", 1)
-        mode, kind, obj = meta.split()
-        target = d / path
-        if kind != "blob" or not path.startswith(".keelokit/") or ".." in Path(path).parts \
-                or os.path.realpath(target.parent) != os.path.realpath(d / Path(path).parent) \
-                or not os.path.realpath(target.parent).startswith(os.path.realpath(kk)):
+    files: dict[str, tuple[str, str]] = {}  # where in the clone -> (mode, blob of main's)
+    bin_dir, _ = main_resolve(main_tip, ".keelokit/bin")
+    if bin_dir and bin_dir[1] == "tree":
+        for entry in git_bytes("ls-tree", "-r", "-z", main_tip, "--", bin_dir[3] + "/").split(b"\0"):
+            meta, _, path = entry.decode("utf-8", "surrogateescape").partition("\t")
+            if not path or not path.startswith(bin_dir[3] + "/"):
+                continue
+            rel = path[len(bin_dir[3]) + 1:]
+            if ".." in Path(rel).parts or rel.startswith("/"):
+                continue
+            if (found := main_blob(main_tip, path)) is not None:  # a link: what it points to in main's tree
+                files[f"bin/{rel}"] = found
+    if (found := main_blob(main_tip, ".keelokit/state.toml")) is not None:
+        files["state.toml"] = found
+    for rel, (mode, obj) in files.items():
+        target = kk / rel
+        if not os.path.realpath(target.parent).startswith(os.path.realpath(kk) + os.sep) \
+                and os.path.realpath(target.parent) != os.path.realpath(kk):
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        if mode == "120000":  # never a link (the landed clone would follow it into the convoy's files): main's bytes
-            found = main_blob(main_tip, path)
-            if found is None:
-                continue  # a link to nothing of main's: no file here, and the ok fails closed on it
-            mode, obj = found
-        data = subprocess.run(["git", "cat-file", "blob", obj], cwd=ROOT, capture_output=True, check=True).stdout
-        target.write_bytes(data)
+        if target.is_symlink() or target.exists():
+            continue
+        target.write_bytes(git_bytes("cat-file", "blob", obj))
         target.chmod(0o755 if mode == "100755" else 0o644)
     return d
 
 
-def main_blob(main_tip: str, path: str, hops: int = 8) -> tuple[str, str] | None:
-    """The (mode, blob) a link at `path` in main's tree stands for: its target resolved inside main's tree, links
-    followed up to `hops` times. None for a target outside the tree, a directory, or nothing."""
-    for _ in range(hops):
-        out = run("git", "ls-tree", "-z", main_tip, "--", path, check=False).stdout.split("\0")[0]
+def main_resolve(main_tip: str, path: str, hops: int = 8) -> tuple[tuple[str, str, str, str] | None, bool]:
+    """`path` in main's tree, every link on the way (a directory's too) resolved inside main's tree, up to `hops`
+    links: ((mode, kind, object, resolved path) or None, whether a link was met). None for nothing there, or a link
+    out of the tree."""
+    parts, met = [p for p in path.split("/") if p], False
+    cur: list[str] = []
+    while parts:
+        cand = "/".join(cur + [parts[0]])
+        out = git_bytes("ls-tree", "-z", main_tip, "--", cand).split(b"\0")[0].decode("utf-8", "surrogateescape")
         if "\t" not in out:
-            return None
+            return None, met
         mode, kind, obj = out.split("\t", 1)[0].split()
-        if kind != "blob":
-            return None
-        if mode != "120000":
-            return mode, obj
-        link = subprocess.run(["git", "cat-file", "blob", obj], cwd=ROOT, capture_output=True).stdout.decode("utf-8", "replace")
-        resolved = os.path.normpath(os.path.join(os.path.dirname(path), link))
-        if link.startswith("/") or resolved.startswith("..") or resolved in (".", ""):
-            return None
-        path = resolved
-    return None
+        if mode == "120000":
+            met, hops = True, hops - 1
+            link = git_bytes("cat-file", "blob", obj).decode("utf-8", "surrogateescape")
+            resolved = os.path.normpath(os.path.join("/".join(cur), link, *parts[1:]))
+            if hops < 0 or link.startswith("/") or resolved == ".." or resolved.startswith("../") or resolved == ".":
+                return None, met
+            parts, cur = [p for p in resolved.split("/") if p], []
+            continue
+        cur.append(parts.pop(0))
+        if parts and kind != "tree":
+            return None, met
+    return (mode, kind, obj, "/".join(cur)), met
+
+
+def main_blob(main_tip: str, path: str) -> tuple[str, str] | None:
+    """The (mode, blob) at `path` in main's tree, links resolved inside it; None otherwise."""
+    found, _ = main_resolve(main_tip, path)
+    return (found[0], found[2]) if found and found[1] == "blob" else None
 
 
 def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | None:
@@ -2606,7 +2633,10 @@ def ok_ledger_gate(c: dict, main_tip: str | None, tip: str | None) -> list | Non
     rules) and for any difference the convoy brings that main's own check doesn't have (an error, or DONE_TWICE /
     UNKNOWN_STORY / UNATTRIBUTED at any level); LEDGER_UNAVAILABLE (fails closed) when the ledger can't answer.
     Returns the vessels it checked, as (branch, head, story), which the ok's transaction must still find."""
-    if not main_tip or run("git", "cat-file", "-e", f"{main_tip}:{LEDGER_TOOL}", check=False).returncode != 0:
+    if not main_tip:
+        return None
+    found, met = main_resolve(main_tip, LEDGER_TOOL)
+    if found is None and not met:  # no ledger.py on main, and no link on its way that might have led to one
         return None
     closed = (f"the ok fails closed while main's ledger can't answer: run python3 {LEDGER_TOOL} --json and check --ci "
               f"--json on {TRUNK} by hand, fix what stops them, and give the ok again")

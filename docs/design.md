@@ -1219,10 +1219,12 @@ Harbor's logbook, never writing it. Harbor adds what makes the two fit; the plan
   convoy breaks.
 - **What the judge's clones copy.** A link in main's `.keelokit/bin/` (or `state.toml`) is never written as a link
   (in the landed clone it would lead into the convoy's files): it is the blob it points to inside main's tree,
-  links followed up to eight times; one pointing out of the tree, or at nothing, leaves no file, and the ok fails
-  closed (`LEDGER_UNAVAILABLE`). Refs are read and written as bytes (a branch name need not be UTF-8), and the
-  clone's own origin refs are deleted in a transaction of their own before this clone's are written, so a local
-  `topic` and a remote `topic/x` don't clash. Residual: Keelokit 0.16.0 reads some rules from the trunk's committed
+  links followed up to eight times, a directory's on the way too (`.keelokit/bin` a link to `tools/kkbin` copies
+  that directory's files); one pointing out of the tree, or at nothing, leaves no file, and the ok fails closed
+  (`LEDGER_UNAVAILABLE`): a link met on the way to `ledger.py` counts as a ledger, never as none. A vessel's commits
+  are read as bytes and decoded leniently (git prints a message it can't convert in its own encoding). Refs are read and written as bytes (a branch name need not be UTF-8), and the
+  clone's own refs (origin refs and local branches; its HEAD is detached) are deleted in a transaction of their own
+  before this clone's are written, so a local `topic` and a remote `topic/x`, or `main/wip` and `main`, don't clash. Residual: Keelokit 0.16.0 reads some rules from the trunk's committed
   tree (`[ledger.approval]` in its committed `state.toml`, `critical.toml`, the review files); in the landed clone
   that tree is the convoy's, which Harbor can't replace without rewriting it.
 - **The ok is bound to the convoy's exact tip.** An ok that asked the ledger records `ledger = "checked"` and its
