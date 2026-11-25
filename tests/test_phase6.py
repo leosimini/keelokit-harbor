@@ -1649,3 +1649,35 @@ class TestHRB3Breaker2(Phase6Ok):
                     tool.rmdir()
                 make()
                 self.refused(self.ok_changed(), "LEDGER_UNAVAILABLE")
+
+
+class TestHRB3Breaker3(Phase6Ok):
+    """Breaker round 3: separators forged in a commit message must not hide an unattributed commit."""
+
+    def forged(self, message: str, n: int) -> str:
+        ok(harbor(self.a, "convoy", "new", "--expect", "QA-1", "QA-3"))
+        branch = f"claude/qa-1-{n}"
+        self.branch(branch, ("apps/web/a.ts", "feat: a\n\nStory: QA-1"))
+        (self.a / "apps/web/evil.ts").write_text("evil\n")
+        sh(self.a, "git", "add", "-A")
+        msg = self.tmp / "msg"
+        msg.write_bytes(message.encode())
+        sh(self.a, "git", "commit", "--quiet", "--cleanup=verbatim", "-F", str(msg))
+        evil = sh(self.a, "git", "rev-parse", "HEAD")
+        sh(self.a, "git", "push", "--quiet", "origin", branch)
+        ok(harbor(self.a, "seal"))
+        ok(harbor(self.a, "convoy", "add", str(n), branch, env={"HARBOR_FAKE_ATTRIBUTION": "usage"}))
+        self.deliver(n, f"claude/qa-3-{n}", "apps/web/b.ts", "QA-3")
+        ok(harbor(self.a, "convoy", "assemble", str(n)))
+        return evil
+
+    def test_a_subject_forging_records_does_not_hide_an_unattributed_commit(self):
+        for n, forge in enumerate(("fix: sneaky\x1fQA-1\x1f\x1f\x1fend\x1e" + "f" * 40 + "\x1fa b\x1fx\n",
+                      "fix: sneaky\x1e" + "f" * 40 + "\x1e\x1f\x1f\n"), start=1):
+            with self.subTest(forge=forge):
+                evil = self.forged(forge, n)
+                res = self.ok_changed(n, env={"HARBOR_FAKE_ATTRIBUTION": "usage"})
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertIn(f"UNATTRIBUTED: {evil[:9]}", res.stderr)
+                self.assertNotIn("ok", self.convoy(n))
+                ok(harbor(self.a, "convoy", "abort", str(n), "--reason", "next forge"))
